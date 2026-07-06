@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  trading_bot:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: trading_bot
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Zurich
+      - ALPACA_API_KEY=${ALPACA_API_KEY}
+      - ALPACA_SECRET_KEY=${ALPACA_SECRET_KEY}
+      - ALPACA_BASE_URL=${ALPACA_BASE_URL:-https://paper-api.alpaca.markets}
+      - DAILY_STOP_LOSS=${DAILY_STOP_LOSS:-1000}
+      - MAX_POSITIONS=${MAX_POSITIONS:-5}
+      - POSITION_SIZE_USD=${POSITION_SIZE_USD:-500}
+      - TRADING_SYMBOLS=${TRADING_SYMBOLS:-AAPL,MSFT,GOOGL}
+      - DB_PATH=/data/trading_state.db
+    volumes:
+      - db_data:/data
+    networks:
+      - trading_network
+    ports:
+      - "8000:8000"
+
+  trading_ui:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: trading_ui
+    restart: unless-stopped
+    depends_on:
+      - trading_bot
+    environment:
+      - TZ=Europe/Zurich
+      - ALPACA_API_KEY=${ALPACA_API_KEY}
+      - ALPACA_SECRET_KEY=${ALPACA_SECRET_KEY}
+      - ALPACA_BASE_URL=${ALPACA_BASE_URL:-https://paper-api.alpaca.markets}
+      - DB_PATH=/data/trading_state.db
+      - API_BASE_URL=http://trading_bot:8000
+    volumes:
+      - db_data:/data
+    networks:
+      - trading_network
+    ports:
+      - "8501:8501"
+
+volumes:
+  db_data:
+    driver: local
+
+networks:
+  trading_network:
+    driver: bridge
