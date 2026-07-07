@@ -52,6 +52,7 @@ DEFAULT_CONFIG: Dict[str, float] = {
     "news_cutoff": 0.55,       # minimum sentiment score required to trade
     "atr_stop_mult": 1.5,      # bracket stop-loss distance, ATR multiples
     "atr_target_mult": 2.5,    # bracket take-profit distance, ATR multiples
+    "analyst_enabled": 0.0,    # 0 = off, 1 = on — LLM strategy analyst toggle
 }
 
 STATUS_RUNNING = "RUNNING"

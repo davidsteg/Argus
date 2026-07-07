@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query
 
 import regime as regime_module
 import universe
@@ -334,5 +334,99 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
         if not ok:
             raise HTTPException(status_code=409, detail=message)
         return {"reset": True, "message": message, "status": db.get_status()}
+
+    # ------------------------------------------------------------------ #
+    # analyst endpoints
+    # ------------------------------------------------------------------ #
+
+    @app.get("/analyst/optimization")
+    async def analyst_optimization() -> Dict[str, Any]:
+        return {
+            "report": db.get_state("analyst_optimization"),
+            "enabled": bool(db.get_config().get("analyst_enabled", 0.0)),
+        }
+
+    @app.get("/analyst/trades")
+    async def analyst_trades() -> Dict[str, Any]:
+        return {
+            "report": db.get_state("analyst_trades"),
+            "enabled": bool(db.get_config().get("analyst_enabled", 0.0)),
+        }
+
+    @app.post("/analyst/review")
+    async def analyst_review() -> Dict[str, Any]:
+        from analyst import get_analyst
+
+        analyst = get_analyst()
+        if not analyst.available:
+            raise HTTPException(
+                status_code=503,
+                detail="Analyst unavailable — set the base URL in the Analyst tab",
+            )
+        if not analyst.enabled(db):
+            raise HTTPException(
+                status_code=400,
+                detail="Analyst is disabled — enable it from the dashboard first",
+            )
+        db.add_log("INFO", "Manual trade review triggered via API")
+        trades = db.get_trades(200)
+        stats = db.get_trade_stats()
+        config = db.get_config()
+        regime_info = await asyncio.to_thread(regime_module.get_regime)
+        report = await asyncio.to_thread(
+            analyst.review_trades, trades, stats, config, regime_info, db
+        )
+        if report is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Trade review failed — check backend logs",
+            )
+        return {"reviewed": True, "report": report}
+
+    @app.post("/analyst/toggle")
+    async def analyst_toggle() -> Dict[str, Any]:
+        config = db.get_config()
+        current = bool(config.get("analyst_enabled", 0.0))
+        new_value = 0.0 if current else 1.0
+        db.set_config({"analyst_enabled": new_value})
+        state = "enabled" if new_value else "disabled"
+        db.add_log("INFO", f"Analyst {state} from dashboard")
+        return {"analyst_enabled": bool(new_value)}
+
+    @app.get("/analyst/config")
+    async def analyst_get_config() -> Dict[str, Any]:
+        from analyst import get_analyst
+
+        return {
+            "config": get_analyst().get_config(),
+            "available": get_analyst().available,
+            "enabled": bool(db.get_config().get("analyst_enabled", 0.0)),
+        }
+
+    @app.post("/analyst/config")
+    async def analyst_set_config(
+        updates: Dict[str, Any] = Body(...)
+    ) -> Dict[str, Any]:
+        from analyst import get_analyst
+
+        allowed = {"base_url", "model", "trade_review_interval_hours",
+                    "trade_lookback"}
+        filtered = {k: v for k, v in updates.items() if k in allowed}
+        if not filtered:
+            raise HTTPException(
+                status_code=400,
+                detail="No valid config keys provided",
+            )
+        analyst = get_analyst()
+        new_config = analyst.configure(filtered, db)
+        db.add_log(
+            "INFO",
+            "Analyst config updated: "
+            + ", ".join(f"{k}={v}" for k, v in filtered.items()),
+        )
+        return {
+            "config": new_config,
+            "available": analyst.available,
+        }
 
     return app

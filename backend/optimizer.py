@@ -351,10 +351,12 @@ def run_optimization() -> Optional[Dict[str, float]]:
         )
         return None
 
-    # news_cutoff is not part of the technical grid; carry the live value
-    # forward so a config read after this write stays complete.
+    # news_cutoff and analyst_enabled are not part of the technical grid;
+    # carry the live values forward so a config read after this write stays
+    # complete.
     current = db.get_config()
     best_params["news_cutoff"] = current["news_cutoff"]
+    best_params["analyst_enabled"] = current.get("analyst_enabled", 0.0)
     db.set_config(best_params)
 
     total_return, drawdown, trades = train_stats
@@ -379,6 +381,18 @@ def run_optimization() -> Optional[Dict[str, float]]:
         best_params,
         best_train_score,
     )
+
+    # Post-optimization LLM review (if analyst is enabled).
+    try:
+        from analyst import get_analyst
+        import regime as regime_module
+
+        analyst = get_analyst()
+        regime_info = regime_module.get_regime()
+        analyst.review_optimization(ranked, best_params, regime_info, db)
+    except Exception as exc:
+        logger.error("Post-optimization analyst review failed: %s", exc)
+
     return best_params
 
 

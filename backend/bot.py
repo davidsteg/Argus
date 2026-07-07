@@ -49,6 +49,7 @@ from dotenv import load_dotenv
 
 import regime
 import universe
+from analyst import get_analyst
 from indicators import bracket_distances, compute_atr, compute_rsi, compute_vwap
 from sentiment import get_sentiment_provider
 from shared.database import STATUS_KILLED, STATUS_RUNNING, get_db
@@ -665,6 +666,24 @@ class ArgusBot:
                 evaluated[symbol] = "no-signal"
         cycle["evaluated"] = evaluated
         cycle["stage"] = "complete"
+
+        # Periodic LLM trade review (if analyst is enabled and enough time
+        # has passed since the last review).
+        try:
+            analyst = get_analyst()
+            if analyst.should_review_trades():
+                trades = self.db.get_trades(200)
+                stats = self.db.get_trade_stats()
+                await asyncio.to_thread(
+                    analyst.review_trades,
+                    trades,
+                    stats,
+                    self.config,
+                    regime_info,
+                    self.db,
+                )
+        except Exception as exc:
+            logger.error("Trade review failed: %s", exc)
 
 
 class EngineController:

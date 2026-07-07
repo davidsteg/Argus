@@ -179,6 +179,9 @@ def fetch_snapshot(log_limit: int, equity_since: Optional[str]) -> Dict[str, Any
         ),
         "last_cycle": db.get_state("last_cycle", {}) or {},
         "environment": db.get_state("environment", {}) or {},
+        "analyst_optimization": db.get_state("analyst_optimization"),
+        "analyst_trades": db.get_state("analyst_trades"),
+        "analyst_config": db.get_state("analyst_config") or {},
     }
 
 
@@ -250,6 +253,30 @@ def call_backend(path: str, timeout: float) -> Dict[str, Any]:
     """Blocking POST to the backend debug API (run via io_bound)."""
     url = f"{BACKEND_API_URL.rstrip('/')}{path}"
     request = urllib.request.Request(url, data=b"", method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode() or "{}")
+            return {"ok": True, "data": payload}
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = json.loads(exc.read().decode()).get("detail", str(exc))
+        except Exception:
+            detail = str(exc)
+        return {"ok": False, "error": f"HTTP {exc.code}: {detail}"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def call_backend_json(
+    path: str, body: Dict[str, Any], timeout: float
+) -> Dict[str, Any]:
+    """Blocking POST with JSON body to the backend debug API."""
+    url = f"{BACKEND_API_URL.rstrip('/')}{path}"
+    data = json.dumps(body).encode()
+    request = urllib.request.Request(
+        url, data=data, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode() or "{}")
@@ -680,6 +707,7 @@ def dashboard() -> None:
     ) as tabs:
         overview_tab = ui.tab("Overview", icon="dashboard")
         trades_tab = ui.tab("Trades", icon="receipt_long")
+        analyst_tab = ui.tab("Analyst", icon="psychology")
         settings_tab = ui.tab("Settings", icon="tune")
         logs_tab = ui.tab("Logs", icon="terminal")
 
@@ -853,6 +881,214 @@ def dashboard() -> None:
                     trades_empty = ui.label("No trades recorded yet").classes(
                         f"text-sm {TEXT_MUTED}"
                     )
+
+        # ============================ ANALYST ========================== #
+        with ui.tab_panel(analyst_tab).classes("p-6"):
+            with ui.column().classes("w-full gap-4"):
+                # Toggle bar
+                with card():
+                    with ui.row().classes("w-full items-center justify-between"):
+                        with ui.row().classes("items-center gap-3"):
+                            ui.label("🧠 Strategy Analyst").classes(
+                                "text-lg font-semibold text-white"
+                            )
+                            analyst_model_label = ui.label("").classes(
+                                f"text-xs {TEXT_MUTED}"
+                            )
+                        analyst_toggle = ui.switch(
+                            "Enabled", value=False
+                        ).props("color=emerald")
+                        analyst_toggle.on_value_change(
+                            lambda e: on_analyst_toggle(e.value)
+                        )
+
+                # Connection & schedule config
+                with card():
+                    card_title("🔌 Connection & Schedule")
+                    ui.label(
+                        "Changes take effect immediately — no restart needed. "
+                        "The base URL must point to an OpenAI-compatible API "
+                        "(e.g. cloud Ollama endpoint)."
+                    ).classes(f"text-xs {TEXT_MUTED}")
+                    with ui.row().classes(
+                        "w-full items-center justify-between gap-4 flex-nowrap"
+                    ):
+                        with ui.column().classes("gap-0 min-w-0"):
+                            ui.label("Base URL").classes("text-sm text-white")
+                            ui.label(
+                                "OpenAI-compatible API endpoint"
+                            ).classes(f"text-xs {TEXT_MUTED}")
+                        analyst_base_url_input = ui.input(
+                            value="", placeholder="https://..."
+                        ).props("dense outlined").classes("w-80 shrink-0")
+                    with ui.row().classes(
+                        "w-full items-center justify-between gap-4 flex-nowrap"
+                    ):
+                        with ui.column().classes("gap-0 min-w-0"):
+                            ui.label("Model").classes("text-sm text-white")
+                            ui.label(
+                                "Model name as known by the API"
+                            ).classes(f"text-xs {TEXT_MUTED}")
+                        analyst_model_input = ui.input(
+                            value="deepseek-r1", placeholder="deepseek-r1"
+                        ).props("dense outlined").classes("w-56 shrink-0")
+                    with ui.row().classes(
+                        "w-full items-center justify-between gap-4 flex-nowrap"
+                    ):
+                        with ui.column().classes("gap-0 min-w-0"):
+                            ui.label("Trade review interval (hours)").classes(
+                                "text-sm text-white"
+                            )
+                            ui.label(
+                                "How often to review trades during market hours"
+                            ).classes(f"text-xs {TEXT_MUTED}")
+                        analyst_interval_input = ui.number(
+                            value=4, min=1, max=24, step=1
+                        ).props("dense outlined").classes("w-24 shrink-0")
+                    with ui.row().classes(
+                        "w-full items-center justify-between gap-4 flex-nowrap"
+                    ):
+                        with ui.column().classes("gap-0 min-w-0"):
+                            ui.label("Trade lookback").classes(
+                                "text-sm text-white"
+                            )
+                            ui.label(
+                                "Number of recent trades to analyze"
+                            ).classes(f"text-xs {TEXT_MUTED}")
+                        analyst_lookback_input = ui.number(
+                            value=50, min=10, max=500, step=10
+                        ).props("dense outlined").classes("w-24 shrink-0")
+
+                    async def apply_analyst_config() -> None:
+                        updates = {
+                            "base_url": analyst_base_url_input.value or "",
+                            "model": analyst_model_input.value or "deepseek-r1",
+                            "trade_review_interval_hours": float(
+                                analyst_interval_input.value or 4
+                            ),
+                            "trade_lookback": int(
+                                analyst_lookback_input.value or 50
+                            ),
+                        }
+                        result = await run.io_bound(
+                            call_backend_json, "/analyst/config", updates, 10.0
+                        )
+                        if result["ok"]:
+                            ui.notify(
+                                "Analyst config applied — "
+                                + (
+                                    "client connected"
+                                    if result["data"].get("available")
+                                    else "base URL may be unreachable"
+                                ),
+                                type="positive",
+                            )
+                        else:
+                            ui.notify(
+                                f"Config failed: {result['error']}",
+                                type="negative",
+                                timeout=10000,
+                            )
+
+                    with ui.row().classes("w-full gap-2 mt-2"):
+                        ui.button(
+                            "Apply config", on_click=apply_analyst_config
+                        ).props("no-caps unelevated color=primary")
+                        analyst_status_label = ui.label("").classes(
+                            f"text-xs {TEXT_MUTED}"
+                        )
+
+                with ui.row().classes("w-full gap-4 items-start flex-nowrap"):
+                    # Optimization review card
+                    with ui.column().classes("gap-4 grow basis-0 min-w-0"):
+                        with card():
+                            card_title("🔬 Post-Optimization Review")
+                            opt_summary = ui.label("").classes(
+                                "text-sm text-gray-300 leading-relaxed"
+                            )
+                            opt_warnings_label = ui.label("Warnings").classes(
+                                f"text-xs font-semibold {TEXT_MUTED} mt-3"
+                            )
+                            opt_warnings = ui.column().classes("w-full gap-1")
+                            opt_suggestions_label = ui.label(
+                                "Suggestions"
+                            ).classes(f"text-xs font-semibold {TEXT_MUTED} mt-3")
+                            opt_suggestions = ui.column().classes("w-full gap-1")
+                            with ui.row().classes(
+                                "w-full items-center justify-between mt-3"
+                            ):
+                                opt_confidence = ui.label("").classes(
+                                    f"text-xs {TEXT_MUTED}"
+                                )
+                                opt_timestamp = ui.label("").classes(
+                                    f"text-xs {TEXT_MUTED}"
+                                )
+                            opt_empty = ui.label(
+                                "No optimization review yet — runs after the "
+                                "nightly grid search"
+                            ).classes(f"text-sm {TEXT_MUTED}")
+
+                    # Trade review card
+                    with ui.column().classes("gap-4 grow basis-0 min-w-0"):
+                        with card():
+                            with ui.row().classes(
+                                "w-full items-center justify-between"
+                            ):
+                                card_title("📊 Trade Performance Review")
+                                async def run_trade_review() -> None:
+                                    review_button.disable()
+                                    review_spinner.set_visibility(True)
+                                    ui.notify(
+                                        "Running trade review…", type="info"
+                                    )
+                                    result = await run.io_bound(
+                                        call_backend, "/analyst/review", 120.0
+                                    )
+                                    review_spinner.set_visibility(False)
+                                    review_button.enable()
+                                    if result["ok"]:
+                                        ui.notify(
+                                            "Trade review complete",
+                                            type="positive",
+                                        )
+                                    else:
+                                        ui.notify(
+                                            f"Review failed: {result['error']}",
+                                            type="negative",
+                                            timeout=10000,
+                                        )
+
+                                with ui.row().classes("items-center gap-2"):
+                                    review_spinner = ui.spinner(size="sm")
+                                    review_spinner.set_visibility(False)
+                                    review_button = ui.button(
+                                        "Run review now",
+                                        on_click=run_trade_review,
+                                    ).props("no-caps flat dense")
+                            trade_summary = ui.label("").classes(
+                                "text-sm text-gray-300 leading-relaxed"
+                            )
+                            trade_warnings_label = ui.label("Warnings").classes(
+                                f"text-xs font-semibold {TEXT_MUTED} mt-3"
+                            )
+                            trade_warnings = ui.column().classes("w-full gap-1")
+                            trade_suggestions_label = ui.label(
+                                "Suggestions"
+                            ).classes(f"text-xs font-semibold {TEXT_MUTED} mt-3")
+                            trade_suggestions = ui.column().classes("w-full gap-1")
+                            with ui.row().classes(
+                                "w-full items-center justify-between mt-3"
+                            ):
+                                trade_confidence = ui.label("").classes(
+                                    f"text-xs {TEXT_MUTED}"
+                                )
+                                trade_timestamp = ui.label("").classes(
+                                    f"text-xs {TEXT_MUTED}"
+                                )
+                            trade_empty = ui.label(
+                                "No trade review yet — runs every few hours "
+                                "during market hours"
+                            ).classes(f"text-sm {TEXT_MUTED}")
 
         # ============================ SETTINGS ========================= #
         with ui.tab_panel(settings_tab).classes("p-6"):
@@ -1494,6 +1730,130 @@ def dashboard() -> None:
             else:
                 label.set_text(str(value))
 
+    def _render_analyst_card(
+        report: Optional[Dict[str, Any]],
+        summary_label: ui.label,
+        warnings_label: ui.label,
+        warnings_col: ui.column,
+        suggestions_label: ui.label,
+        suggestions_col: ui.column,
+        confidence_label: ui.label,
+        timestamp_label: ui.label,
+        empty_label: ui.label,
+    ) -> None:
+        if not report:
+            empty_label.set_visibility(True)
+            summary_label.set_text("")
+            warnings_label.set_visibility(False)
+            warnings_col.clear()
+            suggestions_label.set_visibility(False)
+            suggestions_col.clear()
+            confidence_label.set_text("")
+            timestamp_label.set_text("")
+            return
+        empty_label.set_visibility(False)
+        summary_label.set_text(report.get("summary", ""))
+        warnings = report.get("warnings") or []
+        warnings_label.set_visibility(bool(warnings))
+        warnings_col.clear()
+        with warnings_col:
+            for w in warnings:
+                ui.label(f"⚠ {w}").classes(
+                    "text-xs text-amber-400 bg-[#1d2432] "
+                    "border border-[#2a3140] rounded-lg px-2 py-1"
+                )
+        suggestions = report.get("suggestions") or []
+        suggestions_label.set_visibility(bool(suggestions))
+        suggestions_col.clear()
+        with suggestions_col:
+            for i, s in enumerate(suggestions, 1):
+                ui.label(f"{i}. {s}").classes(
+                    "text-xs text-gray-300"
+                )
+        conf = report.get("confidence")
+        confidence_label.set_text(
+            f"Confidence: {conf * 100:.0f}%" if conf is not None else ""
+        )
+        reviewed = report.get("reviewed_at")
+        timestamp_label.set_text(
+            f"Reviewed {fmt_short(reviewed)}" if reviewed else ""
+        )
+
+    def render_analyst(snapshot: Dict[str, Any]) -> None:
+        config = snapshot["config"]
+        enabled = bool(config.get("analyst_enabled", 0.0))
+        analyst_toggle.set_value(enabled)
+
+        analyst_cfg = snapshot.get("analyst_config") or {}
+        model = analyst_cfg.get("model", "deepseek-r1")
+        base_url = analyst_cfg.get("base_url", "")
+        analyst_model_label.set_text(
+            f"Model: {model}"
+            + (f" @ {base_url}" if base_url else " (not configured)")
+        )
+
+        # Populate config fields (only if user hasn't edited them)
+        if not analyst_base_url_input.value:
+            analyst_base_url_input.value = base_url
+        if not analyst_model_input.value or analyst_model_input.value == "deepseek-r1":
+            analyst_model_input.value = model
+        if not analyst_interval_input.value or analyst_interval_input.value == 4:
+            analyst_interval_input.value = float(
+                analyst_cfg.get("trade_review_interval_hours", 4)
+            )
+        if not analyst_lookback_input.value or analyst_lookback_input.value == 50:
+            analyst_lookback_input.value = int(
+                analyst_cfg.get("trade_lookback", 50)
+            )
+
+        # Connection status
+        if not base_url:
+            analyst_status_label.set_text(
+                "Not configured — set the base URL and apply"
+            )
+        elif enabled:
+            analyst_status_label.set_text("Connected — analyst is active")
+        else:
+            analyst_status_label.set_text(
+                "Configured but disabled — toggle ON to activate"
+            )
+
+        _render_analyst_card(
+            snapshot.get("analyst_optimization"),
+            opt_summary,
+            opt_warnings_label,
+            opt_warnings,
+            opt_suggestions_label,
+            opt_suggestions,
+            opt_confidence,
+            opt_timestamp,
+            opt_empty,
+        )
+        _render_analyst_card(
+            snapshot.get("analyst_trades"),
+            trade_summary,
+            trade_warnings_label,
+            trade_warnings,
+            trade_suggestions_label,
+            trade_suggestions,
+            trade_confidence,
+            trade_timestamp,
+            trade_empty,
+        )
+
+    async def on_analyst_toggle(value: bool) -> None:
+        result = await run.io_bound(call_backend, "/analyst/toggle", 10.0)
+        if result["ok"]:
+            state = "enabled" if result["data"].get("analyst_enabled") else "disabled"
+            ui.notify(f"Analyst {state}", type="positive")
+        else:
+            ui.notify(
+                f"Toggle failed: {result['error']}",
+                type="negative",
+                timeout=10000,
+            )
+            analyst_toggle.set_value(not value)
+
     def render_log_line(entry: Dict[str, Any]) -> None:
         level = entry["level"]
         color = LEVEL_COLORS.get(level, "text-gray-300")
@@ -1557,6 +1917,7 @@ def dashboard() -> None:
         render_regime_and_engine(snapshot)
         render_parameters(snapshot)
         render_trades(snapshot)
+        render_analyst(snapshot)
         render_environment(snapshot)
         render_logs(snapshot)
 
