@@ -1,342 +1,338 @@
 """
-FastAPI Backend for Trading Bot
+Argus — debug & operations API.
+
+A FastAPI application served by uvicorn inside the backend container, next
+to the trading engine (see bot.py main()). It exposes deep introspection
+into the live engine for debugging plus a small set of operational actions.
+Interactive docs: http://localhost:8000/docs
+
+Read endpoints
+--------------
+GET /health     liveness: process, database, Alpaca connectivity
+GET /status     bot_status row + daily PnL + engine task state
+GET /config     live strategy parameters and when they last changed
+GET /debug      engine internals: env, last cycle trace, market clock
+GET /regime     current market regime (SPY trend + realized volatility)
+GET /signals    evaluate the strategy RIGHT NOW for every watchlist symbol
+GET /positions  positions snapshot from the shared database
+GET /trades     recent trade history
+GET /logs       recent system log entries
+
+Action endpoints
+----------------
+POST /optimize  run the walk-forward grid search immediately
+POST /kill      emergency kill-sequence (cancel, liquidate, KILLED)
+POST /reset     recover from KILLED: set RUNNING and restart the engine
 """
+
+from __future__ import annotations
+
 import asyncio
-import os
 import logging
-import traceback
 from datetime import datetime, timezone
-from typing import Optional, List, Dict
-from fastapi import FastAPI, HTTPException, Request
-app = FastAPI(title="Argus Trading Bot API", version="1.0.0")
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from pydantic import BaseModel
-from alpaca.trading.enums import OrderSide
+from typing import Any, Dict
 
-from bot import TradingBot
+import numpy as np
+from fastapi import FastAPI, HTTPException, Query
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
-)
-logger = logging.getLogger(__name__)
+import regime as regime_module
+import universe
+from indicators import compute_atr, compute_rsi, compute_vwap
+from sentiment import get_sentiment_provider
+from shared.database import get_db
+from shared.version import RELEASES, __version__
 
-# Add request logging middleware
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    """Log all HTTP requests and responses."""
-    logger.info(f"HTTP REQUEST: {request.method} {request.url.path}")
-    
-    start_time = datetime.now(timezone.utc)
-    response = await call_next(request)
-    process_time = (datetime.now(timezone.utc) - start_time).total_seconds()
-    
-    logger.info(
-        f"HTTP RESPONSE: {request.method} {request.url.path} "
-        f"- Status: {response.status_code} - {process_time:.3f}s"
+logger = logging.getLogger("argus.api")
+
+
+def _mask(secret: str) -> str:
+    if len(secret) < 8:
+        return "***"
+    return f"{secret[:4]}…{secret[-4:]}"
+
+
+def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
+    # Imported here (not at module top) to avoid a circular import:
+    # bot.py imports create_app from this module.
+    import bot as engine
+
+    app = FastAPI(
+        title="Argus Debug API",
+        version="1.0.0",
+        description="Introspection and operations for the Argus trading engine",
     )
-    
-    return response
+    db = get_db()
 
-app = FastAPI(title="Trading Bot API", version="1.0.0")
+    def bot_or_probe() -> "engine.ArgusBot":
+        """Return the live engine, or a stateless probe instance for
+        data-only endpoints when the engine task is not running."""
+        if controller.bot is not None:
+            return controller.bot
+        return engine.ArgusBot()
 
-# Enable CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    # ------------------------------------------------------------------ #
+    # read endpoints
+    # ------------------------------------------------------------------ #
 
-# Global bot instance
-bot_instance: Optional[TradingBot] = None
+    @app.get("/health")
+    async def health() -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "api": "ok",
+            "engine_running": controller.engine_running,
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        try:
+            db.get_status()
+            result["database"] = "ok"
+        except Exception as exc:
+            result["database"] = f"error: {exc}"
+        try:
+            probe = bot_or_probe()
+            clock = await asyncio.to_thread(probe.trading.get_clock)
+            result["alpaca"] = "ok"
+            result["market_open"] = clock.is_open
+        except Exception as exc:
+            result["alpaca"] = f"error: {exc}"
+        return result
 
-# Pydantic models
-class OrderRequest(BaseModel):
-    symbol: str
-    side: str  # "buy" or "sell"
-    quantity: float
+    @app.get("/status")
+    async def status() -> Dict[str, Any]:
+        row = db.get_status()
+        return {
+            **row,
+            "daily_pnl": row["equity"] - row["daily_start_balance"],
+            "engine_running": controller.engine_running,
+            "engine_started_at": controller.started_at,
+        }
 
-class BotStatusResponse(BaseModel):
-    status: str
-    balance: float
-    daily_pnl: float
-    positions: List[Dict]
-    orders: List[Dict]
-    timestamp: str
+    @app.get("/version")
+    async def version() -> Dict[str, Any]:
+        return {"version": __version__, "releases": RELEASES}
 
-class LogEntry(BaseModel):
-    timestamp: str
-    level: str
-    message: str
-    source: Optional[str] = None
+    @app.get("/config")
+    async def config() -> Dict[str, Any]:
+        return {
+            "config": db.get_config(),
+            "updated_at": db.get_config_updated_at(),
+        }
 
+    @app.get("/debug")
+    async def debug() -> Dict[str, Any]:
+        clock_info: Dict[str, Any]
+        try:
+            probe = bot_or_probe()
+            clock = await asyncio.to_thread(probe.trading.get_clock)
+            clock_info = {
+                "is_open": clock.is_open,
+                "next_open": str(clock.next_open),
+                "next_close": str(clock.next_close),
+            }
+        except Exception as exc:
+            clock_info = {"error": str(exc)}
+        return {
+            "engine_running": controller.engine_running,
+            "engine_started_at": controller.started_at,
+            "last_cycle": controller.bot.last_cycle if controller.bot else {},
+            "open_entries": controller.bot._open_entries if controller.bot else {},
+            "market_clock": clock_info,
+            "cooldowns_active": (
+                sorted(controller.bot._cooldowns) if controller.bot else []
+            ),
+            "environment": {
+                "universe_mode": universe.describe_mode(),
+                "watchlist": universe.get_watchlist(),
+                "position_size_usd": engine.POSITION_SIZE_USD,
+                "risk_per_trade_usd": engine.RISK_PER_TRADE_USD,
+                "cooldown_minutes": engine.COOLDOWN_MINUTES,
+                "max_positions": engine.MAX_POSITIONS,
+                "daily_stop_loss": engine.DAILY_STOP_LOSS,
+                "min_price_usd": engine.MIN_PRICE_USD,
+                "poll_interval_seconds": engine.POLL_INTERVAL_SECONDS,
+                "bar_lookback_minutes": engine.BAR_LOOKBACK_MINUTES,
+                "regime_symbol": regime_module.REGIME_SYMBOL,
+                "alpaca_api_key": _mask(engine.ALPACA_API_KEY),
+                "paper_trading": True,
+                "version": __version__,
+            },
+        }
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize bot on startup."""
-    global bot_instance
-    logger.info("=" * 50)
-    logger.info("STARTUP: Initializing Trading Bot API")
-    logger.info(f"Environment: ALPACA_API_KEY={'set' if os.getenv('ALPACA_API_KEY') else 'NOT SET'}")
-    logger.info(f"Environment: ALPACA_SECRET_KEY={'set' if os.getenv('ALPACA_SECRET_KEY') else 'NOT SET'}")
-    logger.info("=" * 50)
-    try:
-        logger.info("Creating TradingBot instance...")
-        bot_instance = TradingBot()
-        logger.info("Trading Bot initialized successfully")
-        logger.info(f"Bot status: {bot_instance.bot_status}")
-    except Exception as e:
-        logger.error(f"Failed to initialize bot: {e}", exc_info=True)
-        raise
+    @app.get("/regime")
+    async def market_regime() -> Dict[str, Any]:
+        """Current market regime — RISK_OFF means no new entries."""
+        info = await asyncio.to_thread(regime_module.get_regime)
+        return {
+            **info,
+            "blocks_new_entries": regime_module.blocks_new_entries(info),
+        }
 
+    @app.get("/signals")
+    async def signals() -> Dict[str, Any]:
+        """Full dry-run of the decision logic for every watchlist symbol —
+        the single most useful endpoint when asking 'why is it (not)
+        trading right now?'. Never places orders."""
+        probe = bot_or_probe()
+        probe_config = db.get_config()
+        provider = get_sentiment_provider()
+        watchlist = probe.watchlist or universe.get_watchlist()
+        frames = await probe.fetch_minute_bars()
+        regime_info = await asyncio.to_thread(regime_module.get_regime)
+        regime_blocks = regime_module.blocks_new_entries(regime_info)
+        evaluation: Dict[str, Any] = {}
+        for symbol in watchlist:
+            bars = frames.get(symbol)
+            if bars is None or bars.empty:
+                evaluation[symbol] = {"decision": "SKIP", "reason": "no bar data"}
+                continue
+            period = max(int(probe_config["rsi_period"]), 2)
+            if len(bars) < period * 2:
+                evaluation[symbol] = {
+                    "decision": "SKIP",
+                    "reason": f"only {len(bars)} bars, need {period * 2}",
+                }
+                continue
+            rsi = float(compute_rsi(bars["close"], period).iloc[-1])
+            close = float(bars["close"].iloc[-1])
+            vwap = float(compute_vwap(bars).iloc[-1])
+            atr = float(compute_atr(bars).iloc[-1])
+            entry: Dict[str, Any] = {
+                "last_close": round(close, 4),
+                "last_bar_utc": str(bars.index[-1]),
+                "bars": len(bars),
+                "rsi": None if np.isnan(rsi) else round(rsi, 2),
+                "rsi_buy_signal": probe_config["rsi_buy_signal"],
+                "vwap": round(vwap, 4),
+                "atr": None if np.isnan(atr) else round(atr, 4),
+                "news_cutoff": probe_config["news_cutoff"],
+            }
+            if np.isnan(rsi):
+                entry.update({"decision": "SKIP", "reason": "RSI not defined yet"})
+                evaluation[symbol] = entry
+                continue
+            if close < engine.MIN_PRICE_USD:
+                entry.update(
+                    {
+                        "decision": "SKIP",
+                        "reason": f"price ${close:.2f} below minimum "
+                        f"${engine.MIN_PRICE_USD:.2f}",
+                    }
+                )
+                evaluation[symbol] = entry
+                continue
+            if rsi >= probe_config["rsi_buy_signal"]:
+                entry.update(
+                    {
+                        "decision": "HOLD",
+                        "reason": f"RSI {rsi:.1f} above buy level "
+                        f"{probe_config['rsi_buy_signal']:.0f}",
+                    }
+                )
+                evaluation[symbol] = entry
+                continue
+            cooldown_left = probe.in_cooldown(symbol)
+            if cooldown_left is not None:
+                entry.update(
+                    {
+                        "decision": "BLOCKED",
+                        "reason": f"RSI triggered but symbol is in post-loss "
+                        f"cooldown for another {cooldown_left:.0f}m",
+                    }
+                )
+                evaluation[symbol] = entry
+                continue
+            if close > vwap:
+                entry.update(
+                    {
+                        "decision": "BLOCKED",
+                        "reason": f"RSI triggered but price ${close:.2f} is "
+                        f"above VWAP ${vwap:.2f} — not a confirmed dip",
+                    }
+                )
+                evaluation[symbol] = entry
+                continue
+            # Sentiment is fetched only for RSI-triggered symbols — mirrors
+            # the live engine and keeps LLM cost bounded.
+            sentiment = await asyncio.to_thread(provider.score, symbol)
+            entry.update(
+                {
+                    "sentiment": sentiment["score"],
+                    "sentiment_source": sentiment["source"],
+                    "sentiment_rationale": sentiment["rationale"],
+                    "headlines": sentiment["headlines"],
+                }
+            )
+            if sentiment["score"] <= probe_config["news_cutoff"]:
+                entry.update(
+                    {
+                        "decision": "BLOCKED",
+                        "reason": f"RSI triggered but sentiment "
+                        f"{sentiment['score']:.2f} ({sentiment['source']}) "
+                        f"below cutoff {probe_config['news_cutoff']:.2f}",
+                    }
+                )
+            elif regime_blocks:
+                entry.update(
+                    {
+                        "decision": "BLOCKED",
+                        "reason": "all technical + sentiment gates passed but "
+                        "market regime is RISK_OFF — no new entries",
+                    }
+                )
+            else:
+                entry.update(
+                    {
+                        "decision": "BUY",
+                        "reason": "RSI trigger + VWAP dip + sentiment + "
+                        "regime pass",
+                    }
+                )
+            evaluation[symbol] = entry
+        return {
+            "evaluated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "config": probe_config,
+            "regime": regime_info,
+            "watchlist_size": len(watchlist),
+            "signals": evaluation,
+        }
 
-@app.get("/")
-async def root():
-    """Root endpoint."""
-    logger.info("Health check: /")
-    return {"message": "Trading Bot API", "version": "1.0.0"}
+    @app.get("/positions")
+    async def positions() -> Dict[str, Any]:
+        return {"positions": db.get_positions()}
 
+    @app.get("/trades")
+    async def trades(limit: int = Query(50, ge=1, le=1000)) -> Dict[str, Any]:
+        return {"trades": db.get_trades(limit)}
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint."""
-    logger.info("Health check: /health")
-    bot_status = bot_instance.bot_status if bot_instance else "unknown"
-    logger.info(f"Bot status: {bot_status}")
-    return {"status": "healthy", "bot_status": bot_status}
+    @app.get("/logs")
+    async def logs(limit: int = Query(20, ge=1, le=500)) -> Dict[str, Any]:
+        return {"logs": db.get_logs(limit)}
 
+    # ------------------------------------------------------------------ #
+    # action endpoints
+    # ------------------------------------------------------------------ #
 
-@app.get("/status", response_model=BotStatusResponse)
-async def get_bot_status():
-    """Get current bot status."""
-    if not bot_instance:
-        logger.warning("Bot not initialized")
-        raise HTTPException(status_code=503, detail="Bot not initialized")
-    
-    logger.info("Fetching bot status from database")
-    try:
-        state = bot_instance.db.get_latest_state()
-        logger.info(
-            f"Bot status: {state['bot_status']}, "
-            f"Balance: ${state['balance']:,.2f}, "
-            f"Positions: {len(state['positions'])}, "
-            f"Orders: {len(state['orders'])}"
-        )
-        return BotStatusResponse(
-            status=state['bot_status'],
-            balance=state['balance'],
-            daily_pnl=state['daily_pnl'],
-            positions=state['positions'],
-            orders=state['orders'],
-            timestamp=state['timestamp']
-        )
-    except Exception as e:
-        logger.error(f"Error fetching bot status: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error fetching status: {str(e)}")
+    @app.post("/optimize")
+    async def optimize() -> Dict[str, Any]:
+        from optimizer import run_optimization
 
+        db.add_log("OPTIMIZER", "Manual optimization triggered via API")
+        best = await asyncio.to_thread(run_optimization)
+        if best is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Optimization produced no result — see /logs",
+            )
+        return {"optimized": True, "parameters": best}
 
-@app.post("/start")
-async def start_bot():
-    """Start the trading bot."""
-    logger.info("=" * 60)
-    logger.info("POST /start - Starting bot")
-    logger.info("=" * 60)
-    
-    if not bot_instance:
-        logger.error("Bot not initialized")
-        raise HTTPException(status_code=503, detail="Bot not initialized")
-    
-    if bot_instance.bot_status == "RUNNING":
-        logger.warning("Bot already running - ignoring start request")
-        return {"message": "Bot is already running"}
-    
-    logger.info("Updating bot status to RUNNING")
-    bot_instance.bot_status = "RUNNING"
-    try:
-        bot_instance.db.update_bot_status("RUNNING")
-        bot_instance.db.log_entry("INFO", "Bot started manually", "API")
-        logger.info("Status updated in database")
-    except Exception as e:
-        logger.error(f"Failed to update status in database: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update status: {str(e)}")
-    
-    # Start trading loop in background
-    logger.info("Creating background task for trading loop")
-    try:
-        asyncio.create_task(bot_instance.run_trading_loop())
-        logger.info("Trading loop task created successfully")
-    except Exception as e:
-        logger.error(f"Failed to create trading loop task: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to start bot: {str(e)}")
-    
-    logger.info("Bot started successfully")
-    return {"message": "Bot started", "status": "RUNNING"}
+    @app.post("/kill")
+    async def kill() -> Dict[str, Any]:
+        await controller.kill("Kill requested via debug API")
+        return {"killed": True, "status": db.get_status()}
 
+    @app.post("/reset")
+    async def reset() -> Dict[str, Any]:
+        ok, message = await controller.reset()
+        if not ok:
+            raise HTTPException(status_code=409, detail=message)
+        return {"reset": True, "message": message, "status": db.get_status()}
 
-@app.post("/stop")
-async def stop_bot():
-    """Stop the trading bot."""
-    logger.info("POST /stop - Stopping bot")
-    
-    if not bot_instance:
-        logger.error("Bot not initialized")
-        raise HTTPException(status_code=503, detail="Bot not initialized")
-    
-    if bot_instance.bot_status == "STOPPED":
-        logger.warning("Bot already stopped - ignoring stop request")
-        return {"message": "Bot is already stopped"}
-    
-    logger.info("Updating bot status to STOPPED")
-    bot_instance.bot_status = "STOPPED"
-    try:
-        bot_instance.db.update_bot_status("STOPPED")
-        bot_instance.db.log_entry("WARNING", "Bot stopped manually", "API")
-        logger.info("Status updated in database")
-    except Exception as e:
-        logger.error(f"Failed to update status in database: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update status: {str(e)}")
-    
-    logger.info("Bot stopped successfully")
-    return {"message": "Bot stopped", "status": "STOPPED"}
-
-
-@app.post("/kill")
-async def kill_bot():
-    """Emergency kill switch - liquidate all positions."""
-    logger.critical("=" * 60)
-    logger.critical("POST /kill - EMERGENCY KILL SWITCH")
-    logger.critical("=" * 60)
-    
-    if not bot_instance:
-        logger.error("Bot not initialized")
-        raise HTTPException(status_code=503, detail="Bot not initialized")
-    
-    logger.info("Calling bot_instance.kill_bot()")
-    try:
-        bot_instance.kill_bot()
-        bot_instance.db.log_entry("CRITICAL", "Emergency kill switch activated", "API")
-        logger.warning("Emergency kill completed - all positions liquidated")
-        return {"message": "Bot killed and all positions liquidated"}
-    except Exception as e:
-        logger.error(f"Emergency kill failed: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Emergency kill failed: {str(e)}")
-
-
-@app.post("/order")
-async def place_order(request: OrderRequest):
-    """Place a manual order."""
-    logger.info(f"POST /order - {request.side.upper()} {request.quantity} {request.symbol}")
-    
-    if not bot_instance:
-        logger.error("Bot not initialized")
-        raise HTTPException(status_code=503, detail="Bot not initialized")
-    
-    if request.side.lower() == "buy":
-        side = OrderSide.BUY
-    elif request.side.lower() == "sell":
-        side = OrderSide.SELL
-    else:
-        raise HTTPException(status_code=400, detail="Invalid side. Use 'buy' or 'sell'")
-    
-    try:
-        logger.info(f"Executing market order: {side.value} {request.quantity} {request.symbol}")
-        order = bot_instance._execute_market_order(
-            symbol=request.symbol,
-            side=side,
-            qty=request.quantity
-        )
-        bot_instance.db.log_entry("INFO", f"Manual order placed: {request.side} {request.quantity} {request.symbol}", "API")
-        logger.info(f"Order placed successfully: {order.id}")
-        return {"message": f"Order placed: {request.side} {request.quantity} {request.symbol}", "order_id": order.id}
-    except Exception as e:
-        logger.error(f"Failed to place order: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to place order: {str(e)}")
-
-
-@app.get("/logs", response_model=List[LogEntry])
-async def get_logs(limit: int = 50):
-    """Get recent log entries."""
-    if not bot_instance:
-        raise HTTPException(status_code=503, detail="Bot not initialized")
-    
-    try:
-        logs = bot_instance.db.get_recent_logs(limit=limit)
-        logger.info(f"Fetched {len(logs)} recent log entries")
-        return logs
-    except Exception as e:
-        logger.error(f"Failed to fetch logs: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to fetch logs: {str(e)}")
-
-
-@app.get("/positions")
-async def get_positions():
-    """Get current positions."""
-    if not bot_instance:
-        raise HTTPException(status_code=503, detail="Bot not initialized")
-    
-    try:
-        positions = bot_instance._get_current_positions()
-        logger.info(f"Fetching {len(positions)} current positions")
-        return positions
-    except Exception as e:
-        logger.error(f"Failed to fetch positions: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to fetch positions: {str(e)}")
-
-
-@app.get("/orders")
-async def get_orders():
-    """Get recent orders."""
-    if not bot_instance:
-        raise HTTPException(status_code=503, detail="Bot not initialized")
-    
-    try:
-        orders = bot_instance._get_recent_orders()
-        logger.info(f"Fetching {len(orders)} recent orders")
-        return orders
-    except Exception as e:
-        logger.error(f"Failed to fetch orders: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to fetch orders: {str(e)}")
-
-
-@app.get("/price/{symbol}")
-async def get_price_history(symbol: str, limit: int = 100):
-    """Get price history for a symbol."""
-    logger.info(f"POST /price/{symbol} - limit={limit}")
-    
-    if not bot_instance:
-        raise HTTPException(status_code=503, detail="Bot not initialized")
-    
-    try:
-        price_data = bot_instance._get_price_data(symbol, limit=limit)
-        logger.info(f"Fetching {len(price_data)} price data points for {symbol}")
-        return price_data
-    except Exception as e:
-        logger.error(f"Failed to fetch price data for {symbol}: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to fetch price data: {str(e)}")
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-
-@app.get("/metrics")
-async def get_metrics():
-    """Get trading metrics and performance data."""
-    # For now, return basic metrics
-    metrics = {
-        "daily_pnl": 0.0,
-        "win_rate": 0.0,
-        "balance": 0.0,
-        "total_trades": 0,
-        "winning_trades": 0,
-        "losing_trades": 0
-    }
-    
-    return metrics
-
-
+    return app

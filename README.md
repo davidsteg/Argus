@@ -1,221 +1,143 @@
-# Automated Trading Bot Prototype
+# Argus — Adaptive Short-Term Trading Bot
 
-A fully containerized, async trading bot with a responsive Streamlit dashboard for monitoring and control.
+A fully containerized, asynchronous paper-trading engine on Alpaca with a
+NiceGUI command center. Argus buys confirmed intraday dips in the most
+active US equities, exits through volatility-adaptive bracket orders, and
+re-tunes itself every night with an out-of-sample-validated optimizer.
+
+**Paper trading is hardcoded.** Argus never touches live money unless the
+code is consciously changed and reviewed.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     Docker Compose                          │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  ┌─────────────────┐              ┌─────────────────┐      │
-│  │   trading_bot   │              │   trading_ui    │      │
-│  │   (Python/Alpaca)│              │  (Streamlit)    │      │
-│  │                 │              │                 │      │
-│  │ • Async loop    │              │ • Auto-refresh  │      │
-│  │ • Risk engine   │   SQLite     │ • Metrics       │      │
-│  │ • Order executor│◄────────────►│ • Kill switch   │      │
-│  └─────────────────┘    db_data   └─────────────────┘      │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                        Docker Compose                            │
+│                                                                  │
+│  ┌────────────────────────┐          ┌───────────────────────┐   │
+│  │  argus_backend  :8000  │          │  argus_frontend :8080 │   │
+│  │                        │          │                       │   │
+│  │ • Trading engine       │  SQLite  │ • NiceGUI dashboard   │   │
+│  │ • Regime filter (SPY)  │◄────────►│ • Live positions/log  │   │
+│  │ • Nightly optimizer    │  db_data │ • EMERGENCY HARD STOP │   │
+│  │ • Debug & ops API      │          │                       │   │
+│  └────────────────────────┘          └───────────────────────┘   │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-## Features
+## The strategy — layered decision pipeline
 
-### Backend Bot (Engine)
-- ✅ Modern Python with `alpaca-py` SDK (async)
-- ✅ Async event loop for non-blocking data streaming
-- ✅ SQLite database for state persistence
-- ✅ Full risk management system
-- ✅ Automated bracket orders (TakeProfit + StopLoss)
-- ✅ Emergency kill switch
+Every minute, for each symbol on the watchlist (default: top-50 most
+active US equities, refreshed every 15 minutes):
 
-### Frontend Dashboard
-- ✅ Pure Python Streamlit with auto-refresh (2.5s)
-- ✅ Live metrics: Balance, PnL, Bot Status
-- ✅ Active positions table
-- ✅ Equity curve visualization
-- ✅ Live log viewer (last 20 entries)
-- ✅ Emergency kill switch button
+1. **Regime gate** — SPY trend + realized volatility (`regime.py`).
+   When the index trades below its short-term EMA *and* volatility is
+   stressed (`RISK_OFF`), no new positions are opened: in a broad
+   sell-off every dip is a knife.
+2. **RSI trigger** — Wilder RSI on 1-minute bars drops below the buy
+   level (nightly-optimized).
+3. **Loser cooldown** — a symbol that just stopped out is benched for 30
+   minutes; re-buying the same falling knife each minute is how mean
+   reversion bleeds out.
+4. **VWAP confirmation** — price must sit below the session VWAP: the
+   dip has to be real, not an RSI artifact.
+5. **News sentiment** — Alpaca headlines scored by Claude (keyword
+   heuristic without an `ANTHROPIC_API_KEY`); bearish news blocks the
+   trade.
+6. **Adaptive exit & sizing** — bracket stop/target distances are ATR
+   multiples (a quiet megacap gets a tight bracket, a high-beta mover a
+   wide one), and share count is chosen so hitting the stop loses about
+   `RISK_PER_TRADE_USD`, capped by `POSITION_SIZE_USD` notional.
 
-### Dockerization
-- ✅ Docker Compose with two services
-- ✅ Shared named volume (`db_data`)
-- ✅ Timezone set to `Europe/Zurich`
-- ✅ Environment variable configuration
+### Safety nets
+- Hard **daily loss limit** → kill-sequence: cancel all orders, liquidate
+  everything, persist `KILLED`.
+- Dashboard **EMERGENCY HARD STOP** talks directly to Alpaca,
+  independent of the engine.
+- Bracket orders mean every position always has a stop and a target.
 
-## Prerequisites
+### Nightly self-optimization (out-of-sample validated)
 
-1. **Python 3.11+** (for local development)
-2. **Docker** and **Docker Compose** installed
-3. **Alpaca API Keys** (Paper trading recommended)
+At midnight Europe/Zurich the optimizer replays the exact live strategy
+(same indicator code, `indicators.py`) over 30 days of 1-minute bars
+across a 192-combination grid. Bars are split chronologically — 75 %
+train / 25 % validation. Candidates are ranked by yield-to-drawdown on
+the train window, but only go live if they *also* made money on the
+validation window they never saw. Parameters that merely memorized the
+past are rejected, and the previous configuration is kept.
 
-## Setup Instructions
-
-### 1. Install Dependencies
+## Quick start
 
 ```bash
-pip install -r requirements.txt
+cp .env.example .env      # fill in your Alpaca paper keys
+docker compose up -d --build
 ```
 
-### 2. Configure Environment Variables
+- Dashboard: http://localhost:8080
+- Debug API (interactive docs): http://localhost:8000/docs
 
-Create a `.env` file based on `.env.template`:
+## Debug & operations API (port 8000)
 
-```bash
-cp .env.template .env
-```
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /health` | liveness: process, database, Alpaca connectivity |
+| `GET /status` | bot status, equity, daily PnL, engine task state |
+| `GET /config` | live strategy parameters + last optimization time |
+| `GET /debug` | engine internals: env, last cycle trace, cooldowns |
+| `GET /regime` | current market regime (SPY trend + realized vol) |
+| `GET /signals` | dry-run of the full decision pipeline per symbol |
+| `GET /positions` `/trades` `/logs` `/version` | state snapshots |
+| `POST /optimize` | run the walk-forward grid search now |
+| `POST /kill` | emergency kill-sequence |
+| `POST /reset` | recover from KILLED and restart the engine |
 
-Edit `.env` with your Alpaca credentials:
+## Configuration
 
-```
-ALPACA_API_KEY=your_api_key_here
-ALPACA_SECRET_KEY=your_secret_key_here
-ALPACA_BASE_URL=https://paper-api.alpaca.markets
-DAILY_STOP_LOSS=1000
-MAX_POSITIONS=5
-POSITION_SIZE_USD=500
-TRADING_SYMBOLS=AAPL,MSFT,GOOGL
-```
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` | — | Alpaca paper credentials (required) |
+| `ANTHROPIC_API_KEY` | — | enables Claude-scored news sentiment |
+| `SENTIMENT_MODEL` | `claude-opus-4-8` | sentiment model (`claude-haiku-4-5` = cheapest) |
+| `TRADING_SYMBOLS` | `ALL` | `ALL` = dynamic most-actives watchlist, or `AAPL,MSFT,…` |
+| `WATCHLIST_SIZE` | `50` | symbols in dynamic mode (max 100) |
+| `POSITION_SIZE_USD` | `500` | max notional per position |
+| `RISK_PER_TRADE_USD` | `20` | target dollar loss if the stop is hit (0 = disable) |
+| `COOLDOWN_MINUTES` | `30` | bench time for a symbol after a losing exit |
+| `MAX_POSITIONS` | `5` | concurrent position cap |
+| `DAILY_STOP_LOSS` | `100` | daily loss (USD) that triggers the kill-sequence |
+| `MIN_PRICE_USD` | `5` | penny-stock filter |
+| `POLL_INTERVAL_SECONDS` | `60` | engine cycle interval |
+| `REGIME_MAX_ANN_VOL` | `35` | annualized SPY vol (%) above which the tape is stressed |
 
-### 3. Run with Docker Compose
+Strategy parameters (`rsi_period`, `rsi_buy_signal`, `atr_stop_mult`,
+`atr_target_mult`, `news_cutoff`) live in the shared `bot_config` table
+and are rewritten nightly by the optimizer — not env vars.
 
-```bash
-docker-compose up --build
-```
-
-Or run in detached mode:
-
-```bash
-docker-compose up -d --build
-```
-
-### 4. Access the Dashboard
-
-Once containers are running, access the Streamlit dashboard at:
-
-```
-http://localhost:8501
-```
-
-## Services
-
-### trading_bot
-- **Port**: 8080 (internal API, if needed)
-- **Volume**: `/data` → `db_data` (SQLite database)
-- **Environment**: All Alpaca and trading parameters
-
-### trading_ui
-- **Port**: 8501 (Streamlit interface)
-- **Volume**: `/data` → `db_data` (read access to SQLite)
-- **Auto-refresh**: Every 2.5 seconds
-
-## Configuration Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `ALPACA_API_KEY` | - | Your Alpaca API key |
-| `ALPACA_SECRET_KEY` | - | Your Alpaca secret key |
-| `ALPACA_BASE_URL` | `https://paper-api.alpaca.markets` | Alpaca API base URL |
-| `DAILY_STOP_LOSS` | `1000` | Daily stop-loss threshold (USD) |
-| `MAX_POSITIONS` | `5` | Maximum concurrent positions |
-| `POSITION_SIZE_USD` | `500` | Position size (USD) |
-| `TRADING_SYMBOLS` | `AAPL,MSFT,GOOGL` | Comma-separated list of symbols |
-
-## Emergency Kill Switch
-
-The dashboard includes a prominent "EMERGENCY KILL SWITCH" button that:
-
-1. Immediately liquidates all open positions
-2. Halts the bot (updates status to "KILLED")
-3. Prevents new orders from being placed
-
-Use this in case of unexpected market movements or system issues.
-
-## Database Schema
-
-The SQLite database (`trading_state.db`) stores:
-
-- **trading_state**: Current bot state, positions, orders
-- **log_entries**: System logs (level, message, timestamp)
-- **price_history**: Historical price data for visualization
-
-## Project Structure
+## Project structure
 
 ```
-.
-├── backend/
-│   ├── bot.py              # Main trading bot engine
-│   ├── Dockerfile          # Backend container config
-│   └── requirements.txt    # Backend dependencies
-├── frontend/
-│   ├── app.py              # Streamlit dashboard
-│   ├── Dockerfile          # Frontend container config
-│   └── requirements.txt    # Frontend dependencies
-├── shared/
-│   └── models.py           # SQLite database models
-├── docker-compose.yml       # Container orchestration
-├── requirements.txt         # Unified dependencies
-├── .env.template            # Environment variable template
-└── README.md               # This file
+backend/
+  bot.py          # async trading engine + engine controller
+  api.py          # debug & operations FastAPI app (port 8000)
+  optimizer.py    # nightly grid search with out-of-sample validation
+  indicators.py   # shared RSI / ATR / VWAP + bracket math (live == backtest)
+  regime.py       # SPY market-regime filter (RISK_ON / CAUTION / RISK_OFF)
+  sentiment.py    # layered news sentiment (Claude → keywords → neutral)
+  universe.py     # static list or dynamic most-actives watchlist
+frontend/
+  app.py          # NiceGUI dashboard (port 8080)
+shared/
+  database.py     # thread-safe SQLite layer (WAL) on a shared volume
+  version.py      # version + release notes (rendered in the dashboard)
 ```
 
-## Development Mode
+## Security notes
 
-To run locally without Docker:
-
-```bash
-# Terminal 1: Start the bot
-python backend/bot.py
-
-# Terminal 2: Start the UI
-streamlit run frontend/app.py --server.port 8501
-```
-
-## Security Notes
-
-⚠️ **Important Security Considerations**:
-
-1. **Never commit API keys** to version control
-2. Use **paper trading** for testing
-3. Implement proper **authentication** for production
-4. Use **HTTPS** in production deployments
-5. Store API keys in **secure vaults** (e.g., AWS Secrets Manager, HashiCorp Vault)
-
-## Production Deployment
-
-For production, consider:
-
-- **Authentication**: Add user authentication to the Streamlit app
-- **HTTPS**: Use a reverse proxy (nginx, Caddy) with SSL
-- **Database**: Replace SQLite with PostgreSQL for better concurrency
-- **Monitoring**: Add Prometheus metrics and Grafana dashboards
-- **Logging**: Implement structured logging with ELK stack
-- **Backup**: Regular database backups
-
-## Troubleshooting
-
-### Bot not connecting to Alpaca
-- Verify API keys in `.env`
-- Check network connectivity
-- Ensure you're using the correct base URL (paper vs live)
-
-### Dashboard not loading
-- Check Docker logs: `docker-compose logs trading_ui`
-- Verify port 8501 is not in use
-- Ensure database file is accessible
-
-### Database locked errors
-- SQLite has limited concurrency
-- For production, use PostgreSQL
-- Reduce auto-refresh interval if needed
-
-## License
-
-MIT License - See LICENSE file for details
+- `.env` is git-ignored — commit `.env.example` only, never credentials.
+- Paper trading only; keys should be Alpaca *paper* keys.
+- The debug API has no auth — do not expose port 8000 publicly.
 
 ## Disclaimer
 
-This is a prototype for educational purposes. Trading involves risk. Past performance does not guarantee future results. Use at your own risk.
-```
+Educational prototype. Trading involves risk; past performance does not
+guarantee future results.

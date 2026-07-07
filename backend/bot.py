@@ -1,684 +1,685 @@
 """
-Self-Improving Trading Bot Engine - AI-Powered with Learning Capabilities
-"""
-import asyncio
-import os
-import json
-import logging
-import numpy as np
-from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass, field, asdict
-from decimal import Decimal
-from enum import Enum
-from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, GetAssetsRequest
-from alpaca.trading.enums import OrderSide, TimeInForce, AssetClass, OrderStatus
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest, StockQuotesRequest
-from alpaca.data.timeframe import TimeFrame
-from alpaca.data.models import Quote, Bar
-import yfinance as yf
+Argus — asynchronous short-term trading engine.
 
-import models
+Philosophy: trade small amounts on a large scale for quick flips.
+1-minute bars are the execution trigger; a SPY-based market regime filter
+(regime.py) blocks entries when the whole tape is falling; a VWAP check
+confirms the dip is real; curated news sentiment is the directional
+filter. Exits are volatility-adaptive: bracket stop/target distances are
+ATR multiples, and position size is chosen so each trade risks a roughly
+constant dollar amount. Nightly walk-forward optimization (optimizer.py)
+re-tunes the strategy parameters — validated out-of-sample — in the
+shared bot_config table, which this engine re-reads on every cycle so
+new parameters are absorbed seamlessly without a restart.
+
+Safety:
+* Alpaca Paper Trading is forced (paper=True). No hardcoded secrets —
+  credentials come exclusively from the environment.
+* A hard daily loss limit triggers the emergency kill-sequence: cancel all
+  open orders, liquidate all positions, persist KILLED, shut down.
+* Every Alpaca API request is wrapped in try/except; a single API hiccup
+  never crashes the engine.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional, Tuple
+from zoneinfo import ZoneInfo
+
+import numpy as np
+import pandas as pd
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
+from alpaca.trading.client import TradingClient
+from alpaca.trading.enums import OrderClass, OrderSide, QueryOrderStatus, TimeInForce
+from alpaca.trading.requests import (
+    GetOrdersRequest,
+    MarketOrderRequest,
+    StopLossRequest,
+    TakeProfitRequest,
+)
+from dotenv import load_dotenv
+
+import regime
+import universe
+from indicators import bracket_distances, compute_atr, compute_rsi, compute_vwap
+from sentiment import get_sentiment_provider
+from shared.database import STATUS_KILLED, STATUS_RUNNING, get_db
+
+load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("argus.bot")
+
+ZURICH = ZoneInfo("Europe/Zurich")
+
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
+ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
+POSITION_SIZE_USD = float(os.getenv("POSITION_SIZE_USD", "500"))
+MAX_POSITIONS = int(os.getenv("MAX_POSITIONS", "5"))
+DAILY_STOP_LOSS = float(os.getenv("DAILY_STOP_LOSS", "100"))
+POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "60"))
+BAR_LOOKBACK_MINUTES = int(os.getenv("BAR_LOOKBACK_MINUTES", "180"))
+# Quick flips need liquid, penny-increment names; sub-$MIN_PRICE symbols
+# from the most-actives screener are skipped.
+MIN_PRICE_USD = float(os.getenv("MIN_PRICE_USD", "5"))
+API_PORT = int(os.getenv("API_PORT", "8000"))
+# Volatility-scaled sizing: shares are chosen so that hitting the stop
+# loses about this many dollars, capped by POSITION_SIZE_USD notional.
+# Set to 0 to disable and size purely by notional.
+RISK_PER_TRADE_USD = float(os.getenv("RISK_PER_TRADE_USD", "20"))
+# After a losing exit a symbol is benched for this long — a stopped-out
+# dip that keeps falling keeps triggering RSI, and re-buying the same
+# knife each minute is how mean reversion bleeds out.
+COOLDOWN_MINUTES = float(os.getenv("COOLDOWN_MINUTES", "30"))
 
 
-class StrategyType(Enum):
-    MOMENTUM = "momentum"
-    MEAN_REVERSION = "mean_reversion"
-    ML_PREDICTIVE = "ml_predictive"
-    HYBRID = "hybrid"
+class ArgusBot:
+    """Asynchronous 1-minute execution engine with bracket-order exits."""
 
-
-@dataclass
-class TradeRecord:
-    symbol: str
-    side: str
-    price: float
-    quantity: float
-    timestamp: str
-    pnl: float = 0.0
-    success: bool = True
-    strategy: str = ""
-
-
-@dataclass
-class StrategyParams:
-    # Strategy type
-    strategy_type: str = "hybrid"
-    
-    # Risk management
-    daily_stop_loss: float = 1000.0
-    max_positions: int = 5
-    position_size_usd: float = 500.0
-    max_drawdown: float = 0.05  # 5% max drawdown
-    
-    # Momentum strategy
-    momentum_threshold: float = 0.01  # 1% price change threshold
-    lookback_period: int = 10  # bars to look back
-    
-    # Mean reversion
-    rsi_overbought: int = 70
-    rsi_oversold: int = 30
-    bollinger_band_width: float = 2.0
-    
-    # ML parameters
-    ml_training_data_points: int = 1000
-    ml_confidence_threshold: float = 0.4  # Lower threshold for more trades in learning phase
-    ml_retrain_frequency: int = 50  # More frequent retraining
-    
-    # Learning parameters - adjusted for initial learning phase
-    learning_rate: float = 0.05  # Higher learning rate for faster initial learning
-    exploration_rate: float = 0.9  # High exploration rate for initial learning
-    reward_decay: float = 0.99
-    
-    # Performance tracking - adjusted for initial phase
-    target_win_rate: float = 0.5  # Lower target for initial learning
-    target_profit_factor: float = 1.2  # Lower target for initial learning
-    max_consecutive_losses: int = 5  # More tolerance for learning
-
-
-class TradingBot:
-    def __init__(self):
-        self.api_key = os.getenv('ALPACA_API_KEY', '')
-        self.api_secret = os.getenv('ALPACA_SECRET_KEY', '')
-        self.base_url = os.getenv('ALPACA_BASE_URL', 'https://paper-api.alpaca.markets')
-        
-        # Initialize with default parameters
-        self.params = StrategyParams()
-        self.db = models.Database()
-        self.bot_status = "STOPPED"
-        self.daily_pnl = 0.0
-        self.daily_reset_date = datetime.now(timezone.utc).date()
-        
-        # Trading clients
-        self.trading_client = TradingClient(
-            self.api_key, 
-            self.api_secret
-        )
-        self.data_client = StockHistoricalDataClient(
-            self.api_key, 
-            self.api_secret
-        )
-        self.yf_client = yf.Ticker  # Yahoo Finance client for fallback
-        
-        # Trading state
-        self.trading_symbols = os.getenv('TRADING_SYMBOLS', 'AAPL,MSFT,GOOGL').split(',')
-        self.positions = {}
-        self.trade_history = []
-        self.performance_metrics = {
-            'total_trades': 0,
-            'winning_trades': 0,
-            'losing_trades': 0,
-            'total_pnl': 0.0,
-            'win_rate': 0.0,
-            'profit_factor': 0.0,
-            'max_drawdown': 0.0,
-            'sharpe_ratio': 0.0
-        }
-        
-        # ML Model (simplified Q-learning)
-        self.q_table = {}
-        self.state_space = {}
-        self.action_space = ['BUY', 'SELL', 'HOLD']
-        
-        # Learning state
-        self.trades_since_last_retrain = 0
-        self.is_learning = False
-        self.learning_log = []
-        
-        logger.info("Self-Improving Trading Bot initialized")
-        logger.info(f"Strategy: {self.params.strategy_type}")
-        logger.info(f"Symbols: {self.trading_symbols}")
-    
-    def _update_bot_status(self, status: str):
-        """Update bot status in database."""
-        self.bot_status = status
-        self.db.update_bot_status(status)
-    
-    def _check_daily_reset(self):
-        """Reset daily PnL if new day."""
-        today = datetime.now(timezone.utc).date()
-        if today > self.daily_reset_date:
-            self.daily_pnl = 0.0
-            self.daily_reset_date = today
-            logger.info("Daily PnL reset")
-    
-    def _get_account_balance(self) -> Decimal:
-        """Get current account balance."""
-        try:
-            account = self.trading_client.get_account()
-            return Decimal(account.equity)
-        except Exception as e:
-            logger.error(f"Error getting account balance: {e}")
-            return Decimal(0)
-    
-    def _get_current_positions(self) -> List[Dict]:
-        """Get current positions."""
-        try:
-            positions = self.trading_client.get_all_positions()
-            result = []
-            for pos in positions:
-                result.append({
-                    'symbol': pos.symbol,
-                    'qty': float(pos.qty),
-                    'side': pos.side,
-                    'market_value': float(pos.market_value),
-                    'avg_entry_price': float(pos.avg_entry_price),
-                    'unrealized_pl': float(pos.unrealized_pl)
-                })
-            return result
-        except Exception as e:
-            logger.error(f"Error getting positions: {e}")
-            return []
-    
-    def _get_recent_orders(self) -> List[Dict]:
-        """Get recent orders."""
-        try:
-            orders = self.trading_client.get_orders(
-                GetOrdersRequest(status=OrderStatus.FILLED)
+    def __init__(self) -> None:
+        if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
+            raise RuntimeError(
+                "ALPACA_API_KEY / ALPACA_SECRET_KEY must be set in the environment"
             )
-            result = []
-            for order in orders[-10:]:  # Last 10 orders
-                result.append({
-                    'symbol': order.symbol,
-                    'side': order.side,
-                    'qty': float(order.qty),
-                    'filled_avg_price': float(order.filled_avg_price),
-                    'time': order.submitted_at.isoformat() if order.submitted_at else None
-                })
-            return result
-        except Exception as e:
-            logger.error(f"Error getting orders: {e}")
-            return []
-    
-    def _get_price_data(self, symbol: str, interval: str = '1Min', limit: int = 100) -> List[Dict]:
-        """Get historical price data with IEX feed and Yahoo Finance fallback."""
-        # Try Alpaca with IEX feed first
-        try:
-            end = datetime.now(timezone.utc)
-            bars = self.data_client.get_stock_bars(
-                StockBarsRequest(
-                    symbol_or_symbols=[symbol],
-                    timeframe=TimeFrame.Minute,
-                    start=end - timedelta(days=1),
-                    end=end,
-                    limit=limit,
-                    feed='iex'  # Use IEX feed instead of SIP
-                )
-            )
-            
-            result = []
-            for bar in bars:
-                result.append({
-                    'close': float(bar.c),
-                    'volume': int(bar.v),
-                    'timestamp': bar.t.isoformat() if bar.t else None
-                })
-            logger.info(f"Successfully fetched {len(result)} bars for {symbol} from Alpaca IEX")
-            return result
-        except Exception as e:
-            logger.warning(f"Alpaca IEX data failed for {symbol}: {e}. Trying Yahoo Finance...")
-        
-        # Fallback to Yahoo Finance
-        try:
-            ticker = self.yf_client(symbol)
-            hist = ticker.history(period="1d", interval="1m")
-            
-            if hist.empty:
-                logger.warning(f"No data from Yahoo Finance for {symbol}")
-                return []
-            
-            result = []
-            for idx, row in hist.iterrows():
-                result.append({
-                    'close': float(row['Close']),
-                    'volume': int(row['Volume']),
-                    'timestamp': idx.isoformat()
-                })
-            
-            logger.info(f"Successfully fetched {len(result)} bars for {symbol} from Yahoo Finance")
-            return result
-        except Exception as e:
-            logger.error(f"Error getting price data for {symbol} from Yahoo Finance: {e}")
-            return []
-    
-    def _calculate_rsi(self, prices: List[float], period: int = 14) -> float:
-        """Calculate RSI indicator."""
-        if len(prices) < period + 1:
-            return 50.0  # Neutral if not enough data
-        
-        gains = []
-        losses = []
-        
-        for i in range(1, len(prices)):
-            change = prices[i] - prices[i-1]
-            if change > 0:
-                gains.append(change)
-                losses.append(0)
-            else:
-                gains.append(0)
-                losses.append(abs(change))
-        
-        avg_gain = sum(gains[-period:]) / period
-        avg_loss = sum(losses[-period:]) / period
-        
-        if avg_loss == 0:
-            return 100.0
-        
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    def _calculate_bollinger_bands(self, prices: List[float], period: int = 20, num_std: float = 2.0) -> Tuple[float, float, float]:
-        """Calculate Bollinger Bands."""
-        if len(prices) < period:
-            return prices[-1], prices[-1], prices[-1]  # S, Lower, Upper
-        
-        recent_prices = prices[-period:]
-        middle = sum(recent_prices) / period
-        std = (sum((p - middle) ** 2 for p in recent_prices) / period) ** 0.5
-        
-        upper = middle + (num_std * std)
-        lower = middle - (num_std * std)
-        
-        return upper, middle, lower
-    
-    def _get_state_features(self, symbol: str) -> Dict[str, float]:
-        """Get features for ML state."""
-        price_data = self._get_price_data(symbol, limit=50)
-        
-        if len(price_data) < 20:
-            return {'rsi': 50.0, 'momentum': 0.0, 'bb_position': 0.5, 'volume_ratio': 1.0}
-        
-        closes = [p['close'] for p in price_data]
-        
-        # RSI
-        rsi = self._calculate_rsi(closes)
-        
-        # Momentum (price change over lookback period)
-        momentum = (closes[-1] - closes[-self.params.lookback_period]) / closes[-self.params.lookback_period]
-        
-        # Bollinger Band position
-        bb_upper, bb_middle, bb_lower = self._calculate_bollinger_bands(closes)
-        bb_position = (closes[-1] - bb_lower) / (bb_upper - bb_lower) if bb_upper != bb_lower else 0.5
-        
-        # Volume ratio (current vs average)
-        volumes = [p['volume'] for p in price_data]
-        volume_ratio = volumes[-1] / (sum(volumes[-20:]) / 20) if volumes[-20:] else 1.0
-        
-        return {
-            'rsi': rsi / 100.0,  # Normalize to 0-1
-            'momentum': min(max(momentum, -0.1), 0.1),  # Normalize to -0.1 to 0.1
-            'bb_position': min(max(bb_position, 0), 1),  # Normalize to 0-1
-            'volume_ratio': min(max(volume_ratio, 0.5), 2.0)  # Normalize to 0.5-2.0
-        }
-    
-    def _get_q_value(self, state: Dict[str, float], action: str) -> float:
-        """Get Q-value for state-action pair."""
-        state_key = str(sorted(state.items()))
-        if state_key not in self.q_table:
-            self.q_table[state_key] = {a: 0.0 for a in self.action_space}
-        
-        return self.q_table[state_key].get(action, 0.0)
-    
-    def _update_q_value(self, state: Dict[str, float], action: str, reward: float, next_state: Dict[str, float]):
-        """Update Q-value using Q-learning update rule."""
-        state_key = str(sorted(state.items()))
-        next_state_key = str(sorted(next_state.items()))
-        
-        if state_key not in self.q_table:
-            self.q_table[state_key] = {a: 0.0 for a in self.action_space}
-        if next_state_key not in self.q_table:
-            self.q_table[next_state_key] = {a: 0.0 for a in self.action_space}
-        
-        current_q = self.q_table[state_key][action]
-        max_next_q = max(self.q_table[next_state_key].values())
-        
-        new_q = current_q + self.params.learning_rate * (reward + self.params.reward_decay * max_next_q - current_q)
-        self.q_table[state_key][action] = new_q
-    
-    def _choose_action(self, state: Dict[str, float]) -> str:
-        """Choose action based on Q-table with exploration."""
-        if np.random.random() < self.params.exploration_rate:
-            return np.random.choice(self.action_space)
-        
-        state_key = str(sorted(state.items()))
-        if state_key not in self.q_table:
-            return 'HOLD'
-        
-        q_values = self.q_table[state_key]
-        return max(q_values, key=q_values.get)
-    
-    def _calculate_reward(self, trade_result: TradeRecord, prev_state: Dict[str, float], new_state: Dict[str, float]) -> float:
-        """Calculate reward for trade."""
-        reward = 0.0
-        
-        # Base reward from PnL
-        if trade_result.success:
-            reward += trade_result.pnl / 100.0  # Normalize PnL
-        
-        # Bonus for winning trades
-        if trade_result.pnl > 0:
-            reward += 1.0
-        
-        # Penalty for losing trades
-        elif trade_result.pnl < 0:
-            reward -= 1.0
-        
-        # Reward for good risk management
-        if abs(trade_result.pnl) < self.params.position_size_usd * 0.02:  # Small loss
-            reward += 0.5
-        
-        # Penalty for large losses
-        if abs(trade_result.pnl) > self.params.position_size_usd * 0.05:  # Large loss
-            reward -= 2.0
-        
-        return reward
-    
-    def _execute_market_order(self, symbol: str, side: OrderSide, qty: float):
-        """Execute market order."""
-        try:
-            order_request = MarketOrderRequest(
-                symbol=symbol,
-                qty=qty,
-                side=side,
-                time_in_force=TimeInForce.DAY
-            )
-            
-            order = self.trading_client.submit_order(order_request)
-            logger.info(f"Order submitted: {side.value} {qty} {symbol} @ market")
-            return order
-        except Exception as e:
-            logger.error(f"Error executing order: {e}")
+        # paper=True is deliberately hardcoded: Argus never touches live money
+        # unless this line is consciously changed and reviewed.
+        self.trading = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
+        self.data = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+        self.db = get_db()
+        self.sentiment = get_sentiment_provider()
+        self.config: Dict[str, float] = self.db.get_config()
+        self.watchlist: list = universe.get_watchlist()
+        self.last_cycle: Dict[str, Any] = {}
+        self._open_entries: Dict[str, Dict[str, Any]] = {}
+        # symbol -> time.monotonic() deadline until which entries are benched
+        self._cooldowns: Dict[str, float] = {}
+        self._current_day: Optional[str] = None
+        self._shutdown = asyncio.Event()
+
+    # ------------------------------------------------------------------ #
+    # loser cooldown
+    # ------------------------------------------------------------------ #
+
+    def in_cooldown(self, symbol: str) -> Optional[float]:
+        """Remaining cooldown in minutes, or None when tradable."""
+        deadline = self._cooldowns.get(symbol)
+        if deadline is None:
             return None
-    
-    def _check_risk_management(self) -> bool:
-        """Check risk management rules."""
-        # Check daily stop loss
-        if self.daily_pnl < -self.params.daily_stop_loss:
-            logger.warning(f"Daily stop loss reached: ${self.daily_pnl:.2f}")
-            return False
-        
-        # Check max drawdown
-        account_balance = float(self._get_account_balance())
-        if account_balance > 0:
-            drawdown = (self.params.position_size_usd * self.params.max_positions - account_balance) / account_balance
-            if drawdown > self.params.max_drawdown:
-                logger.warning(f"Max drawdown reached: {drawdown:.2%}")
-                return False
-        
-        # Check max positions
-        current_positions = self._get_current_positions()
-        if len(current_positions) >= self.params.max_positions:
-            logger.info(f"Max positions reached: {len(current_positions)}")
-            return False
-        
-        return True
-    
-    def _execute_emergency_exit(self):
-        """Emergency exit all positions."""
-        logger.warning("Executing emergency exit...")
-        positions = self._get_current_positions()
-        
-        for pos in positions:
-            if pos['side'] == 'long':
-                self._execute_market_order(pos['symbol'], OrderSide.SELL, pos['qty'])
-                logger.info(f"Emergency exit: SELL {pos['qty']} {pos['symbol']}")
-    
-    def _calculate_daily_pnl(self) -> float:
-        """Calculate daily PnL."""
-        positions = self._get_current_positions()
-        daily_pnl = 0.0
-        
-        for pos in positions:
-            daily_pnl += float(pos['unrealized_pl'])
-        
-        return daily_pnl
-    
-    def _update_trading_state(self):
-        """Update trading state and performance metrics."""
-        self.daily_pnl = self._calculate_daily_pnl()
-        
-        # Update performance metrics
-        if self.trade_history:
-            wins = [t for t in self.trade_history if t.pnl > 0]
-            losses = [t for t in self.trade_history if t.pnl <= 0]
-            
-            self.performance_metrics['total_trades'] = len(self.trade_history)
-            self.performance_metrics['winning_trades'] = len(wins)
-            self.performance_metrics['losing_trades'] = len(losses)
-            self.performance_metrics['win_rate'] = len(wins) / len(self.trade_history) if self.trade_history else 0
-            
-            total_wins = sum(t.pnl for t in wins)
-            total_losses = abs(sum(t.pnl for t in losses))
-            self.performance_metrics['profit_factor'] = total_wins / total_losses if total_losses > 0 else float('inf')
-    
-    def _retrain_model(self):
-        """Retrain ML model based on recent performance."""
-        logger.info("Retraining ML model...")
-        
-        # Adjust learning rate based on performance
-        if self.performance_metrics['win_rate'] < self.params.target_win_rate:
-            self.params.learning_rate *= 1.1  # Increase learning rate
-        else:
-            self.params.learning_rate *= 0.9  # Decrease learning rate
-        
-        # Adjust exploration rate
-        if self.performance_metrics['profit_factor'] < self.params.target_profit_factor:
-            self.params.exploration_rate = min(self.params.exploration_rate * 1.1, 0.3)
-        else:
-            self.params.exploration_rate = max(self.params.exploration_rate * 0.9, 0.05)
-        
-        # Log learning progress
-        self.learning_log.append({
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'win_rate': self.performance_metrics['win_rate'],
-            'profit_factor': self.performance_metrics['profit_factor'],
-            'learning_rate': self.params.learning_rate,
-            'exploration_rate': self.params.exploration_rate
-        })
-        
-        logger.info(f"Model retrained. Win Rate: {self.performance_metrics['win_rate']:.2%}, "
-                   f"Profit Factor: {self.performance_metrics['profit_factor']:.2f}")
-    
-    def _make_trading_decision(self, symbol: str) -> str:
-        """Make trading decision using ML model."""
-        state = self._get_state_features(symbol)
-        
-        # Get current positions for this symbol
-        positions = self._get_current_positions()
-        current_position = next((p for p in positions if p['symbol'] == symbol), None)
-        
-        # If we have a position, consider selling
-        if current_position:
-            # Calculate potential reward for selling
-            sell_reward = self._get_q_value(state, 'SELL')
-            hold_reward = self._get_q_value(state, 'HOLD')
-            
-            if sell_reward > hold_reward:
-                return 'SELL'
-            else:
-                return 'HOLD'
-        
-        # If no position, consider buying
-        buy_reward = self._get_q_value(state, 'BUY')
-        hold_reward = self._get_q_value(state, 'HOLD')
-        
-        if buy_reward > hold_reward:
-            return 'BUY'
-        else:
-            return 'HOLD'
-    
-    async def run_trading_loop(self):
-        """Main async trading loop with learning capabilities."""
-        logger.info("=" * 60)
-        logger.info("SELF-IMPROVING TRADING LOOP STARTED")
-        logger.info("=" * 60)
-        self._update_bot_status("RUNNING")
-        
-        iteration = 0
-        while self.bot_status == "RUNNING":
-            iteration += 1
-            logger.info(f"--- Trading loop iteration {iteration} ---")
-            
-            try:
-                self._check_daily_reset()
-                
-                if self._check_risk_management():
-                    for symbol in self.trading_symbols:
-                        try:
-                            logger.info(f"Processing symbol: {symbol}")
-                            
-                            # Get current state
-                            prev_state = self._get_state_features(symbol)
-                            
-                            # Make trading decision
-                            action = self._make_trading_decision(symbol)
-                            logger.info(f"Decision for {symbol}: {action}")
-                            
-                            # Execute action
-                            if action == 'BUY':
-                                price_data = self._get_price_data(symbol, limit=10)
-                                if price_data:
-                                    current_price = price_data[-1]['close']
-                                    order_qty = self.params.position_size_usd / current_price
-                                    
-                                    order = self._execute_market_order(symbol, OrderSide.BUY, order_qty)
-                                    if order:
-                                        trade = TradeRecord(
-                                            symbol=symbol,
-                                            side='BUY',
-                                            price=current_price,
-                                            quantity=order_qty,
-                                            timestamp=datetime.now(timezone.utc).isoformat(),
-                                            strategy=self.params.strategy_type
-                                        )
-                                        self.trade_history.append(trade)
-                                        
-                                        # Update Q-table with reward
-                                        new_state = self._get_state_features(symbol)
-                                        reward = self._calculate_reward(trade, prev_state, new_state)
-                                        self._update_q_value(prev_state, 'BUY', reward, new_state)
-                                        
-                                        logger.info(f"BUY executed: {order_qty:.4f} {symbol} @ ${current_price:.2f}")
-                            
-                            elif action == 'SELL':
-                                positions = self._get_current_positions()
-                                position = next((p for p in positions if p['symbol'] == symbol), None)
-                                
-                                if position:
-                                    order = self._execute_market_order(symbol, OrderSide.SELL, position['qty'])
-                                    if order:
-                                        trade = TradeRecord(
-                                            symbol=symbol,
-                                            side='SELL',
-                                            price=position['avg_entry_price'],
-                                            quantity=position['qty'],
-                                            timestamp=datetime.now(timezone.utc).isoformat(),
-                                            pnl=position['unrealized_pl'],
-                                            strategy=self.params.strategy_type
-                                        )
-                                        self.trade_history.append(trade)
-                                        
-                                        # Update Q-table with reward
-                                        new_state = self._get_state_features(symbol)
-                                        reward = self._calculate_reward(trade, prev_state, new_state)
-                                        self._update_q_value(prev_state, 'SELL', reward, new_state)
-                                        
-                                        logger.info(f"SELL executed: {position['qty']} {symbol} @ ${position['avg_entry_price']:.2f}")
-                                        
-                            # Update trading state
-                            self._update_trading_state()
-                            
-                            # Check if it's time to retrain model
-                            self.trades_since_last_retrain += 1
-                            if self.trades_since_last_retrain >= self.params.ml_retrain_frequency:
-                                self._retrain_model()
-                                self.trades_since_last_retrain = 0
-                        
-                        except Exception as e:
-                            logger.error(f"Error processing {symbol}: {str(e)}", exc_info=True)
-                
-                # Update state every 10 seconds
-                logger.info("Updating trading state")
-                self._update_trading_state()
-                logger.info("Trading state updated")
-                
-                await asyncio.sleep(10)
-                
-            except Exception as e:
-                logger.error(f"Error in trading loop iteration {iteration}: {str(e)}", exc_info=True)
-                logger.info("Waiting 30 seconds before retry")
-                await asyncio.sleep(30)
-        
-        logger.info("Trading loop ended - bot stopped")
-    
-    def kill_bot(self):
-        """Kill the bot and liquidate positions."""
-        logger.warning("Emergency kill switch activated")
-        self._execute_emergency_exit()
-        self._update_bot_status("STOPPED")
-        return True
-    
-    def update_params(self, new_params: dict):
-        """Update bot parameters dynamically."""
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            del self._cooldowns[symbol]
+            return None
+        return remaining / 60.0
+
+    def start_cooldown(self, symbol: str) -> None:
+        if COOLDOWN_MINUTES > 0:
+            self._cooldowns[symbol] = time.monotonic() + COOLDOWN_MINUTES * 60.0
+
+    # ------------------------------------------------------------------ #
+    # sentiment filter
+    # ------------------------------------------------------------------ #
+
+    async def process_news_sentiment(self, symbol: str) -> Tuple[float, str]:
+        """Score curated news sentiment for a symbol, in [0, 1].
+
+        Delegates to the layered pipeline in sentiment.py: Alpaca news
+        headlines scored by Claude when ANTHROPIC_API_KEY is set, keyword
+        heuristic otherwise, neutral 0.5 when there is no news. Returns
+        (score, source). Called only after the technical trigger fired,
+        and cached per symbol, to keep LLM cost negligible.
+        """
+        result = await asyncio.to_thread(self.sentiment.score, symbol)
+        return float(result["score"]), str(result["source"])
+
+    # ------------------------------------------------------------------ #
+    # market data & signals
+    # ------------------------------------------------------------------ #
+
+    async def fetch_minute_bars(self) -> Dict[str, pd.DataFrame]:
+        """Fetch recent 1-minute bars for the whole watchlist in one request."""
+        if not self.watchlist:
+            return {}
+        start = datetime.now(timezone.utc) - timedelta(minutes=BAR_LOOKBACK_MINUTES)
+        request = StockBarsRequest(
+            symbol_or_symbols=self.watchlist,
+            timeframe=TimeFrame.Minute,
+            start=start,
+        )
         try:
-            for key, value in new_params.items():
-                if hasattr(self.params, key):
-                    setattr(self.params, key, value)
-                    logger.info(f"Parameter updated: {key} = {value}")
-            
-            self._update_trading_state()
-            return True
-        except Exception as e:
-            logger.error(f"Error updating parameters: {e}")
-            return False
-    
-    def get_performance_report(self) -> dict:
-        """Get comprehensive performance report."""
+            bars = await asyncio.to_thread(self.data.get_stock_bars, request)
+        except Exception as exc:
+            logger.error("Failed to fetch 1-minute bars: %s", exc)
+            self.db.add_log("ERROR", f"Bar fetch failed: {exc}")
+            return {}
+
+        frames: Dict[str, pd.DataFrame] = {}
+        df = bars.df
+        if df is None or df.empty:
+            return frames
+        for symbol in self.watchlist:
+            try:
+                symbol_df = df.xs(symbol, level="symbol")
+            except KeyError:
+                continue
+            if not symbol_df.empty:
+                frames[symbol] = symbol_df.sort_index()
+        return frames
+
+    async def evaluate_signal(
+        self, symbol: str, bars: pd.DataFrame
+    ) -> Optional[Dict[str, Any]]:
+        """Layered BUY decision: RSI trigger → cooldown → VWAP dip
+        confirmation → news sentiment. Cheap technical gates run first so
+        the LLM is only consulted for genuine candidates."""
+        period = max(int(self.config["rsi_period"]), 2)
+        if len(bars) < period * 2:
+            return None
+
+        rsi_series = compute_rsi(bars["close"], period)
+        latest_rsi = float(rsi_series.iloc[-1])
+        latest_close = float(bars["close"].iloc[-1])
+        if np.isnan(latest_rsi) or latest_close < MIN_PRICE_USD:
+            return None
+
+        if latest_rsi >= self.config["rsi_buy_signal"]:
+            return None
+
+        cooldown_left = self.in_cooldown(symbol)
+        if cooldown_left is not None:
+            self.db.add_log(
+                "INFO",
+                f"{symbol}: RSI {latest_rsi:.1f} triggered but symbol is in "
+                f"post-loss cooldown for another {cooldown_left:.0f}m — skipped",
+            )
+            return None
+
+        # Mean reversion needs a genuine dip: price stretched below the
+        # session's volume-weighted fair value, not an RSI artifact.
+        vwap = float(compute_vwap(bars).iloc[-1])
+        if latest_close > vwap:
+            self.db.add_log(
+                "INFO",
+                f"{symbol}: RSI {latest_rsi:.1f} triggered but price "
+                f"${latest_close:.2f} is above VWAP ${vwap:.2f} — not a real "
+                f"dip, skipped",
+            )
+            return None
+
+        atr = float(compute_atr(bars).iloc[-1])
+        if np.isnan(atr) or atr <= 0:
+            return None
+
+        sentiment, source = await self.process_news_sentiment(symbol)
+        if sentiment <= self.config["news_cutoff"]:
+            self.db.add_log(
+                "INFO",
+                f"{symbol}: RSI {latest_rsi:.1f} triggered but sentiment "
+                f"{sentiment:.2f} ({source}) <= cutoff "
+                f"{self.config['news_cutoff']:.2f} — skipped",
+            )
+            return None
+
         return {
-            'performance_metrics': self.performance_metrics,
-            'current_params': asdict(self.params),
-            'trade_history_count': len(self.trade_history),
-            'learning_log': self.learning_log[-10:],  # Last 10 learning entries
-            'q_table_size': len(self.q_table),
-            'bot_status': self.bot_status,
-            'daily_pnl': self.daily_pnl,
-            'timestamp': datetime.now(timezone.utc).isoformat()
+            "symbol": symbol,
+            "price": latest_close,
+            "rsi": latest_rsi,
+            "vwap": vwap,
+            "atr": atr,
+            "sentiment": sentiment,
+            "sentiment_source": source,
         }
 
+    # ------------------------------------------------------------------ #
+    # order placement
+    # ------------------------------------------------------------------ #
 
-def main():
-    """Main entry point."""
-    logger.info("=" * 60)
-    logger.info("SELF-IMPROVING TRADING BOT STARTING")
-    logger.info("=" * 60)
-    
-    bot = TradingBot()
-    
-    logger.info(f"Bot initialized with strategy: {bot.params.strategy_type}")
-    logger.info(f"Symbols: {bot.trading_symbols}")
-    logger.info(f"Learning rate: {bot.params.learning_rate}")
-    logger.info(f"Exploration rate: {bot.params.exploration_rate}")
-    
+    async def place_bracket_buy(self, signal: Dict[str, Any]) -> None:
+        symbol = signal["symbol"]
+        price = signal["price"]
+
+        # Brackets scale with the symbol's own volatility (ATR multiples
+        # tuned nightly by the optimizer, floored in indicators.py).
+        stop_distance, target_distance = bracket_distances(
+            price,
+            signal["atr"],
+            self.config["atr_stop_mult"],
+            self.config["atr_target_mult"],
+        )
+
+        # Volatility-scaled sizing: risk a roughly constant dollar amount
+        # per trade, capped by the notional position size. Wide stop on a
+        # volatile name → fewer shares; tight stop on a quiet name → more.
+        qty = int(POSITION_SIZE_USD // price)
+        if RISK_PER_TRADE_USD > 0:
+            qty = min(qty, int(RISK_PER_TRADE_USD // stop_distance))
+        if qty < 1:
+            self.db.add_log(
+                "WARNING",
+                f"{symbol}: cannot size a whole share within notional "
+                f"${POSITION_SIZE_USD:.0f} and risk ${RISK_PER_TRADE_USD:.0f} "
+                f"(price ${price:.2f}, stop distance ${stop_distance:.2f})",
+            )
+            return
+
+        take_profit = round(price + target_distance, 2)
+        stop_loss = round(price - stop_distance, 2)
+        # Penny rounding must never collapse a bracket onto the entry price.
+        take_profit = max(take_profit, round(price + 0.01, 2))
+        stop_loss = min(stop_loss, round(price - 0.01, 2))
+
+        order_request = MarketOrderRequest(
+            symbol=symbol,
+            qty=qty,
+            side=OrderSide.BUY,
+            time_in_force=TimeInForce.DAY,
+            order_class=OrderClass.BRACKET,
+            take_profit=TakeProfitRequest(limit_price=take_profit),
+            stop_loss=StopLossRequest(stop_price=stop_loss),
+        )
+        try:
+            order = await asyncio.to_thread(self.trading.submit_order, order_request)
+        except Exception as exc:
+            logger.error("Order submission failed for %s: %s", symbol, exc)
+            self.db.add_log("ERROR", f"{symbol}: order submission failed: {exc}")
+            return
+
+        self._open_entries[symbol] = {
+            "qty": float(qty),
+            "entry_price": price,
+            "entry_time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        self.db.add_log(
+            "TRADE",
+            f"BUY {qty} {symbol} @ ~${price:.2f} | RSI {signal['rsi']:.1f} | "
+            f"VWAP ${signal['vwap']:.2f} | ATR ${signal['atr']:.3f} | "
+            f"sentiment {signal['sentiment']:.2f} "
+            f"({signal.get('sentiment_source', '?')}) | TP ${take_profit:.2f} | "
+            f"SL ${stop_loss:.2f} | risk ~${qty * stop_distance:.0f} | "
+            f"order {getattr(order, 'id', '?')}",
+        )
+        logger.info("Submitted bracket BUY for %s x%d @ ~%.2f", symbol, qty, price)
+
+    # ------------------------------------------------------------------ #
+    # portfolio sync & trade reconciliation
+    # ------------------------------------------------------------------ #
+
+    async def sync_portfolio(self) -> Optional[Dict[str, Any]]:
+        """Mirror live Alpaca account/positions into SQLite for the frontend."""
+        try:
+            account = await asyncio.to_thread(self.trading.get_account)
+            live_positions = await asyncio.to_thread(self.trading.get_all_positions)
+        except Exception as exc:
+            logger.error("Portfolio sync failed: %s", exc)
+            self.db.add_log("ERROR", f"Portfolio sync failed: {exc}")
+            return None
+
+        snapshot = [
+            {
+                "symbol": p.symbol,
+                "qty": float(p.qty),
+                "avg_entry_price": float(p.avg_entry_price),
+            }
+            for p in live_positions
+        ]
+        self.db.replace_positions(snapshot)
+
+        live_symbols = {p["symbol"] for p in snapshot}
+        for symbol, entry in list(self._open_entries.items()):
+            if symbol in live_symbols:
+                continue
+            await self.reconcile_closed_trade(symbol, entry)
+            del self._open_entries[symbol]
+
+        # Adopt positions opened outside this process (e.g. before a restart)
+        # so their eventual close still produces a trade record.
+        for pos in snapshot:
+            self._open_entries.setdefault(
+                pos["symbol"],
+                {
+                    "qty": pos["qty"],
+                    "entry_price": pos["avg_entry_price"],
+                    "entry_time": datetime.now(timezone.utc).isoformat(
+                        timespec="seconds"
+                    ),
+                },
+            )
+
+        equity = float(account.equity)
+        self.db.set_status(equity=equity)
+        return {"equity": equity, "positions": snapshot}
+
+    async def reconcile_closed_trade(self, symbol: str, entry: Dict[str, Any]) -> None:
+        """A tracked position vanished — find its exit fill and log the trade."""
+        exit_price: Optional[float] = None
+        try:
+            closed_orders = await asyncio.to_thread(
+                self.trading.get_orders,
+                GetOrdersRequest(
+                    status=QueryOrderStatus.CLOSED, symbols=[symbol], limit=10
+                ),
+            )
+            for order in closed_orders:
+                if order.side == OrderSide.SELL and order.filled_avg_price:
+                    exit_price = float(order.filled_avg_price)
+                    break
+        except Exception as exc:
+            logger.error("Exit reconciliation failed for %s: %s", symbol, exc)
+            self.db.add_log("ERROR", f"{symbol}: exit reconciliation failed: {exc}")
+
+        qty = float(entry["qty"])
+        entry_price = float(entry["entry_price"])
+        realized = None if exit_price is None else (exit_price - entry_price) * qty
+        exit_time = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        self.db.record_trade(
+            symbol=symbol,
+            side="LONG",
+            qty=qty,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            entry_time=entry["entry_time"],
+            exit_time=exit_time,
+            realized_pnl=realized,
+        )
+        pnl_text = "unknown PnL" if realized is None else f"PnL ${realized:+.2f}"
+        self.db.add_log("TRADE", f"CLOSED {symbol} x{qty:g} — {pnl_text}")
+
+        # Bench losers: an unknown exit price is treated as a loss too —
+        # the conservative assumption when reconciliation could not find
+        # the fill.
+        if realized is None or realized < 0:
+            self.start_cooldown(symbol)
+
+    # ------------------------------------------------------------------ #
+    # risk management
+    # ------------------------------------------------------------------ #
+
+    async def check_daily_risk(self, equity: float) -> bool:
+        """Return True when trading may continue, False after a kill."""
+        status = self.db.get_status()
+        daily_pnl = equity - status["daily_start_balance"]
+        if status["daily_start_balance"] > 0 and daily_pnl <= -DAILY_STOP_LOSS:
+            logger.critical(
+                "Daily loss limit breached: %.2f <= -%.2f", daily_pnl, DAILY_STOP_LOSS
+            )
+            await self.kill_sequence(
+                f"Daily loss ${-daily_pnl:.2f} breached limit ${DAILY_STOP_LOSS:.2f}"
+            )
+            return False
+        return True
+
+    async def kill_sequence(self, reason: str) -> None:
+        """Emergency shutdown: flatten everything, persist KILLED, stop."""
+        self.db.add_log("CRITICAL", f"KILL SEQUENCE INITIATED: {reason}")
+        try:
+            await asyncio.to_thread(self.trading.cancel_orders)
+            self.db.add_log("CRITICAL", "All open orders cancelled")
+        except Exception as exc:
+            logger.error("Cancel-all failed during kill sequence: %s", exc)
+            self.db.add_log("ERROR", f"Cancel-all failed: {exc}")
+        try:
+            await asyncio.to_thread(
+                self.trading.close_all_positions, cancel_orders=True
+            )
+            self.db.add_log("CRITICAL", "All positions liquidated")
+        except Exception as exc:
+            logger.error("Liquidation failed during kill sequence: %s", exc)
+            self.db.add_log("ERROR", f"Liquidation failed: {exc}")
+        self.db.set_status(status=STATUS_KILLED)
+        self.db.add_log("CRITICAL", "Bot state set to KILLED — engine shutting down")
+        self._shutdown.set()
+
+    # ------------------------------------------------------------------ #
+    # daily anchor (Europe/Zurich)
+    # ------------------------------------------------------------------ #
+
+    def roll_daily_anchor(self, equity: float) -> None:
+        """Reset the daily PnL baseline at Swiss midnight."""
+        today = datetime.now(ZURICH).strftime("%Y-%m-%d")
+        if self._current_day == today:
+            return
+        self._current_day = today
+        self.db.set_status(daily_start_balance=equity)
+        self.db.add_log(
+            "INFO",
+            f"New trading day {today} (Europe/Zurich) — "
+            f"daily baseline set to ${equity:,.2f}",
+        )
+
+    # ------------------------------------------------------------------ #
+    # main loop
+    # ------------------------------------------------------------------ #
+
+    async def run(self) -> None:
+        if self.db.is_killed():
+            logger.critical(
+                "bot_status is KILLED — refusing to start. "
+                "Reset the status to RUNNING to re-enable trading."
+            )
+            self.db.add_log("CRITICAL", "Startup aborted: bot_status is KILLED")
+            return
+
+        self.db.set_status(status=STATUS_RUNNING)
+        self.db.add_log(
+            "INFO",
+            f"Argus engine started (paper trading) — universe "
+            f"{universe.describe_mode()} | position size ${POSITION_SIZE_USD:.0f} "
+            f"| risk/trade ${RISK_PER_TRADE_USD:.0f} | max positions "
+            f"{MAX_POSITIONS} | daily stop ${DAILY_STOP_LOSS:.0f} | loser "
+            f"cooldown {COOLDOWN_MINUTES:.0f}m | regime filter on "
+            f"{regime.REGIME_SYMBOL}",
+        )
+        logger.info("Argus engine started — universe %s", universe.describe_mode())
+
+        while not self._shutdown.is_set():
+            try:
+                await self.run_cycle()
+            except Exception as exc:
+                # Belt-and-braces: run_cycle guards each API call, but the
+                # engine must survive anything unexpected as well.
+                logger.exception("Unhandled error in trading cycle: %s", exc)
+                self.db.add_log("ERROR", f"Unhandled cycle error: {exc}")
+            try:
+                await asyncio.wait_for(
+                    self._shutdown.wait(), timeout=POLL_INTERVAL_SECONDS
+                )
+            except asyncio.TimeoutError:
+                pass
+
+        logger.info("Argus engine stopped")
+
+    async def run_cycle(self) -> None:
+        cycle: Dict[str, Any] = {
+            "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "stage": "start",
+        }
+        try:
+            await self._run_cycle_inner(cycle)
+        finally:
+            cycle["finished_at"] = datetime.now(timezone.utc).isoformat(
+                timespec="seconds"
+            )
+            self.last_cycle = cycle
+
+    async def _run_cycle_inner(self, cycle: Dict[str, Any]) -> None:
+        # Absorb parameter changes written by the optimizer overnight.
+        self.config = self.db.get_config()
+        cycle["config"] = dict(self.config)
+
+        # Honour an external kill (e.g. the dashboard's EMERGENCY HARD STOP).
+        if self.db.is_killed():
+            self.db.add_log("CRITICAL", "External KILL detected — engine stopping")
+            self._shutdown.set()
+            cycle["stage"] = "external-kill"
+            return
+
+        # Refresh the trading universe (no-op in static mode, cached in
+        # dynamic whole-market mode).
+        self.watchlist = await asyncio.to_thread(universe.get_watchlist)
+        cycle["watchlist_size"] = len(self.watchlist)
+
+        portfolio = await self.sync_portfolio()
+        if portfolio is None:
+            cycle["stage"] = "portfolio-sync-failed"
+            return
+        cycle["equity"] = portfolio["equity"]
+
+        self.roll_daily_anchor(portfolio["equity"])
+        if not await self.check_daily_risk(portfolio["equity"]):
+            cycle["stage"] = "risk-kill"
+            return
+
+        try:
+            clock = await asyncio.to_thread(self.trading.get_clock)
+        except Exception as exc:
+            logger.error("Clock fetch failed: %s", exc)
+            self.db.add_log("ERROR", f"Clock fetch failed: {exc}")
+            cycle["stage"] = "clock-fetch-failed"
+            return
+        cycle["market_open"] = clock.is_open
+        if not clock.is_open:
+            logger.info("Market closed — next open %s", clock.next_open)
+            cycle["stage"] = "market-closed"
+            cycle["next_open"] = str(clock.next_open)
+            return
+
+        held_symbols = {p["symbol"] for p in portfolio["positions"]}
+        open_slots = MAX_POSITIONS - len(held_symbols)
+        cycle["held_symbols"] = sorted(held_symbols)
+        cycle["open_slots"] = open_slots
+        if open_slots <= 0:
+            cycle["stage"] = "max-positions"
+            return
+
+        # Market regime gate: in RISK_OFF (index falling on stressed vol)
+        # every dip is a knife — stop opening new positions. Existing
+        # positions keep their brackets; the daily stop still guards them.
+        regime_info = await asyncio.to_thread(regime.get_regime)
+        cycle["regime"] = regime_info
+        if regime.blocks_new_entries(regime_info):
+            self.db.add_log(
+                "INFO",
+                f"Regime RISK_OFF ({regime_info['symbol']} "
+                f"${regime_info.get('close', 0):.2f} < EMA "
+                f"${regime_info.get('ema', 0):.2f}, realized vol "
+                f"{regime_info.get('realized_vol_pct', 0):.0f}%) — "
+                f"no new entries this cycle",
+            )
+            cycle["stage"] = "risk-off"
+            return
+
+        frames = await self.fetch_minute_bars()
+        cycle["symbols_with_bars"] = len(frames)
+        evaluated: Dict[str, str] = {}
+        for symbol, bars in frames.items():
+            if open_slots <= 0:
+                break
+            if symbol in held_symbols:
+                evaluated[symbol] = "held"
+                continue
+            signal_info = await self.evaluate_signal(symbol, bars)
+            if signal_info is not None:
+                await self.place_bracket_buy(signal_info)
+                evaluated[symbol] = "buy"
+                open_slots -= 1
+            else:
+                evaluated[symbol] = "no-signal"
+        cycle["evaluated"] = evaluated
+        cycle["stage"] = "complete"
+
+
+class EngineController:
+    """Owns the engine task's lifecycle so the debug API can inspect it,
+    kill it, and — unlike the old design — restart it after a KILLED state
+    without a container bounce."""
+
+    def __init__(self) -> None:
+        self.bot: Optional[ArgusBot] = None
+        self.task: Optional[asyncio.Task] = None
+        self.started_at: Optional[str] = None
+
+    @property
+    def engine_running(self) -> bool:
+        return self.task is not None and not self.task.done()
+
+    async def start_engine(self) -> Tuple[bool, str]:
+        if self.engine_running:
+            return False, "engine already running"
+        if get_db().is_killed():
+            return False, "bot_status is KILLED — POST /reset to recover"
+        self.bot = ArgusBot()
+        self.task = asyncio.create_task(self.bot.run())
+        self.started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        return True, "engine started"
+
+    async def kill(self, reason: str) -> None:
+        if self.engine_running and self.bot is not None:
+            await self.bot.kill_sequence(reason)
+            return
+        # Engine not running (crashed, or already killed): still flatten
+        # everything and persist KILLED via a fresh bot instance.
+        bot = self.bot or ArgusBot()
+        await bot.kill_sequence(reason)
+
+    async def reset(self) -> Tuple[bool, str]:
+        db = get_db()
+        if not db.is_killed():
+            return False, "bot_status is not KILLED — nothing to reset"
+        if self.engine_running:
+            return False, "engine still running — wait for it to stop"
+        db.set_status(status=STATUS_RUNNING)
+        db.add_log("INFO", "Status reset RUNNING via debug API — restarting engine")
+        return await self.start_engine()
+
+
+async def main() -> None:
+    import uvicorn
+
+    from api import create_app
+    from optimizer import schedule_daily_optimization
+
+    controller = EngineController()
+    started, message = await controller.start_engine()
+    if not started:
+        logger.critical("Engine not started: %s (API stays up for /reset)", message)
+
+    optimizer_task = asyncio.create_task(schedule_daily_optimization())
+
+    # The debug API runs in the same event loop as the engine so it can
+    # introspect live state. uvicorn owns SIGINT/SIGTERM: when the server
+    # stops, the engine and optimizer are shut down in `finally`.
+    server = uvicorn.Server(
+        uvicorn.Config(
+            create_app(controller),
+            host="0.0.0.0",
+            port=API_PORT,
+            log_level="warning",
+        )
+    )
+    logger.info("Debug API listening on :%d (docs at /docs)", API_PORT)
     try:
-        logger.info("Starting self-improving trading loop...")
-        asyncio.run(bot.run_trading_loop())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user (KeyboardInterrupt)")
-        bot.kill_bot()
-    except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}", exc_info=True)
-        bot.kill_bot()
+        await server.serve()
+    finally:
+        optimizer_task.cancel()
+        if controller.bot is not None:
+            controller.bot._shutdown.set()
+        if controller.task is not None:
+            try:
+                await asyncio.wait_for(controller.task, timeout=10)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

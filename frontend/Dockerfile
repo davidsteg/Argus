@@ -1,25 +1,33 @@
+# Argus frontend — NiceGUI command center.
 FROM python:3.11-slim
 
-ENV TZ=Europe/Zurich
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH="/app/shared:${PYTHONPATH}"
+# All timestamps rendered by the dashboard conform to Swiss time.
+ENV TZ=Europe/Zurich \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/lib \
+    DB_PATH=/app/shared/argus_state.db
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tzdata \
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
+    && echo $TZ > /etc/timezone \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
-COPY shared shared
+# The shared package is installed to /app/lib (on PYTHONPATH) so the
+# /app/shared mount point stays a pure data directory for the SQLite volume.
+COPY shared/ /app/lib/shared/
+COPY frontend/ /app/frontend/
 
-RUN mkdir -p /data
+RUN mkdir -p /app/shared
 
-EXPOSE 8501
+WORKDIR /app/frontend
 
-CMD ["streamlit", "run", "/app/app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+EXPOSE 8080
+
+CMD ["python", "app.py"]

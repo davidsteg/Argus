@@ -1,0 +1,20 @@
+# Secrets — never commit credentials; copy .env.example to .env instead
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local state
+*.db
+*.db-wal
+*.db-shm
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
