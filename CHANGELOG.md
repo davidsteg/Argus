@@ -9,6 +9,18 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.2.4] - 2026-07-07
+
+### Fixed
+- Bracket orders were being rejected repeatedly on cheap, low-ATR symbols
+  (e.g. NVD, OPEN) with `stop_price must be <= base_price - 0.01`. The
+  bracket was priced off the last completed 1-minute bar, which can be up
+  to `POLL_INTERVAL_SECONDS` stale — on a tight ATR-scaled stop that's
+  often narrower than the price movement since the bar closed. The
+  engine now re-prices off the latest trade immediately before submitting
+  the order (falling back to the bar price if that fetch fails), and the
+  penny-rounding floor was widened from 1 cent to 2 cents of slack
+
 ## [v2.2.3] - 2026-07-07
 
 ### Changed

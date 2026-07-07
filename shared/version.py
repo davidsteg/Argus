@@ -10,9 +10,19 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.2.3"
+__version__ = "2.2.4"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.2.4",
+        "date": "2026-07-07",
+        "title": "Fix repeated bracket order rejections",
+        "notes": [
+            "Brackets are now re-priced off the latest trade right before "
+            "submission instead of a possibly-stale 1-minute bar close, "
+            "fixing repeated stop_price rejections on tight-ATR symbols",
+        ],
+    },
     {
         "version": "2.2.3",
         "date": "2026-07-07",

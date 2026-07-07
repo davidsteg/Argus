@@ -35,7 +35,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
+from alpaca.data.requests import StockBarsRequest, StockLatestTradeRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass, OrderSide, QueryOrderStatus, TimeInForce
@@ -249,6 +249,26 @@ class ArgusBot:
         symbol = signal["symbol"]
         price = signal["price"]
 
+        # The signal price comes from the last completed 1-minute bar, which
+        # can be up to POLL_INTERVAL_SECONDS stale. On cheap, low-volatility
+        # tickers the ATR-scaled stop distance is only a few cents, so a
+        # bracket priced off a stale bar routinely landed on the wrong side
+        # of Alpaca's live quote and was rejected outright. Re-price against
+        # the latest trade immediately before submission; fall back to the
+        # bar price if the live quote is unavailable.
+        try:
+            latest_trade = await asyncio.to_thread(
+                self.data.get_stock_latest_trade,
+                StockLatestTradeRequest(symbol_or_symbols=symbol),
+            )
+            price = float(latest_trade[symbol].price)
+        except Exception as exc:
+            logger.warning(
+                "Latest-trade fetch failed for %s, using bar price: %s",
+                symbol,
+                exc,
+            )
+
         # Brackets scale with the symbol's own volatility (ATR multiples
         # tuned nightly by the optimizer, floored in indicators.py).
         stop_distance, target_distance = bracket_distances(
@@ -276,8 +296,10 @@ class ArgusBot:
         take_profit = round(price + target_distance, 2)
         stop_loss = round(price - stop_distance, 2)
         # Penny rounding must never collapse a bracket onto the entry price.
-        take_profit = max(take_profit, round(price + 0.01, 2))
-        stop_loss = min(stop_loss, round(price - 0.01, 2))
+        # The 2-cent floor (not Alpaca's bare 1-cent minimum) leaves a little
+        # slack for the price to keep moving between this quote and the fill.
+        take_profit = max(take_profit, round(price + 0.02, 2))
+        stop_loss = min(stop_loss, round(price - 0.02, 2))
 
         order_request = MarketOrderRequest(
             symbol=symbol,
