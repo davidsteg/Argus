@@ -10,9 +10,19 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.4.2"
+__version__ = "2.4.3"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.4.3",
+        "date": "2026-07-07",
+        "title": "Fix missing openai dependency",
+        "notes": [
+            "Added openai>=1.0.0 to requirements.txt — the analyst module "
+            "imports it for the OpenAI-compatible client but it was missing "
+            "from the Docker image, causing a silent ImportError and 503",
+        ],
+    },
     {
         "version": "2.4.2",
         "date": "2026-07-07",

@@ -9,6 +9,13 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.4.3] - 2026-07-07
+
+### Fixed
+- Missing `openai` dependency in `requirements.txt` — the analyst module
+  imports it for the OpenAI-compatible client but it wasn't installed in the
+  Docker image, causing a silent `ImportError` and 503 on every review attempt
+
 ## [v2.4.2] - 2026-07-07
 
 ### Fixed
