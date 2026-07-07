@@ -9,6 +9,15 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.2.1] - 2026-07-07
+
+### Added
+- GitHub Actions workflow (`.github/workflows/docker-build.yml`): builds
+  `argus-backend` / `argus-frontend` Docker images on pushes to master,
+  version tags and PRs, and publishes them to Docker Hub
+  (`davidsteg/argus-*`) with semver, branch, SHA and `latest` tags
+  (requires `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` repo secrets)
+
 ## [v2.2.0] - 2026-07-07
 
 ### Added

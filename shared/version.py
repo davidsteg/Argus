@@ -10,9 +10,19 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.2.0"
+__version__ = "2.2.1"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.2.1",
+        "date": "2026-07-07",
+        "title": "CI: Docker image builds",
+        "notes": [
+            "GitHub Actions builds and publishes argus-backend / "
+            "argus-frontend images to Docker Hub on master pushes and "
+            "version tags",
+        ],
+    },
     {
         "version": "2.2.0",
         "date": "2026-07-07",
