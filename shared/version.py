@@ -10,9 +10,19 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.2.1"
+__version__ = "2.2.2"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.2.2",
+        "date": "2026-07-07",
+        "title": "CI: tag-only releases with GitHub Releases",
+        "notes": [
+            "Docker images publish to Docker Hub only on version tags "
+            "(subsyncarr-style pipeline); each tag also creates a GitHub "
+            "Release with notes from CHANGELOG.md",
+        ],
+    },
     {
         "version": "2.2.1",
         "date": "2026-07-07",

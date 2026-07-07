@@ -1,0 +1,113 @@
+name: Build and Publish Docker Image
+
+# Builds and pushes to Docker Hub, then publishes a GitHub Release, whenever a
+# version tag is pushed (the same tags already created for each release, e.g.
+# v2.2.1 — AGENTS.md mandates the "v" prefix). Release notes are pulled
+# straight from the matching ## [<version>] section of CHANGELOG.md — keep
+# that up to date when tagging. Does NOT auto-generate its own version;
+# that's still decided manually as part of the normal release process.
+# Deliberately has no manual/workflow_dispatch trigger — only real version
+# tags should ever be pushed to Docker Hub, no "test" or ad-hoc tags.
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write # needed to create the GitHub Release below
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [backend, frontend]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: davidsteg/argus-${{ matrix.service }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.service }}/Dockerfile
+          push: true
+          # amd64 only — no QEMU emulation needed. Re-add linux/arm64 (and the
+          # Set up QEMU step) if this ever needs to run on ARM hardware.
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  release:
+    runs-on: ubuntu-latest
+    needs: docker
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract changelog section for this version
+        run: |
+          VERSION="${{ github.ref_name }}"
+          awk -v target="## [$VERSION]" '
+            index($0, "## [") == 1 {
+              if (found) exit
+              if (index($0, target) == 1) { found=1; next }
+              next
+            }
+            found { print }
+          ' CHANGELOG.md > release_notes.md
+          echo "--- extracted release notes ---"
+          cat release_notes.md
+
+      - name: Build release title from the tagged commit's message
+        id: title
+        run: |
+          VERSION="${{ github.ref_name }}"
+          SUBJECT=$(git log -1 --format=%s)
+          # Strip any leading "word: " or "word(scope): " prefix (feat:, fix:,
+          # chore:, release:, etc.) — generalized rather than a fixed
+          # whitelist, so it doesn't silently do nothing for a prefix that
+          # wasn't anticipated.
+          CLEAN=$(echo "$SUBJECT" | sed -E 's/^[a-zA-Z]+(\([^)]*\))?: //')
+          CLEAN="$(echo "${CLEAN:0:1}" | tr '[:lower:]' '[:upper:]')${CLEAN:1}"
+          # Avoid double-prefixing if the commit message already led with the
+          # version itself (e.g. "release: v2.2.2 — description").
+          if [[ "$CLEAN" == "$VERSION"* ]]; then
+            TITLE="$CLEAN"
+          else
+            TITLE="$VERSION — $CLEAN"
+          fi
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            echo "Release ${{ github.ref_name }} already exists, skipping creation"
+          else
+            gh release create "${{ github.ref_name }}" \
+              --title "${{ steps.title.outputs.title }}" \
+              --notes-file release_notes.md \
+              --latest
+          fi

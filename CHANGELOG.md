@@ -9,6 +9,20 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.2.2] - 2026-07-07
+
+### Changed
+- CI now mirrors the subsyncarr release pipeline
+  (`.github/workflows/docker-publish.yml`): builds and pushes
+  `davidsteg/argus-backend` / `davidsteg/argus-frontend` to Docker Hub
+  **only when a version tag is pushed** (no branch/PR/ad-hoc builds), then
+  auto-creates a GitHub Release whose notes are extracted from the
+  matching section of this file — keep it current when tagging
+- Replaces the v2.2.1 `docker-build.yml` (branch/PR triggers removed on
+  purpose: only real releases reach Docker Hub)
+- Still requires `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` repository
+  secrets in GitHub → Settings → Secrets and variables → Actions
+
 ## [v2.2.1] - 2026-07-07
 
 ### Added
