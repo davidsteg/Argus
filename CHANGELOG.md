@@ -9,6 +9,16 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.4.4] - 2026-07-07
+
+### Fixed
+- Removed `response_format={"type": "json_object"}` from LLM calls (not
+  supported by Ollama Cloud); added JSON extraction from markdown code
+  blocks in responses instead, plus better error logging for debugging
+- Analyst config not persisting: added explicit logging to `_persist_config`
+  so silent failures are visible in container logs
+- Removed unused `output_schema` parameters from `_call_llm` signature
+
 ## [v2.4.3] - 2026-07-07
 
 ### Fixed

@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -58,48 +59,6 @@ SYSTEM_PROMPT = (
     "(daily stop-loss, bracket orders, paper trading).\n\n"
     "Respond with valid JSON only, no markdown, no preamble."
 )
-
-OPTIMIZATION_OUTPUT_SCHEMA = {
-    "type": "json_schema",
-    "schema": {
-        "type": "object",
-        "properties": {
-            "summary": {"type": "string"},
-            "warnings": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-            "suggestions": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-            "confidence": {"type": "number"},
-        },
-        "required": ["summary", "warnings", "suggestions", "confidence"],
-        "additionalProperties": False,
-    },
-}
-
-TRADE_OUTPUT_SCHEMA = {
-    "type": "json_schema",
-    "schema": {
-        "type": "object",
-        "properties": {
-            "summary": {"type": "string"},
-            "warnings": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-            "suggestions": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-            "confidence": {"type": "number"},
-        },
-        "required": ["summary", "warnings", "suggestions", "confidence"],
-        "additionalProperties": False,
-    },
-}
 
 
 class StrategyAnalyst:
@@ -156,12 +115,7 @@ class StrategyAnalyst:
         regime: Dict[str, Any],
         db,
     ) -> Optional[Dict[str, Any]]:
-        """Analyze grid search results after the nightly optimizer runs.
-
-        ``ranked`` is a list of (score, params_dict, (return, drawdown, trades))
-        tuples, best-first. ``winner`` is the params that went live (or None).
-        Returns a report dict or None if disabled/unavailable.
-        """
+        """Analyze grid search results after the nightly optimizer runs."""
         if not self.available or not self.enabled(db):
             return None
 
@@ -206,9 +160,7 @@ class StrategyAnalyst:
         }
 
         try:
-            result = self._call_llm(
-                prompt_data, "optimization", OPTIMIZATION_OUTPUT_SCHEMA
-            )
+            result = self._call_llm(prompt_data, "optimization")
         except Exception as exc:
             logger.error("Optimization review failed: %s", exc)
             return None
@@ -229,10 +181,7 @@ class StrategyAnalyst:
         regime: Dict[str, Any],
         db,
     ) -> Optional[Dict[str, Any]]:
-        """Analyze recent closed trades for failure patterns.
-
-        Returns a report dict or None if disabled/unavailable.
-        """
+        """Analyze recent closed trades for failure patterns."""
         if not self.available or not self.enabled(db):
             return None
 
@@ -290,7 +239,7 @@ class StrategyAnalyst:
         }
 
         try:
-            result = self._call_llm(prompt_data, "trades", TRADE_OUTPUT_SCHEMA)
+            result = self._call_llm(prompt_data, "trades")
         except Exception as exc:
             logger.error("Trade review failed: %s", exc)
             return None
@@ -335,6 +284,9 @@ class StrategyAnalyst:
     def _persist_config(self, db) -> None:
         try:
             db.set_state("analyst_config", self._config)
+            logger.info("Analyst config persisted: base_url=%s model=%s",
+                         self._config.get("base_url", ""),
+                         self._config.get("model", ""))
         except Exception as exc:
             logger.error("Failed to persist analyst config: %s", exc)
 
@@ -365,10 +317,11 @@ class StrategyAnalyst:
         self,
         data: Dict[str, Any],
         review_type: str,
-        output_schema: Dict[str, Any],
     ) -> Dict[str, Any]:
         model = str(self._config.get("model", "deepseek-r1"))
         payload = json.dumps(data, default=str, indent=2)
+        logger.info("Analyst calling %s for %s review (%d chars)",
+                     model, review_type, len(payload))
         response = self._client.chat.completions.create(
             model=model,
             messages=[
@@ -383,12 +336,13 @@ class StrategyAnalyst:
             ],
             temperature=0.3,
             max_tokens=1024,
-            response_format={"type": "json_object"},
         )
         text = response.choices[0].message.content
         if text is None:
             raise RuntimeError("LLM returned empty response")
-        result = json.loads(text)
+        logger.info("Analyst %s review response received (%d chars)",
+                     review_type, len(text))
+        result = self._parse_json(text)
         return {
             "summary": str(result.get("summary", "")),
             "warnings": [
@@ -399,6 +353,14 @@ class StrategyAnalyst:
             ],
             "confidence": max(0.0, min(1.0, float(result.get("confidence", 0.5)))),
         }
+
+    @staticmethod
+    def _parse_json(text: str) -> Dict[str, Any]:
+        text = text.strip()
+        m = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
+        if m:
+            text = m.group(1).strip()
+        return json.loads(text)
 
 
 _analyst: Optional[StrategyAnalyst] = None

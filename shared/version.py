@@ -10,9 +10,20 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.4.3"
+__version__ = "2.4.4"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.4.4",
+        "date": "2026-07-07",
+        "title": "Fix analyst LLM call and config persistence",
+        "notes": [
+            "Removed response_format from LLM calls (not supported by "
+            "Ollama); added JSON extraction from markdown code blocks",
+            "Added logging to _persist_config and _call_llm for debugging",
+            "Removed unused output schema constants",
+        ],
+    },
     {
         "version": "2.4.3",
         "date": "2026-07-07",
