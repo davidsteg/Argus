@@ -1351,6 +1351,7 @@ def dashboard() -> None:
         "equity_key": None,
         "trades_key": None,
         "closing": set(),
+        "analyst_enabled": None,
     }
 
     def render_header(snapshot: Dict[str, Any]) -> None:
@@ -1797,7 +1798,9 @@ def dashboard() -> None:
     def render_analyst(snapshot: Dict[str, Any]) -> None:
         config = snapshot["config"]
         enabled = bool(config.get("analyst_enabled", 0.0))
-        analyst_toggle.set_value(enabled)
+        if render_state["analyst_enabled"] != enabled:
+            render_state["analyst_enabled"] = enabled
+            analyst_toggle.set_value(enabled)
 
         analyst_cfg = snapshot.get("analyst_config") or {}
         model = analyst_cfg.get("model", "deepseek-r1")
