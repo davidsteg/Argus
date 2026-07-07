@@ -9,6 +9,13 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.4.2] - 2026-07-07
+
+### Fixed
+- Infinite toggle loop on the Analyst tab: `render_analyst` now tracks the
+  enabled state and only calls `set_value` when it actually changed,
+  preventing the toggle callback from firing an API call every refresh cycle
+
 ## [v2.4.1] - 2026-07-07
 
 ### Added

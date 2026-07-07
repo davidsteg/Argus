@@ -10,9 +10,20 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.4.1"
+__version__ = "2.4.2"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.4.2",
+        "date": "2026-07-07",
+        "title": "Fix analyst toggle loop",
+        "notes": [
+            "Fixed infinite toggle loop: render_analyst now tracks enabled "
+            "state and only calls set_value when it actually changed, "
+            "preventing the toggle callback from firing an API call every "
+            "refresh cycle",
+        ],
+    },
     {
         "version": "2.4.1",
         "date": "2026-07-07",
