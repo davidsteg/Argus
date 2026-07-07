@@ -8,6 +8,7 @@ import traceback
 from datetime import datetime, timezone
 from typing import Optional, List, Dict
 from fastapi import FastAPI, HTTPException, Request
+app = FastAPI(title="Argus Trading Bot API", version="1.0.0")
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel
@@ -82,7 +83,7 @@ async def startup_event():
     logger.info("=" * 50)
     logger.info("STARTUP: Initializing Trading Bot API")
     logger.info(f"Environment: ALPACA_API_KEY={'set' if os.getenv('ALPACA_API_KEY') else 'NOT SET'}")
-    logger.info(f"Environment: ALPACA_API_SECRET={'set' if os.getenv('ALPACA_API_SECRET') else 'NOT SET'}")
+    logger.info(f"Environment: ALPACA_SECRET_KEY={'set' if os.getenv('ALPACA_SECRET_KEY') else 'NOT SET'}")
     logger.info("=" * 50)
     try:
         logger.info("Creating TradingBot instance...")
@@ -322,3 +323,20 @@ async def get_price_history(symbol: str, limit: int = 100):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+@app.get("/metrics")
+async def get_metrics():
+    """Get trading metrics and performance data."""
+    # For now, return basic metrics
+    metrics = {
+        "daily_pnl": 0.0,
+        "win_rate": 0.0,
+        "balance": 0.0,
+        "total_trades": 0,
+        "winning_trades": 0,
+        "losing_trades": 0
+    }
+    
+    return metrics
+
+
