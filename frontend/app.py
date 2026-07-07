@@ -936,6 +936,20 @@ def dashboard() -> None:
                         "w-full items-center justify-between gap-4 flex-nowrap"
                     ):
                         with ui.column().classes("gap-0 min-w-0"):
+                            ui.label("API Key").classes("text-sm text-white")
+                            ui.label(
+                                "Bearer token (required for Ollama Cloud, "
+                                "leave empty for local)"
+                            ).classes(f"text-xs {TEXT_MUTED}")
+                        analyst_api_key_input = ui.input(
+                            value="", placeholder="sk-..."
+                        ).props("dense outlined type=password").classes(
+                            "w-64 shrink-0"
+                        )
+                    with ui.row().classes(
+                        "w-full items-center justify-between gap-4 flex-nowrap"
+                    ):
+                        with ui.column().classes("gap-0 min-w-0"):
                             ui.label("Trade review interval (hours)").classes(
                                 "text-sm text-white"
                             )
@@ -962,6 +976,7 @@ def dashboard() -> None:
                     async def apply_analyst_config() -> None:
                         updates = {
                             "base_url": analyst_base_url_input.value or "",
+                            "api_key": analyst_api_key_input.value or "",
                             "model": analyst_model_input.value or "deepseek-r1",
                             "trade_review_interval_hours": float(
                                 analyst_interval_input.value or 4
@@ -1795,6 +1810,8 @@ def dashboard() -> None:
         # Populate config fields (only if user hasn't edited them)
         if not analyst_base_url_input.value:
             analyst_base_url_input.value = base_url
+        if not analyst_api_key_input.value:
+            analyst_api_key_input.value = analyst_cfg.get("api_key", "")
         if not analyst_model_input.value or analyst_model_input.value == "deepseek-r1":
             analyst_model_input.value = model
         if not analyst_interval_input.value or analyst_interval_input.value == 4:

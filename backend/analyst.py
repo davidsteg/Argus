@@ -36,6 +36,7 @@ logger = logging.getLogger("argus.analyst")
 
 DEFAULT_ANALYST_CONFIG: Dict[str, Any] = {
     "base_url": os.getenv("ANALYST_OLLAMA_BASE_URL", ""),
+    "api_key": os.getenv("ANALYST_OLLAMA_API_KEY", ""),
     "model": os.getenv("ANALYST_OLLAMA_MODEL", "deepseek-r1"),
     "trade_review_interval_hours": float(
         os.getenv("ANALYST_TRADE_REVIEW_INTERVAL_HOURS", "4")
@@ -133,18 +134,18 @@ class StrategyAnalyst:
 
     def configure(self, updates: Dict[str, Any], db) -> Dict[str, Any]:
         """Update analyst config at runtime. Rebuilds the client if the
-        base URL or model changed. Stores to runtime_state for persistence.
-        Returns the full config after update."""
+        base URL, API key, or model changed. Stores to runtime_state for
+        persistence. Returns the full config after update."""
         with self._lock:
             changed = False
-            for key in ("base_url", "model", "trade_review_interval_hours",
-                         "trade_lookback"):
+            for key in ("base_url", "api_key", "model",
+                         "trade_review_interval_hours", "trade_lookback"):
                 if key in updates and updates[key] != self._config.get(key):
                     self._config[key] = updates[key]
                     changed = True
             if changed:
                 self._persist_config(db)
-                if "base_url" in updates or "model" in updates:
+                if "base_url" in updates or "api_key" in updates or "model" in updates:
                     self._build_client()
         return self.get_config()
 
@@ -323,8 +324,8 @@ class StrategyAnalyst:
             db = get_db()
             stored = db.get_state("analyst_config")
             if stored and isinstance(stored, dict):
-                for key in ("base_url", "model", "trade_review_interval_hours",
-                             "trade_lookback"):
+                for key in ("base_url", "api_key", "model",
+                             "trade_review_interval_hours", "trade_lookback"):
                     if key in stored:
                         self._config[key] = stored[key]
                 logger.info("Analyst config loaded from runtime_state")
@@ -340,6 +341,7 @@ class StrategyAnalyst:
     def _build_client(self) -> None:
         self._client = None
         base_url = self._config.get("base_url", "")
+        api_key = self._config.get("api_key", "")
         model = self._config.get("model", "")
         if not base_url:
             logger.info("Analyst base URL not set — analyst unavailable")
@@ -349,7 +351,7 @@ class StrategyAnalyst:
 
             self._client = OpenAI(
                 base_url=str(base_url),
-                api_key="ollama",
+                api_key=str(api_key) if api_key else "ollama",
             )
             logger.info(
                 "Analyst client ready — model %s @ %s",

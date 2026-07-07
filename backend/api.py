@@ -409,7 +409,7 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
     ) -> Dict[str, Any]:
         from analyst import get_analyst
 
-        allowed = {"base_url", "model", "trade_review_interval_hours",
+        allowed = {"base_url", "api_key", "model", "trade_review_interval_hours",
                     "trade_lookback"}
         filtered = {k: v for k, v in updates.items() if k in allowed}
         if not filtered:
