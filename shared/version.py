@@ -10,9 +10,33 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.4.0",
+        "date": "2026-07-07",
+        "title": "LLM strategy analyst",
+        "notes": [
+            "New Analyst tab with toggleable LLM strategy analyst powered "
+            "by cloud Ollama (OpenAI-compatible API, DeepSeek Flash by "
+            "default)",
+            "Post-optimization review: after the nightly grid search the "
+            "LLM analyzes ranked results and flags overfitting, small "
+            "samples, and parameter drift",
+            "Periodic trade review: every few hours during market hours "
+            "the LLM analyzes recent closed trades for failure patterns",
+            "All analyst config editable from the dashboard — base URL, "
+            "model, review interval, trade lookback — no container restart "
+            "needed; config persists in runtime_state",
+            "Toggle on/off from the dashboard (bot_config); off by default",
+            "Reports are advisory only — never auto-applied; fails silently "
+            "when the LLM is unreachable",
+            "New API endpoints: GET/POST /analyst/config, "
+            "GET /analyst/optimization, GET /analyst/trades, "
+            "POST /analyst/review, POST /analyst/toggle",
+        ],
+    },
     {
         "version": "2.3.0",
         "date": "2026-07-07",

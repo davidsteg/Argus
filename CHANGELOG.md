@@ -9,6 +9,40 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.4.0] - 2026-07-07
+
+### Added
+- **LLM strategy analyst** (`backend/analyst.py`): an advisory module that
+  uses a cloud-hosted Ollama model (OpenAI-compatible API, DeepSeek Flash
+  by default) to review the bot's own performance and suggest improvements
+- **Post-optimization review**: after the nightly walk-forward grid search
+  the LLM analyzes the ranked results and the winning combination, flagging
+  overfitting, small validation samples, and parameter drift
+- **Periodic trade review**: every few hours during market hours the LLM
+  analyzes recent closed trades for failure patterns (symbol clusters,
+  regime mismatches, stop/target calibration)
+- **Analyst tab** in the dashboard (between Trades and Settings): toggle
+  switch (on/off, persisted in `bot_config`), connection config card (base
+  URL, model, review interval, trade lookback — all editable with no
+  restart), optimization review card, trade review card with manual
+  "Run review now" trigger
+- **Runtime config**: analyst settings (base URL, model, interval,
+  lookback) are stored in `runtime_state` and can be changed from the
+  dashboard without touching env vars or restarting the container; the
+  OpenAI client is rebuilt on URL/model change
+- New API endpoints: `GET /analyst/optimization`, `GET /analyst/trades`,
+  `POST /analyst/review`, `POST /analyst/toggle`, `GET /analyst/config`,
+  `POST /analyst/config`
+- `analyst_enabled` key in `DEFAULT_CONFIG` (0.0 = off by default)
+- New env vars: `ANALYST_OLLAMA_BASE_URL`, `ANALYST_OLLAMA_MODEL`,
+  `ANALYST_TRADE_REVIEW_INTERVAL_HOURS`, `ANALYST_TRADE_LOOKBACK`
+
+### Changed
+- Optimizer now carries `analyst_enabled` forward (like `news_cutoff`) so
+  a config read after a grid search stays complete
+- Engine main loop calls the analyst's periodic trade review (gated by
+  `should_review_trades()` which enforces the configured interval)
+
 ## [v2.3.0] - 2026-07-07
 
 ### Added
