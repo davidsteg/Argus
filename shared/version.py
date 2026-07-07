@@ -10,9 +10,18 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.2.4"
+__version__ = "2.2.5"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.2.5",
+        "date": "2026-07-07",
+        "title": "Project-specific AGENTS.md",
+        "notes": [
+            "AGENTS.md rewritten with architecture map, safety invariants, "
+            "release pipeline, and known pitfalls for future AI agents",
+        ],
+    },
     {
         "version": "2.2.4",
         "date": "2026-07-07",

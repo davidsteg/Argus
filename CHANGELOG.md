@@ -9,6 +9,19 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.2.5] - 2026-07-07
+
+### Changed
+- Rewrote `AGENTS.md` from generic boilerplate into project-specific
+  rules for AI agents: architecture map, hard safety invariants
+  (`paper=True`, bracket-only entries, independent kill-switch paths),
+  where strategy parameters actually live (`bot_config`, not env vars),
+  the release/CI pipeline and tag format, secrets handling, how to test
+  changes locally without a preinstalled Python environment, and the
+  known pitfalls already hit once this project (stale-bar bracket
+  rejections, the `news_cutoff` no-news trap, retired-config-key
+  filtering) so they aren't reintroduced
+
 ## [v2.2.4] - 2026-07-07
 
 ### Fixed
