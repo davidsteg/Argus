@@ -9,6 +9,14 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.4.1] - 2026-07-07
+
+### Added
+- Analyst API key field for cloud-hosted Ollama (e.g. `https://ollama.com/v1`);
+  falls back to `"ollama"` for local instances
+- Password field in the Analyst tab UI for the API key
+- `ANALYST_OLLAMA_API_KEY` env var and docker-compose wiring
+
 ## [v2.4.0] - 2026-07-07
 
 ### Added

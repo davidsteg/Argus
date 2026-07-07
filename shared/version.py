@@ -10,9 +10,21 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.4.0"
+__version__ = "2.4.1"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.4.1",
+        "date": "2026-07-07",
+        "title": "Ollama Cloud API key support",
+        "notes": [
+            "Analyst now accepts an API key for cloud-hosted Ollama "
+            "(e.g. https://ollama.com/v1); falls back to 'ollama' for "
+            "local instances",
+            "New password field in the Analyst tab UI for the API key",
+            "ANALYST_OLLAMA_API_KEY env var and docker-compose wiring",
+        ],
+    },
     {
         "version": "2.4.0",
         "date": "2026-07-07",
