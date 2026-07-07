@@ -10,9 +10,20 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.4.4"
+__version__ = "2.4.5"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.4.5",
+        "date": "2026-07-07",
+        "title": "Robust LLM response parsing for DeepSeek-R1",
+        "notes": [
+            "Strip  tags from DeepSeek-R1 chain-of-thought responses",
+            "Improved _parse_json with fallback extraction of JSON objects",
+            "Log raw LLM response text (truncated) on JSON parse failure",
+            "Increased max_tokens to 2048 for longer LLM responses",
+        ],
+    },
     {
         "version": "2.4.4",
         "date": "2026-07-07",

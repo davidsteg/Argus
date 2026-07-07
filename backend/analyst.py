@@ -335,14 +335,20 @@ class StrategyAnalyst:
                 },
             ],
             temperature=0.3,
-            max_tokens=1024,
+            max_tokens=2048,
         )
         text = response.choices[0].message.content
         if text is None:
             raise RuntimeError("LLM returned empty response")
         logger.info("Analyst %s review response received (%d chars)",
                      review_type, len(text))
-        result = self._parse_json(text)
+        try:
+            result = self._parse_json(text)
+        except json.JSONDecodeError:
+            logger.error("Analyst %s review — failed to parse JSON from LLM response. "
+                          "Raw response (first 2000 chars): %s",
+                          review_type, text[:2000])
+            raise
         return {
             "summary": str(result.get("summary", "")),
             "warnings": [
@@ -357,10 +363,34 @@ class StrategyAnalyst:
     @staticmethod
     def _parse_json(text: str) -> Dict[str, Any]:
         text = text.strip()
+        # Strip  tags (DeepSeek-R1 chain-of-thought)
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+        # Try to extract content from markdown code blocks
         m = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
         if m:
             text = m.group(1).strip()
-        return json.loads(text)
+        # Try parsing the full text as JSON
+        if text.startswith("{"):
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                pass
+        # Fallback: find the first JSON object in the text
+        brace_depth = 0
+        start = -1
+        for i, c in enumerate(text):
+            if c == "{":
+                if start == -1:
+                    start = i
+                brace_depth += 1
+            elif c == "}":
+                brace_depth -= 1
+                if brace_depth == 0 and start != -1:
+                    try:
+                        return json.loads(text[start : i + 1])
+                    except json.JSONDecodeError:
+                        start = -1
+        raise json.JSONDecodeError("No valid JSON object found in response", text, 0)
 
 
 _analyst: Optional[StrategyAnalyst] = None

@@ -9,6 +9,19 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.4.5] - 2026-07-07
+
+### Fixed
+- Strip  tags from DeepSeek-R1 chain-of-thought responses before
+  JSON parsing; the model was returning thought traces that made
+  `json.loads` fail
+- Improved `_parse_json` with three-stage fallback: (1) strip  tags,
+  (2) extract markdown code blocks, (3) find any `{...}` JSON object in
+  the text — handles every response format we've seen
+- Log the raw LLM response (first 2000 chars) on parse failure so we can
+  debug without container exec access
+- Increased `max_tokens` from 1024 to 2048 for longer responses
+
 ## [v2.4.4] - 2026-07-07
 
 ### Fixed
