@@ -10,9 +10,20 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.2.2"
+__version__ = "2.2.3"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.2.3",
+        "date": "2026-07-07",
+        "title": "Deploy from Docker Hub",
+        "notes": [
+            "docker-compose.yml now pulls the published davidsteg/argus-* "
+            "images (pin with ARGUS_VERSION); local builds via "
+            "docker-compose.dev.yml",
+            "Release titles no longer double the version",
+        ],
+    },
     {
         "version": "2.2.2",
         "date": "2026-07-07",

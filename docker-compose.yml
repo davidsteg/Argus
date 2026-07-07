@@ -1,8 +1,10 @@
+# Runs the published Docker Hub images (built by CI on every version tag).
+# Update: docker compose pull && docker compose up -d
+# Local development from source instead:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 services:
   trading_backend:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
+    image: davidsteg/argus-backend:${ARGUS_VERSION:-latest}
     container_name: argus_backend
     restart: unless-stopped
     environment:
@@ -29,9 +31,7 @@ services:
       - "${API_PORT:-8000}:8000"
 
   trading_frontend:
-    build:
-      context: .
-      dockerfile: frontend/Dockerfile
+    image: davidsteg/argus-frontend:${ARGUS_VERSION:-latest}
     container_name: argus_frontend
     restart: unless-stopped
     depends_on:

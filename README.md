@@ -70,11 +70,20 @@ past are rejected, and the previous configuration is kept.
 
 ```bash
 cp .env.example .env      # fill in your Alpaca paper keys
-docker compose up -d --build
+docker compose up -d      # pulls davidsteg/argus-* from Docker Hub
 ```
 
 - Dashboard: http://localhost:8080
 - Debug API (interactive docs): http://localhost:8000/docs
+
+Images are published by CI whenever a version tag is pushed; update with
+`docker compose pull && docker compose up -d`. Pin a specific release with
+`ARGUS_VERSION=2.2.3` in `.env` (default `latest`). To develop against
+local source instead:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+```
 
 ## Debug & operations API (port 8000)
 

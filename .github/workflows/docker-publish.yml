@@ -91,7 +91,10 @@ jobs:
           CLEAN=$(echo "$SUBJECT" | sed -E 's/^[a-zA-Z]+(\([^)]*\))?: //')
           CLEAN="$(echo "${CLEAN:0:1}" | tr '[:lower:]' '[:upper:]')${CLEAN:1}"
           # Avoid double-prefixing if the commit message already led with the
-          # version itself (e.g. "release: v2.2.2 — description").
+          # version itself (e.g. "release: v2.2.2 — description"). Compare
+          # case-insensitively: the capitalization step above turns a leading
+          # "v2.2.2" into "V2.2.2", which must still count as a match.
+          shopt -s nocasematch
           if [[ "$CLEAN" == "$VERSION"* ]]; then
             TITLE="$CLEAN"
           else

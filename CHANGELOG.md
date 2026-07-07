@@ -9,6 +9,20 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.2.3] - 2026-07-07
+
+### Changed
+- `docker-compose.yml` now runs the published Docker Hub images
+  (`davidsteg/argus-*`) instead of building locally; pin a release with
+  `ARGUS_VERSION` (default `latest`), update via
+  `docker compose pull && docker compose up -d`
+- Local source builds moved to `docker-compose.dev.yml`
+  (`docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build`)
+
+### Fixed
+- GitHub Release titles no longer double the version (the dedup compare
+  in the publish workflow is now case-insensitive)
+
 ## [v2.2.2] - 2026-07-07
 
 ### Changed
