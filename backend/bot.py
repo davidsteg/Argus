@@ -52,6 +52,7 @@ import universe
 from indicators import bracket_distances, compute_atr, compute_rsi, compute_vwap
 from sentiment import get_sentiment_provider
 from shared.database import STATUS_KILLED, STATUS_RUNNING, get_db
+from shared.version import __version__
 
 load_dotenv()
 
@@ -352,6 +353,15 @@ class ArgusBot:
                 "symbol": p.symbol,
                 "qty": float(p.qty),
                 "avg_entry_price": float(p.avg_entry_price),
+                "current_price": (
+                    None if p.current_price is None else float(p.current_price)
+                ),
+                "unrealized_pnl": (
+                    None if p.unrealized_pl is None else float(p.unrealized_pl)
+                ),
+                "market_value": (
+                    None if p.market_value is None else float(p.market_value)
+                ),
             }
             for p in live_positions
         ]
@@ -380,6 +390,7 @@ class ArgusBot:
 
         equity = float(account.equity)
         self.db.set_status(equity=equity)
+        self.db.record_equity(equity)
         return {"equity": equity, "positions": snapshot}
 
     async def reconcile_closed_trade(self, symbol: str, entry: Dict[str, Any]) -> None:
@@ -504,6 +515,30 @@ class ArgusBot:
         )
         logger.info("Argus engine started — universe %s", universe.describe_mode())
 
+        # Operational knobs are env vars the dashboard cannot see otherwise;
+        # publish them (no secrets) so the Settings tab can display them.
+        self.db.set_state(
+            "environment",
+            {
+                "universe_mode": universe.describe_mode(),
+                "watchlist_size": len(self.watchlist),
+                "position_size_usd": POSITION_SIZE_USD,
+                "risk_per_trade_usd": RISK_PER_TRADE_USD,
+                "max_positions": MAX_POSITIONS,
+                "daily_stop_loss": DAILY_STOP_LOSS,
+                "min_price_usd": MIN_PRICE_USD,
+                "cooldown_minutes": COOLDOWN_MINUTES,
+                "poll_interval_seconds": POLL_INTERVAL_SECONDS,
+                "bar_lookback_minutes": BAR_LOOKBACK_MINUTES,
+                "regime_symbol": regime.REGIME_SYMBOL,
+                "paper_trading": True,
+                "engine_version": __version__,
+                "engine_started_at": datetime.now(timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
+            },
+        )
+
         while not self._shutdown.is_set():
             try:
                 await self.run_cycle()
@@ -532,7 +567,18 @@ class ArgusBot:
             cycle["finished_at"] = datetime.now(timezone.utc).isoformat(
                 timespec="seconds"
             )
+            cycle["cooldowns"] = {
+                symbol: round(remaining, 1)
+                for symbol in list(self._cooldowns)
+                if (remaining := self.in_cooldown(symbol)) is not None
+            }
             self.last_cycle = cycle
+            # Publish the trace so the dashboard can render engine internals
+            # (stage, regime, cooldowns) straight from the shared database.
+            try:
+                self.db.set_state("last_cycle", cycle)
+            except Exception as exc:
+                logger.error("Failed to publish cycle state: %s", exc)
 
     async def _run_cycle_inner(self, cycle: Dict[str, Any]) -> None:
         # Absorb parameter changes written by the optimizer overnight.

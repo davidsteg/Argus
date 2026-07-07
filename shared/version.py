@@ -10,9 +10,33 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.2.5"
+__version__ = "2.3.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.3.0",
+        "date": "2026-07-07",
+        "title": "Command center pro",
+        "notes": [
+            "Dashboard rebuilt into four tabs: Overview, Trades, Settings, "
+            "Logs",
+            "Equity curve chart (1H/1D/1W/1M/ALL) from new per-cycle "
+            "equity snapshots",
+            "Positions show live price, market value and unrealized PnL, "
+            "with a per-position close button",
+            "Trade analytics: win rate, profit factor, avg win/loss, "
+            "best/worst, cumulative realized-PnL chart, full history grid",
+            "Market regime, engine heartbeat, cycle trace, cooldowns and "
+            "market session shown live — published by the engine into the "
+            "shared DB each cycle",
+            "Strategy parameters editable from Settings (the optimizer "
+            "still re-tunes nightly); operational env shown read-only",
+            "Engine resume + run-optimizer-now buttons via the backend "
+            "debug API; hard stop now asks for confirmation",
+            "Filterable log terminal: level chips, text search, row count, "
+            "adjustable refresh interval",
+        ],
+    },
     {
         "version": "2.2.5",
         "date": "2026-07-07",

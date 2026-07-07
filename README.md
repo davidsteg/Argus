@@ -18,12 +18,19 @@ code is consciously changed and reviewed.
 │  │  argus_backend  :8000  │          │  argus_frontend :8080 │   │
 │  │                        │          │                       │   │
 │  │ • Trading engine       │  SQLite  │ • NiceGUI dashboard   │   │
-│  │ • Regime filter (SPY)  │◄────────►│ • Live positions/log  │   │
-│  │ • Nightly optimizer    │  db_data │ • EMERGENCY HARD STOP │   │
-│  │ • Debug & ops API      │          │                       │   │
+│  │ • Regime filter (SPY)  │◄────────►│ • Equity/PnL charts   │   │
+│  │ • Nightly optimizer    │  db_data │ • Strategy settings   │   │
+│  │ • Debug & ops API      │          │ • EMERGENCY HARD STOP │   │
 │  └────────────────────────┘          └───────────────────────┘   │
 └──────────────────────────────────────────────────────────────────┘
 ```
+
+All dashboard *data* comes straight from the shared SQLite volume — the
+engine publishes its cycle trace, market regime and environment into the
+`runtime_state` table every cycle. Only *actions* that must reach the
+running engine process (resume from KILLED, run the optimizer now) call
+the backend debug API (`BACKEND_API_URL`); the EMERGENCY HARD STOP uses
+its own Alpaca client and works even if the engine is dead.
 
 ## The strategy — layered decision pipeline
 
@@ -85,6 +92,28 @@ local source instead:
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 ```
 
+## Dashboard (port 8080)
+
+Four tabs, refreshed live (interval adjustable in Settings):
+
+- **Overview** — equity curve (1H/1D/1W/1M/ALL), open positions with
+  live price and unrealized PnL plus a per-position close button, market
+  regime, engine cycle trace, active cooldowns, current strategy
+  parameters, recent activity.
+- **Trades** — all-time analytics (realized PnL, win rate, profit
+  factor, avg win/loss, best/worst), cumulative realized-PnL curve, and
+  a paginated trade-history grid.
+- **Settings** — edit strategy parameters (bounds-checked; the nightly
+  optimizer re-tunes and overwrites them), run the optimizer on demand,
+  view the read-only operational environment, tune dashboard refresh.
+- **Logs** — filterable log terminal: level chips, text search, row
+  count.
+
+The header shows regime / market-session / engine-heartbeat chips, total
+balance, daily PnL and the EMERGENCY HARD STOP (with confirmation). When
+the bot is KILLED, a RESUME button appears that restarts the engine via
+the backend API.
+
 ## Debug & operations API (port 8000)
 
 | Endpoint | Purpose |
@@ -117,6 +146,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 | `MIN_PRICE_USD` | `5` | penny-stock filter |
 | `POLL_INTERVAL_SECONDS` | `60` | engine cycle interval |
 | `REGIME_MAX_ANN_VOL` | `35` | annualized SPY vol (%) above which the tape is stressed |
+| `BACKEND_API_URL` | `http://trading_backend:8000` | how the dashboard reaches the debug API for actions |
 
 Strategy parameters (`rsi_period`, `rsi_buy_signal`, `atr_stop_mult`,
 `atr_target_mult`, `news_cutoff`) live in the shared `bot_config` table

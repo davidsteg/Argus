@@ -41,6 +41,10 @@ services:
       - ALPACA_API_KEY=${ALPACA_API_KEY}
       - ALPACA_SECRET_KEY=${ALPACA_SECRET_KEY}
       - DB_PATH=/app/shared/argus_state.db
+      # Dashboard actions (resume from KILLED, run optimizer now) call the
+      # backend debug API over the compose network; data reads stay on the
+      # shared SQLite volume.
+      - BACKEND_API_URL=${BACKEND_API_URL:-http://trading_backend:8000}
     volumes:
       - db_data:/app/shared
     networks:

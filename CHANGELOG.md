@@ -9,6 +9,44 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.3.0] - 2026-07-07
+
+### Added
+- **Dashboard rebuilt into a four-tab command center** (Overview, Trades,
+  Settings, Logs) with a live header: market-regime chip, market-session
+  chip, engine heartbeat (LIVE / STALE), daily PnL in $ and %
+- **Equity curve chart** with 1H/1D/1W/1M/ALL ranges, backed by a new
+  `equity_history` table — the engine records an equity snapshot every
+  cycle (flat stretches are compressed)
+- **Positions with live PnL**: current price, market value and unrealized
+  PnL per position (new columns on `positions`, migrated in place), plus
+  a per-position close button (cancels the bracket legs, then
+  market-closes — dashboard-side Alpaca client, paper-forced)
+- **Trade analytics tab**: all-time realized PnL, realized today, win
+  rate, profit factor, average win/loss, best/worst trade, a cumulative
+  realized-PnL chart and a paginated trade-history grid with PnL %, hold
+  duration
+- **Engine internals on the dashboard without an HTTP hop**: the engine
+  publishes its cycle trace, market regime, cooldowns and operational
+  environment into a new `runtime_state` table each cycle
+- **Settings tab**: strategy parameters editable with bounds-checked
+  inputs (Apply / Reload from DB / Restore defaults — the nightly
+  optimizer still re-tunes and overwrites them), read-only operational
+  environment, dashboard refresh-interval and log-row preferences
+- **Engine actions from the dashboard**: resume-from-KILLED (header
+  button, `POST /reset`) and run-optimizer-now (`POST /optimize`) via the
+  backend debug API — new `BACKEND_API_URL` env var (compose default:
+  `http://trading_backend:8000`)
+- **Filterable log terminal**: per-level filter, text search, adjustable
+  row count; recent-activity feed on the Overview tab
+
+### Changed
+- EMERGENCY HARD STOP now asks for confirmation before flattening (the
+  stop itself is unchanged: dashboard-side Alpaca client, independent of
+  engine state)
+- `Database.get_trade_stats()` provides all-time win/loss aggregates in
+  SQL instead of the dashboard recomputing from recent rows
+
 ## [v2.2.5] - 2026-07-07
 
 ### Changed

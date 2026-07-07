@@ -14,15 +14,21 @@ Concurrency model
 
 Tables
 ------
-bot_config   dynamic strategy parameters (rewritten nightly by the optimizer)
-bot_status   single-row state machine: RUNNING / KILLED, equity, day anchor
-positions    active tickers with average entry price and quantity
-trades       historical executions with entry/exit timestamps and realized PnL
-logs         system event log with strict UTC ISO-8601 timestamps
+bot_config      dynamic strategy parameters (rewritten nightly by the optimizer)
+bot_status      single-row state machine: RUNNING / KILLED, equity, day anchor
+positions       active tickers with entry price, live price and unrealized PnL
+trades          historical executions with entry/exit timestamps and realized PnL
+logs            system event log with strict UTC ISO-8601 timestamps
+equity_history  periodic account-equity snapshots powering the dashboard curve
+runtime_state   JSON key/value blobs the engine publishes for the dashboard
+                (last cycle trace, market regime, operational environment) so
+                the frontend can visualize engine internals without an HTTP
+                hop to the backend
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import threading
@@ -70,6 +76,9 @@ CREATE TABLE IF NOT EXISTS positions (
     symbol           TEXT PRIMARY KEY,
     qty              REAL NOT NULL,
     avg_entry_price  REAL NOT NULL,
+    current_price    REAL,
+    unrealized_pnl   REAL,
+    market_value     REAL,
     updated_at       TEXT NOT NULL
 );
 
@@ -95,11 +104,43 @@ CREATE TABLE IF NOT EXISTS logs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_logs_id_desc ON logs (id DESC);
+
+CREATE TABLE IF NOT EXISTS equity_history (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts      TEXT NOT NULL,
+    equity  REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_equity_history_ts ON equity_history (ts);
+
+CREATE TABLE IF NOT EXISTS runtime_state (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
 """
+
+# Columns added to existing tables after their initial release. CREATE TABLE
+# IF NOT EXISTS never alters an existing table, so upgrades on a live volume
+# go through ALTER TABLE guarded by a PRAGMA table_info check.
+_MIGRATIONS: Dict[str, Dict[str, str]] = {
+    "positions": {
+        "current_price": "REAL",
+        "unrealized_pnl": "REAL",
+        "market_value": "REAL",
+    },
+}
+
+# Keep roughly six weeks of 1-minute equity snapshots before trimming.
+_EQUITY_HISTORY_MAX_ROWS = 60_000
 
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _optional_float(value: Any) -> Optional[float]:
+    return None if value is None else float(value)
 
 
 class Database:
@@ -120,12 +161,25 @@ class Database:
             self._conn.execute("PRAGMA busy_timeout=15000")
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.executescript(_SCHEMA)
+            self._migrate()
             self._seed_defaults()
             self._conn.commit()
 
     # ------------------------------------------------------------------ #
     # internals
     # ------------------------------------------------------------------ #
+
+    def _migrate(self) -> None:
+        for table, columns in _MIGRATIONS.items():
+            existing = {
+                row["name"]
+                for row in self._conn.execute(f"PRAGMA table_info({table})")
+            }
+            for column, column_type in columns.items():
+                if column not in existing:
+                    self._conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {column} {column_type}"
+                    )
 
     def _seed_defaults(self) -> None:
         now = _utcnow()
@@ -238,12 +292,16 @@ class Database:
             for pos in positions:
                 self._conn.execute(
                     "INSERT INTO positions "
-                    "(symbol, qty, avg_entry_price, updated_at) "
-                    "VALUES (?, ?, ?, ?)",
+                    "(symbol, qty, avg_entry_price, current_price, "
+                    " unrealized_pnl, market_value, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         pos["symbol"],
                         float(pos["qty"]),
                         float(pos["avg_entry_price"]),
+                        _optional_float(pos.get("current_price")),
+                        _optional_float(pos.get("unrealized_pnl")),
+                        _optional_float(pos.get("market_value")),
                         now,
                     ),
                 )
@@ -256,6 +314,9 @@ class Database:
                 "symbol": row["symbol"],
                 "qty": float(row["qty"]),
                 "avg_entry_price": float(row["avg_entry_price"]),
+                "current_price": _optional_float(row["current_price"]),
+                "unrealized_pnl": _optional_float(row["unrealized_pnl"]),
+                "market_value": _optional_float(row["market_value"]),
                 "updated_at": row["updated_at"],
             }
             for row in rows
@@ -307,6 +368,128 @@ class Database:
             (iso_timestamp,),
         )
         return float(rows[0]["pnl"])
+
+    def get_trade_stats(self) -> Dict[str, Any]:
+        """All-time aggregates over closed trades with a known PnL."""
+        rows = self._query(
+            "SELECT "
+            "  COUNT(*)                                            AS total, "
+            "  COALESCE(SUM(realized_pnl), 0)                      AS total_pnl, "
+            "  SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END)   AS wins, "
+            "  SUM(CASE WHEN realized_pnl <= 0 THEN 1 ELSE 0 END)  AS losses, "
+            "  COALESCE(SUM(CASE WHEN realized_pnl > 0 "
+            "      THEN realized_pnl ELSE 0 END), 0)               AS gross_profit, "
+            "  COALESCE(SUM(CASE WHEN realized_pnl <= 0 "
+            "      THEN realized_pnl ELSE 0 END), 0)               AS gross_loss, "
+            "  MAX(realized_pnl)                                   AS best, "
+            "  MIN(realized_pnl)                                   AS worst "
+            "FROM trades WHERE realized_pnl IS NOT NULL"
+        )
+        row = rows[0]
+        return {
+            "total": int(row["total"]),
+            "total_pnl": float(row["total_pnl"]),
+            "wins": int(row["wins"] or 0),
+            "losses": int(row["losses"] or 0),
+            "gross_profit": float(row["gross_profit"]),
+            "gross_loss": float(row["gross_loss"]),
+            "best": _optional_float(row["best"]),
+            "worst": _optional_float(row["worst"]),
+        }
+
+    # ------------------------------------------------------------------ #
+    # equity history
+    # ------------------------------------------------------------------ #
+
+    def record_equity(self, equity: float) -> None:
+        """Append an equity snapshot for the dashboard curve.
+
+        Flat stretches (market closed, engine idle) are compressed: when the
+        equity is unchanged from the previous snapshot, a new row is written
+        at most every five minutes so the curve keeps anchor points without
+        thousands of identical rows accumulating overnight.
+        """
+        equity = float(equity)
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            last = self._conn.execute(
+                "SELECT ts, equity FROM equity_history "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if last is not None and float(last["equity"]) == equity:
+                try:
+                    last_ts = datetime.fromisoformat(last["ts"])
+                except ValueError:
+                    last_ts = None
+                if (
+                    last_ts is not None
+                    and (now - last_ts).total_seconds() < 300
+                ):
+                    return
+            self._conn.execute(
+                "INSERT INTO equity_history (ts, equity) VALUES (?, ?)",
+                (now.isoformat(timespec="milliseconds"), equity),
+            )
+            self._conn.execute(
+                "DELETE FROM equity_history WHERE id <= "
+                "(SELECT MAX(id) FROM equity_history) - ?",
+                (_EQUITY_HISTORY_MAX_ROWS,),
+            )
+            self._conn.commit()
+
+    def get_equity_history(
+        self, since: Optional[str] = None, max_points: int = 600
+    ) -> List[Dict[str, Any]]:
+        """Equity snapshots since a UTC ISO timestamp (all history when
+        None), oldest first, downsampled to at most ``max_points`` rows."""
+        if since is None:
+            rows = self._query("SELECT ts, equity FROM equity_history ORDER BY id")
+        else:
+            rows = self._query(
+                "SELECT ts, equity FROM equity_history WHERE ts >= ? ORDER BY id",
+                (since,),
+            )
+        points = [
+            {"ts": row["ts"], "equity": float(row["equity"])} for row in rows
+        ]
+        if len(points) > max_points > 0:
+            stride = -(-len(points) // max_points)  # ceil division
+            sampled = points[::stride]
+            if sampled[-1] is not points[-1]:
+                sampled.append(points[-1])  # never drop the latest snapshot
+            points = sampled
+        return points
+
+    # ------------------------------------------------------------------ #
+    # runtime state (engine → dashboard JSON blobs)
+    # ------------------------------------------------------------------ #
+
+    def set_state(self, key: str, value: Any) -> None:
+        """Publish a JSON-serializable blob under ``key``."""
+        self._execute(
+            "INSERT INTO runtime_state (key, value, updated_at) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+            "updated_at = excluded.updated_at",
+            (key, json.dumps(value, default=str), _utcnow()),
+        )
+
+    def get_state(self, key: str, default: Any = None) -> Any:
+        rows = self._query(
+            "SELECT value FROM runtime_state WHERE key = ?", (key,)
+        )
+        if not rows:
+            return default
+        try:
+            return json.loads(rows[0]["value"])
+        except (TypeError, ValueError):
+            return default
+
+    def get_state_updated_at(self, key: str) -> Optional[str]:
+        rows = self._query(
+            "SELECT updated_at FROM runtime_state WHERE key = ?", (key,)
+        )
+        return rows[0]["updated_at"] if rows else None
 
     # ------------------------------------------------------------------ #
     # logs
