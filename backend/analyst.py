@@ -104,6 +104,62 @@ DECISION_MEMORY_PROMPT = (
     '"summary": "one-paragraph assessment"}'
 )
 
+TRADE_REVIEW_PROMPT = (
+    "You are a quantitative performance reviewer for an automated "
+    "paper-trading bot called Argus. The bot runs a long-only "
+    "mean-reversion strategy on US equities: it buys when RSI dips below "
+    "a threshold, price is below VWAP, and news sentiment is positive. "
+    "Exits are ATR-scaled bracket orders (stop-loss + take-profit).\n\n"
+    "Your job is to review recent closed trades and the aggregate stats "
+    "for failure patterns. Consider:\n"
+    "- Are losses concentrated in certain symbols, times of day, or "
+    "regimes?\n"
+    "- Is the win rate / profit factor healthy for this strategy?\n"
+    "- Do the lessons from past decisions suggest a recurring mistake?\n\n"
+    "You MUST respond with ONLY a valid JSON object. No markdown, no "
+    "code fences, no preamble. Use this exact structure:\n"
+    '{"summary": "one-paragraph assessment", '
+    '"warnings": ["warning1", "warning2"], '
+    '"suggestions": ["suggestion1", "suggestion2"], '
+    '"confidence": 0.0-1.0}'
+)
+
+OPTIMIZATION_REVIEW_PROMPT = (
+    "You are a quantitative reviewer for the nightly walk-forward "
+    "parameter optimizer of an automated paper-trading bot called Argus. "
+    "The optimizer grid-searches RSI/ATR bracket parameters, ranks them "
+    "by in-sample yield-to-drawdown, and validates the winner on an "
+    "unseen out-of-sample window.\n\n"
+    "Your job is to decide whether to accept the optimizer's winning "
+    "parameters, override with a different ranked candidate, or reject "
+    "and keep the current parameters. Watch for overfitting (a huge "
+    "train/validation gap), too few trades to be meaningful, or "
+    "parameter drift that doesn't fit the current market regime.\n\n"
+    "You MUST respond with ONLY a valid JSON object. No markdown, no "
+    "code fences, no preamble. Use this exact structure:\n"
+    '{"decision": {"action": "accept|override|reject", '
+    '"override_rank": 1, "reason": "brief explanation"}, '
+    '"summary": "one-paragraph assessment", '
+    '"warnings": ["warning1", "warning2"], '
+    '"suggestions": ["suggestion1", "suggestion2"], '
+    '"confidence": 0.0-1.0}'
+)
+
+WATCHLIST_REVIEW_PROMPT = (
+    "You are a watchlist curator for an automated paper-trading bot "
+    "called Argus. The bot runs a long-only mean-reversion strategy: "
+    "RSI dip below threshold, price below VWAP, positive news sentiment.\n\n"
+    "Your job is to select symbols for the trading watchlist. You MUST "
+    "select ONLY from the provided candidate_pool (the live most-actives "
+    "screener) — symbols outside that pool will be discarded. Consider "
+    "sector diversification, current market regime, and whether a symbol "
+    "is a good fit for a mean-reversion dip-buying strategy.\n\n"
+    "You MUST respond with ONLY a valid JSON object. No markdown, no "
+    "code fences, no preamble. Use this exact structure:\n"
+    '{"watchlist": ["SYMBOL1", "SYMBOL2"], '
+    '"summary": "brief explanation of the selection"}'
+)
+
 
 class StrategyAnalyst:
     """Multi-agent LLM strategy analyst.
@@ -458,7 +514,11 @@ class StrategyAnalyst:
         }
 
         try:
-            result = self._call_llm(prompt_data, "optimization", max_tokens=4096)
+            result = self._call_llm(
+                prompt_data, "optimization",
+                system_prompt=OPTIMIZATION_REVIEW_PROMPT,
+                max_tokens=4096,
+            )
         except Exception as exc:
             logger.error("Optimization review failed: %s", exc)
             try:
@@ -539,7 +599,11 @@ class StrategyAnalyst:
         }
 
         try:
-            result = self._call_llm(prompt_data, "trades", max_tokens=8192)
+            result = self._call_llm(
+                prompt_data, "trades",
+                system_prompt=TRADE_REVIEW_PROMPT,
+                max_tokens=8192,
+            )
         except Exception as exc:
             logger.error("Trade review failed: %s", exc)
             try:
@@ -607,6 +671,7 @@ class StrategyAnalyst:
         try:
             result = self._call_llm(
                 prompt_data, "watchlist",
+                system_prompt=WATCHLIST_REVIEW_PROMPT,
                 client_override=self._watchlist_client,
                 model_override=self._config.get("watchlist_model") or None,
                 max_tokens=4096,

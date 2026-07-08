@@ -9,6 +9,22 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.6.3] - 2026-07-08
+
+### Fixed
+- **Trade/optimization/watchlist reviews had no enforced JSON schema**:
+  `review_trades()`, `review_optimization()`, and `review_watchlist()`
+  called `_call_llm()` without a `system_prompt`, falling back to a
+  generic "respond with JSON only" instruction — unlike the risk agent
+  and portfolio manager prompts, which explicitly template the expected
+  keys. A review could succeed (get a `reviewed_at` timestamp written to
+  `runtime_state`) while the model's JSON omitted `summary`/`warnings`/
+  `suggestions`/`confidence` entirely, so the dashboard's review cards
+  rendered blank even when the analyst was reachable and responding.
+  Added `TRADE_REVIEW_PROMPT`, `OPTIMIZATION_REVIEW_PROMPT`, and
+  `WATCHLIST_REVIEW_PROMPT` (same schema-prompt pattern as the existing
+  agents) and wired all three into their respective `_call_llm()` calls.
+
 ## [v2.6.2] - 2026-07-08
 
 ### Fixed

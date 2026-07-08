@@ -10,9 +10,27 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.6.2"
+__version__ = "2.6.3"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.6.3",
+        "date": "2026-07-08",
+        "title": "Give trade/optimization/watchlist reviews an explicit JSON schema",
+        "notes": [
+            "The trade-review, optimization-review, and watchlist-curation "
+            "LLM calls never told the model what JSON keys to return — "
+            "unlike the risk agent and portfolio manager prompts, which "
+            "template the exact structure. A review could technically "
+            "succeed (get a reviewed_at timestamp) while returning none of "
+            "the summary/warnings/suggestions/confidence fields the "
+            "dashboard displays, so the review cards looked empty even "
+            "when the analyst was reachable and responding.",
+            "Added TRADE_REVIEW_PROMPT, OPTIMIZATION_REVIEW_PROMPT, and "
+            "WATCHLIST_REVIEW_PROMPT, matching the existing schema-prompt "
+            "pattern, and wired all three into their _call_llm() calls.",
+        ],
+    },
     {
         "version": "2.6.2",
         "date": "2026-07-08",
