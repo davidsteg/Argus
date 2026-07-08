@@ -1,15 +1,14 @@
 """
 Argus — news sentiment pipeline.
 
-Replaces the original hash stub with a real, layered scorer. For a symbol
-it fetches the last 24h of curated headlines from the Alpaca News API and
-scores them in [0, 1] (0 = very bearish, 1 = very bullish):
+For a symbol it fetches the last 24h of curated headlines from the Alpaca
+News API and scores them in [0, 1] (0 = very bearish, 1 = very bullish):
 
-1. LLM scorer     — when ANTHROPIC_API_KEY is set, headlines are scored
-                    by Claude (model via SENTIMENT_MODEL, default
-                    claude-opus-4-8; set claude-haiku-4-5 for the
-                    cheapest/fastest option) using structured JSON output.
-2. Keyword scorer — no API key: a transparent bull/bear keyword heuristic
+1. LLM scorer     — when SENTIMENT_OLLAMA_BASE_URL (or ANALYST_OLLAMA_BASE_URL)
+                    is set, headlines are scored by the configured model via
+                    an OpenAI-compatible endpoint (Ollama, etc.) using JSON
+                    output. Falls back to the analyst's LLM config.
+2. Keyword scorer — no LLM endpoint: a transparent bull/bear keyword heuristic
                     over the same headlines. Free and deterministic.
 3. Neutral floor  — no news for the symbol: 0.5 (never trades on silence
                     with the default news_cutoff of 0.55).
@@ -25,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -40,8 +40,6 @@ logger = logging.getLogger("argus.sentiment")
 
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-SENTIMENT_MODEL = os.getenv("SENTIMENT_MODEL", "claude-opus-4-8")
 SENTIMENT_CACHE_MINUTES = int(os.getenv("SENTIMENT_CACHE_MINUTES", "15"))
 HEADLINE_LIMIT = 10
 
@@ -66,40 +64,54 @@ LLM_SYSTEM_PROMPT = (
     "guidance, regulatory actions, analyst moves) over vague commentary."
 )
 
-LLM_OUTPUT_SCHEMA = {
-    "type": "json_schema",
-    "schema": {
-        "type": "object",
-        "properties": {
-            "score": {"type": "number"},
-            "rationale": {"type": "string"},
-        },
-        "required": ["score", "rationale"],
-        "additionalProperties": False,
-    },
-}
-
-
 class SentimentProvider:
-    """Layered news sentiment scorer with per-symbol caching."""
+    """Layered news sentiment scorer with per-symbol caching.
+
+    Reads the LLM endpoint from the DB-stored analyst config (same config
+    the Analyst tab in the UI manages), so changing the base URL or model
+    in the dashboard takes effect for sentiment too. Falls back to env
+    vars ANALYST_OLLAMA_BASE_URL / ANALYST_OLLAMA_MODEL on first init.
+    """
 
     def __init__(self) -> None:
         self._news = NewsClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
         self._lock = threading.Lock()
         self._cache: Dict[str, Dict[str, Any]] = {}
-        self._anthropic = None
-        if ANTHROPIC_API_KEY:
-            try:
-                from anthropic import Anthropic
+        self._client = None
+        self._model = ""
+        self._rebuild_client()
 
-                self._anthropic = Anthropic(api_key=ANTHROPIC_API_KEY)
-                logger.info("LLM sentiment enabled (model %s)", SENTIMENT_MODEL)
-            except Exception as exc:
-                logger.error("Anthropic client unavailable: %s", exc)
-        else:
+    def _rebuild_client(self) -> None:
+        """Read analyst config from DB and (re)build the OpenAI client."""
+        self._client = None
+        self._model = os.getenv("ANALYST_OLLAMA_MODEL", "deepseek-r1")
+        base_url = os.getenv("ANALYST_OLLAMA_BASE_URL", "")
+        api_key = os.getenv("ANALYST_OLLAMA_API_KEY", "")
+        try:
+            from shared.database import get_db
+            stored = get_db().get_state("analyst_config")
+            if stored and isinstance(stored, dict):
+                base_url = str(stored.get("base_url", base_url))
+                api_key = str(stored.get("api_key", api_key))
+                self._model = str(stored.get("sentiment_model", stored.get("model", self._model)))
+        except Exception:
+            pass
+        if not base_url:
             logger.info(
-                "ANTHROPIC_API_KEY not set — using keyword sentiment heuristic"
+                "No LLM endpoint configured — using keyword sentiment heuristic"
             )
+            return
+        try:
+            from openai import OpenAI
+            self._client = OpenAI(
+                base_url=base_url,
+                api_key=api_key if api_key else "ollama",
+            )
+            logger.info(
+                "LLM sentiment enabled (model %s @ %s)", self._model, base_url
+            )
+        except Exception as exc:
+            logger.error("OpenAI client unavailable for sentiment: %s", exc)
 
     # ------------------------------------------------------------------ #
     # public API (blocking — call via asyncio.to_thread from the engine)
@@ -148,12 +160,12 @@ class SentimentProvider:
                 "scored_at": scored_at,
             }
 
-        if self._anthropic is not None:
+        if self._client is not None:
             try:
                 score, rationale = self._score_with_llm(symbol, headlines)
                 return {
                     "score": score,
-                    "source": f"llm:{SENTIMENT_MODEL}",
+                    "source": f"llm:{self._model}",
                     "rationale": rationale,
                     "headlines": headlines,
                     "scored_at": scored_at,
@@ -194,24 +206,28 @@ class SentimentProvider:
 
     def _score_with_llm(self, symbol: str, headlines: List[str]) -> tuple:
         numbered = "\n".join(f"{i + 1}. {h}" for i, h in enumerate(headlines))
-        response = self._anthropic.messages.create(
-            model=SENTIMENT_MODEL,
-            max_tokens=512,
-            system=LLM_SYSTEM_PROMPT,
-            output_config={"format": LLM_OUTPUT_SCHEMA},
+        response = self._client.chat.completions.create(
+            model=self._model,
             messages=[
+                {"role": "system", "content": LLM_SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": (
                         f"Stock: {symbol}\nHeadlines from the last 24 hours:\n"
-                        f"{numbered}\n\nScore the aggregate sentiment."
+                        f"{numbered}\n\nScore the aggregate sentiment. "
+                        "Respond with valid JSON only, no markdown, no preamble: "
+                        '{"score": 0.0-1.0, "rationale": "..."}'
                     ),
-                }
+                },
             ],
+            temperature=0.3,
+            max_tokens=512,
         )
-        if response.stop_reason == "refusal":
-            raise RuntimeError("model refused the scoring request")
-        text = next(b.text for b in response.content if b.type == "text")
+        text = response.choices[0].message.content
+        if not text:
+            raise RuntimeError("LLM returned blank content")
+        text = text.strip()
+        text = re.sub(r"```(?:json)?\s*\n?(.*?)\n?```", r"\1", text, flags=re.DOTALL).strip()
         data = json.loads(text)
         score = max(0.0, min(1.0, float(data["score"])))
         return round(score, 4), str(data.get("rationale", ""))[:300]

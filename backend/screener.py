@@ -40,10 +40,14 @@ SCREENER_BAR_LOOKBACK = 180
 SCREENER_MIN_BARS = 30
 
 
+# Alpaca's most-actives screener caps at 100 symbols per request.
+_HARD_SCREENER_CAP = 100
+
+
 def _fetch_pool(alpaca_key: str, alpaca_secret: str, top: int) -> List[str]:
     """Fetch the top-N most active symbols as the screening pool."""
     client = ScreenerClient(alpaca_key, alpaca_secret)
-    response = client.get_most_actives(MostActivesRequest(by="volume", top=top))
+    response = client.get_most_actives(MostActivesRequest(by="volume", top=min(top, _HARD_SCREENER_CAP)))
     return [item.symbol.upper() for item in response.most_actives]
 
 

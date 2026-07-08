@@ -10,9 +10,23 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.10.0"
+__version__ = "2.11.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.11.0",
+        "date": "2026-07-08",
+        "title": "Sentiment LLM now uses the same OpenAI-compatible endpoint as the analyst",
+        "notes": [
+            "Sentiment scoring no longer requires ANTHROPIC_API_KEY — it uses the "
+            "same OpenAI-compatible client (Ollama, etc.) as the analyst, configured "
+            "from the Analyst tab in the dashboard.",
+            "New Sentiment Model field in the Analyst tab — leave empty to use the "
+            "same model as the analyst, or set a different one for sentiment scoring.",
+            "Screener pool size capped at 100 to match Alpaca's most-actives API limit "
+            "(the config can still be set higher; the cap is applied at the API call).",
+        ],
+    },
     {
         "version": "2.10.0",
         "date": "2026-07-08",

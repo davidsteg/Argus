@@ -1087,6 +1087,20 @@ def dashboard() -> None:
                         "w-full items-center justify-between gap-4 flex-nowrap"
                     ):
                         with ui.column().classes("gap-0 min-w-0"):
+                            ui.label("Sentiment Model").classes(
+                                "text-sm text-white"
+                            )
+                            ui.label(
+                                "Model for news sentiment scoring — "
+                                "leave empty to use Model"
+                            ).classes(f"text-xs {TEXT_MUTED}")
+                        analyst_sentiment_model_input = ui.input(
+                            value="", placeholder="(same as Model)"
+                        ).props("dense outlined").classes("w-56 shrink-0")
+                    with ui.row().classes(
+                        "w-full items-center justify-between gap-4 flex-nowrap"
+                    ):
+                        with ui.column().classes("gap-0 min-w-0"):
                             ui.label("Watchlist Model").classes(
                                 "text-sm text-white"
                             )
@@ -1155,6 +1169,7 @@ def dashboard() -> None:
                             "base_url": analyst_base_url_input.value or "",
                             "api_key": analyst_api_key_input.value or "",
                             "model": analyst_model_input.value or "deepseek-r1",
+                            "sentiment_model": analyst_sentiment_model_input.value or "",
                             "watchlist_model": analyst_watchlist_model_input.value or "",
                             "risk_model": analyst_risk_model_input.value or "",
                             "trade_review_interval_hours": float(
@@ -2262,6 +2277,10 @@ def dashboard() -> None:
             analyst_api_key_input.value = analyst_cfg.get("api_key", "")
         if not analyst_model_input.value or analyst_model_input.value == "deepseek-r1":
             analyst_model_input.value = model
+        if not analyst_sentiment_model_input.value:
+            analyst_sentiment_model_input.value = analyst_cfg.get(
+                "sentiment_model", ""
+            )
         if not analyst_watchlist_model_input.value:
             analyst_watchlist_model_input.value = analyst_cfg.get(
                 "watchlist_model", ""

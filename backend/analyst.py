@@ -37,6 +37,7 @@ DEFAULT_ANALYST_CONFIG: Dict[str, Any] = {
     "base_url": os.getenv("ANALYST_OLLAMA_BASE_URL", ""),
     "api_key": os.getenv("ANALYST_OLLAMA_API_KEY", ""),
     "model": os.getenv("ANALYST_OLLAMA_MODEL", "deepseek-r1"),
+    "sentiment_model": os.getenv("ANALYST_SENTIMENT_MODEL", ""),
     "watchlist_model": os.getenv("ANALYST_WATCHLIST_MODEL", ""),
     "risk_model": os.getenv("ANALYST_RISK_MODEL", ""),
     "trade_review_interval_hours": float(
@@ -201,8 +202,8 @@ class StrategyAnalyst:
     def configure(self, updates: Dict[str, Any], db) -> Dict[str, Any]:
         with self._lock:
             changed = False
-            for key in ("base_url", "api_key", "model", "watchlist_model",
-                         "risk_model",
+            for key in ("base_url", "api_key", "model", "sentiment_model",
+                         "watchlist_model", "risk_model",
                          "trade_review_interval_hours", "trade_lookback"):
                 if key in updates and updates[key] != self._config.get(key):
                     self._config[key] = updates[key]
@@ -726,7 +727,8 @@ class StrategyAnalyst:
             db = get_db()
             stored = db.get_state("analyst_config")
             if stored and isinstance(stored, dict):
-                for key in ("base_url", "api_key", "model", "watchlist_model", "risk_model",
+                for key in ("base_url", "api_key", "model", "sentiment_model",
+                             "watchlist_model", "risk_model",
                              "trade_review_interval_hours", "trade_lookback"):
                     if key in stored:
                         self._config[key] = stored[key]

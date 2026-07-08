@@ -9,6 +9,17 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.11.0] - 2026-07-08
+
+### Changed
+- **Sentiment LLM now uses the same OpenAI-compatible endpoint as the analyst** —
+  no longer requires `ANTHROPIC_API_KEY`. Sentiment scoring uses the same
+  Ollama/OpenAI-compatible client configured from the Analyst tab in the dashboard.
+- New **Sentiment Model** field in the Analyst tab — leave empty to use the same
+  model as the analyst, or set a different one for news sentiment scoring.
+- Screener pool size capped at 100 to match Alpaca's most-actives API limit
+  (the config can still be set higher; the cap is applied at the API call).
+
 ## [v2.10.0] - 2026-07-08
 
 ### Changed
