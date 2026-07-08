@@ -132,9 +132,9 @@ LEVEL_COLORS: Dict[str, str] = {
 }
 
 REGIME_STYLES: Dict[str, Dict[str, str]] = {
-    "RISK_ON": {"dot": "bg-emerald-400", "text": "text-emerald-400"},
-    "CAUTION": {"dot": "bg-amber-400", "text": "text-amber-400"},
-    "RISK_OFF": {"dot": "bg-red-500", "text": "text-red-400"},
+    "TREND_UP": {"dot": "bg-emerald-400", "text": "text-emerald-400"},
+    "CAUTION": {"dot": "bg-yellow-400", "text": "text-yellow-400"},
+    "TREND_DOWN": {"dot": "bg-red-500", "text": "text-red-400"},
     "UNKNOWN": {"dot": "bg-gray-500", "text": "text-gray-400"},
 }
 
@@ -706,7 +706,7 @@ def dashboard() -> None:
             market_chip = chip()
             engine_chip = chip()
             regime_chip["holder"].tooltip(
-                "Market regime gates new entries only (RISK_OFF = no new "
+                "Market regime gates new entries only (TREND_DOWN = no new "
                 "buys). Evaluated while the market is open."
             )
             market_chip["holder"].tooltip("US equity market session")

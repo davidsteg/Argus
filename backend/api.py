@@ -158,7 +158,7 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
 
     @app.get("/regime")
     async def market_regime() -> Dict[str, Any]:
-        """Current market regime — RISK_OFF means no new entries."""
+        """Current market regime — TREND_DOWN means no new BUY entries."""
         info = await asyncio.to_thread(regime_module.get_regime)
         return {
             **info,
@@ -275,7 +275,7 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
                     {
                         "decision": "BLOCKED",
                         "reason": "all technical + sentiment gates passed but "
-                        "market regime is RISK_OFF — no new entries",
+                        "market regime is TREND_DOWN — no new BUY entries",
                     }
                 )
             else:

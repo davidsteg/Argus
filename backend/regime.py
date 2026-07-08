@@ -15,10 +15,10 @@ Classification (deliberately simple and explainable, no ML):
            a threshold. Elevated vol means moves are violent, spreads are
            wide and stops get run.
 
-    RISK_ON   trend up, volatility normal      → trade normally
-    CAUTION   trend down OR volatility elevated → trade normally (logged)
-    RISK_OFF  trend down AND volatility elevated → no NEW entries
-    UNKNOWN   SPY data unavailable              → fail-open, trade normally
+    TREND_UP   trend up, volatility normal      → trade normally
+    CAUTION    trend down OR volatility elevated → trade normally (logged)
+    TREND_DOWN trend down AND volatility elevated → no new BUY entries
+    UNKNOWN    SPY data unavailable              → fail-open, trade normally
 
 The regime never forces an exit — brackets and the daily kill-switch own
 that. It only gates new entries. Results are cached for a few minutes so
@@ -59,9 +59,9 @@ REGIME_CACHE_MINUTES = float(os.getenv("REGIME_CACHE_MINUTES", "5"))
 # Minutes in a US equity trading year, for annualizing 1-minute returns.
 _MINUTES_PER_YEAR = 252 * 390
 
-RISK_ON = "RISK_ON"
+TREND_UP = "TREND_UP"
 CAUTION = "CAUTION"
-RISK_OFF = "RISK_OFF"
+TREND_DOWN = "TREND_DOWN"
 UNKNOWN = "UNKNOWN"
 
 _lock = threading.Lock()
@@ -103,11 +103,11 @@ def _classify() -> Dict[str, Any]:
     stressed = ann_vol_pct > REGIME_MAX_ANN_VOL
 
     if trend_down and stressed:
-        regime = RISK_OFF
+        regime = TREND_DOWN
     elif trend_down or stressed:
         regime = CAUTION
     else:
-        regime = RISK_ON
+        regime = TREND_UP
 
     return {
         "regime": regime,
@@ -151,4 +151,4 @@ def get_regime() -> Dict[str, Any]:
 
 
 def blocks_new_entries(regime_info: Dict[str, Any]) -> bool:
-    return regime_info.get("regime") == RISK_OFF
+    return regime_info.get("regime") == TREND_DOWN

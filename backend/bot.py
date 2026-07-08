@@ -499,7 +499,7 @@ class ArgusBot:
     ) -> Dict[str, str]:
         """Check each held position for an early-exit signal and close the ones
         that fire. Deliberately runs before the entry gates so a full book
-        or a RISK_OFF tape can still take profit — exits are never blocked
+        or a TREND_DOWN tape can still take profit — exits are never blocked
         by the conditions that only govern new entries."""
         exits: Dict[str, str] = {}
         for position in portfolio["positions"]:
@@ -903,7 +903,7 @@ class ArgusBot:
         cycle["held_symbols"] = sorted(held_symbols)
 
         # Phase 0: signal-driven early exits on held longs. Runs ahead of
-        # the entry gates on purpose — a full book or a RISK_OFF tape must
+        # the entry gates on purpose — a full book or a TREND_DOWN tape must
         # never stop us banking a bounce that is exhausted. Held symbols may
         # have fallen off the current watchlist, so fetch their bars directly.
         if held_symbols:
@@ -921,9 +921,9 @@ class ArgusBot:
             cycle["stage"] = "max-positions"
             return
 
-        # Market regime gate: in RISK_OFF (index falling on stressed vol)
+        # Market regime gate: in TREND_DOWN (index falling on stressed vol)
         # every dip is a knife — stop opening new long positions. Shorts are
-        # still allowed in RISK_OFF since a falling market favours them.
+        # still allowed in TREND_DOWN since a falling market favours them.
         # Existing positions keep their brackets; the daily stop still guards them.
         regime_info = await asyncio.to_thread(regime.get_regime)
         cycle["regime"] = regime_info
@@ -933,7 +933,7 @@ class ArgusBot:
             if not short_enabled:
                 self.db.add_log(
                     "INFO",
-                    f"Regime RISK_OFF ({regime_info['symbol']} "
+                    f"Regime TREND_DOWN ({regime_info['symbol']} "
                     f"${regime_info.get('close', 0):.2f} < EMA "
                     f"${regime_info.get('ema', 0):.2f}, realized vol "
                     f"{regime_info.get('realized_vol_pct', 0):.0f}%) — "
@@ -943,7 +943,7 @@ class ArgusBot:
                 return
             self.db.add_log(
                 "INFO",
-                f"Regime RISK_OFF — BUY entries blocked, SELL entries allowed",
+                f"Regime TREND_DOWN — BUY entries blocked, SELL entries allowed",
             )
 
         frames = await self.fetch_minute_bars()
@@ -973,13 +973,13 @@ class ArgusBot:
         # Deepest dips first for BUY, highest overextension first for SELL
         pending_signals.sort(key=lambda s: s["rsi"])
 
-        # Filter BUY signals in RISK_OFF regime
+        # Filter BUY signals in TREND_DOWN regime
         if regime_blocks:
             pending_signals = [s for s in pending_signals if s["side"] != "BUY"]
             if not pending_signals:
                 self.db.add_log(
                     "INFO",
-                    "Regime RISK_OFF — no SELL signals this cycle",
+                    "Regime TREND_DOWN — no SELL signals this cycle",
                 )
                 cycle["stage"] = "risk-off"
                 return
