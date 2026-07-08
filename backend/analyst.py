@@ -163,6 +163,10 @@ class StrategyAnalyst:
             result = self._call_llm(prompt_data, "optimization")
         except Exception as exc:
             logger.error("Optimization review failed: %s", exc)
+            try:
+                db.add_log("ERROR", f"Optimization review failed: {exc}")
+            except Exception:
+                pass
             return None
 
         result["reviewed_at"] = reviewed_at
@@ -242,6 +246,10 @@ class StrategyAnalyst:
             result = self._call_llm(prompt_data, "trades")
         except Exception as exc:
             logger.error("Trade review failed: %s", exc)
+            try:
+                db.add_log("ERROR", f"Trade review failed: {exc}")
+            except Exception:
+                pass
             return None
 
         result["reviewed_at"] = reviewed_at
