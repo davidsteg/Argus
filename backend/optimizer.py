@@ -5,8 +5,8 @@ validation.
 Runs as an asyncio task inside the backend container (started by bot.py)
 and fires at midnight Europe/Zurich. It fetches the last 30 days of
 1-minute historical bars from Alpaca and replays the exact live strategy
-(RSI dip entry + ATR-multiple bracket exits, same indicator code via
-indicators.py) across a parameter grid.
+(RSI dip entry + ATR-multiple bracket exits + RSI-overbought early exit,
+same indicator code via indicators.py) across a parameter grid.
 
 Overfitting guard: the bars are split chronologically into a train window
 (first 75 %) and a validation window (last 25 %). Combinations are ranked
@@ -64,9 +64,9 @@ TRAIN_FRACTION = float(os.getenv("OPTIMIZER_TRAIN_FRACTION", "0.75"))
 # Post-loss re-entry bench, mirrored from the live engine (1 bar ≈ 1 min).
 COOLDOWN_MINUTES = float(os.getenv("COOLDOWN_MINUTES", "30"))
 
-# Grid searched nightly. Kept deliberately compact: 4*4*3*4 = 192
-# combinations replayed over train+validation finish in well under a
-# minute of CPU inside the container. Bracket distances are ATR multiples
+# Grid searched nightly. Kept deliberately compact: 4*4*3*4*3 = 576
+# combinations replayed over train+validation finish in a couple of
+# minutes of CPU inside the container. Bracket distances are ATR multiples
 # (see indicators.bracket_distances), so the same parameters adapt to each
 # symbol's own volatility.
 PARAMETER_GRID: Dict[str, List[float]] = {
@@ -74,6 +74,7 @@ PARAMETER_GRID: Dict[str, List[float]] = {
     "rsi_buy_signal": [20.0, 25.0, 30.0, 35.0],
     "atr_stop_mult": [1.0, 1.5, 2.0],
     "atr_target_mult": [1.5, 2.0, 3.0, 4.0],
+    "rsi_exit_signal": [60.0, 70.0, 80.0],
 }
 
 
@@ -120,6 +121,7 @@ def backtest(
     rsi_buy_signal: float,
     atr_stop_mult: float,
     atr_target_mult: float,
+    rsi_exit_signal: float,
     cooldown_bars: int = 0,
 ) -> Tuple[float, float, int]:
     """Replay the live strategy over one symbol's bars.
@@ -135,7 +137,9 @@ def backtest(
     Exit: intra-bar bracket simulation with the same ATR-multiple
     distances and floors the live engine uses (indicators.bracket_distances).
     The stop is checked before the target on each bar (pessimistic fill
-    assumption).
+    assumption). If neither bracket leg fills intra-bar, the RSI-overbought
+    early exit is evaluated at the bar close (RSI >= rsi_exit_signal),
+    mirroring the live engine, which only reads RSI on the completed bar.
 
     Returns (total_return, max_drawdown, n_trades), both as fractions.
     """
@@ -157,6 +161,10 @@ def backtest(
                 exit_price = stop_price
             elif highs[i] >= target_price:
                 exit_price = target_price
+            elif not np.isnan(rsi[i]) and rsi[i] >= rsi_exit_signal:
+                # Bounce exhausted: the live engine closes at market on the
+                # bar close, modelled here as a fill at that close.
+                exit_price = closes[i]
             if exit_price is not None:
                 equity *= exit_price / entry_price
                 in_position = False
@@ -227,6 +235,7 @@ class _WindowData:
         rsi_buy_signal: float,
         atr_stop_mult: float,
         atr_target_mult: float,
+        rsi_exit_signal: float,
     ) -> Tuple[float, float, float, int]:
         """Aggregate (score, return, worst drawdown, trades) across symbols."""
         total_return = 0.0
@@ -243,6 +252,7 @@ class _WindowData:
                 rsi_buy_signal=rsi_buy_signal,
                 atr_stop_mult=atr_stop_mult,
                 atr_target_mult=atr_target_mult,
+                rsi_exit_signal=rsi_exit_signal,
                 cooldown_bars=int(COOLDOWN_MINUTES),
             )
             total_return += ret
@@ -308,17 +318,19 @@ def run_optimization() -> Optional[Dict[str, float]]:
 
     # Score every combination on the train window, rank best-first.
     ranked: List[Tuple[float, Dict[str, float], Tuple[float, float, int]]] = []
-    for rsi_period, rsi_buy, stop_mult, target_mult in itertools.product(
+    for rsi_period, rsi_buy, stop_mult, target_mult, exit_signal in itertools.product(
         PARAMETER_GRID["rsi_period"],
         PARAMETER_GRID["rsi_buy_signal"],
         PARAMETER_GRID["atr_stop_mult"],
         PARAMETER_GRID["atr_target_mult"],
+        PARAMETER_GRID["rsi_exit_signal"],
     ):
         score, total_return, drawdown, trades = train.score(
             rsi_period=int(rsi_period),
             rsi_buy_signal=rsi_buy,
             atr_stop_mult=stop_mult,
             atr_target_mult=target_mult,
+            rsi_exit_signal=exit_signal,
         )
         if trades == 0:
             continue
@@ -327,6 +339,7 @@ def run_optimization() -> Optional[Dict[str, float]]:
             "rsi_buy_signal": rsi_buy,
             "atr_stop_mult": stop_mult,
             "atr_target_mult": target_mult,
+            "rsi_exit_signal": exit_signal,
         }
         ranked.append((score, params, (total_return, drawdown, trades)))
     ranked.sort(key=lambda item: item[0], reverse=True)
@@ -354,6 +367,7 @@ def run_optimization() -> Optional[Dict[str, float]]:
             rsi_buy_signal=params["rsi_buy_signal"],
             atr_stop_mult=params["atr_stop_mult"],
             atr_target_mult=params["atr_target_mult"],
+            rsi_exit_signal=params["rsi_exit_signal"],
         )
         if val_return > 0.0:
             best_params, best_train_score, train_stats = params, score, stats
@@ -401,6 +415,7 @@ def run_optimization() -> Optional[Dict[str, float]]:
                 f"LLM overrode optimizer winner — new params: "
                 f"RSI({int(best_params['rsi_period'])}) "
                 f"buy<{best_params['rsi_buy_signal']:.0f}, "
+                f"exit>{best_params['rsi_exit_signal']:.0f}, "
                 f"stop {best_params['atr_stop_mult']:.1f}×ATR, "
                 f"target {best_params['atr_target_mult']:.1f}×ATR",
             )
@@ -420,6 +435,7 @@ def run_optimization() -> Optional[Dict[str, float]]:
         "OPTIMIZER",
         f"New parameters live: RSI({int(best_params['rsi_period'])}) "
         f"buy<{best_params['rsi_buy_signal']:.0f}, "
+        f"exit>{best_params['rsi_exit_signal']:.0f}, "
         f"stop {best_params['atr_stop_mult']:.1f}×ATR, "
         f"target {best_params['atr_target_mult']:.1f}×ATR | "
         f"train: {total_return * 100:+.2f}% return, "

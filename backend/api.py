@@ -200,6 +200,7 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
                 "bars": len(bars),
                 "rsi": None if np.isnan(rsi) else round(rsi, 2),
                 "rsi_buy_signal": probe_config["rsi_buy_signal"],
+                "rsi_exit_signal": probe_config["rsi_exit_signal"],
                 "vwap": round(vwap, 4),
                 "atr": None if np.isnan(atr) else round(atr, 4),
                 "news_cutoff": probe_config["news_cutoff"],

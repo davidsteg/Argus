@@ -10,9 +10,35 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.6.3"
+__version__ = "2.7.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.7.0",
+        "date": "2026-07-08",
+        "title": "Signal-driven exits: bank the bounce when RSI recovers",
+        "notes": [
+            "Held longs now close early at market when RSI recovers past the "
+            "new rsi_exit_signal level (default 70) — the symmetric mirror of "
+            "the RSI-oversold entry. Previously a position only ever exited "
+            "when its bracket take-profit or stop-loss filled; a bounce that "
+            "stalled below the target just round-tripped. The resting bracket "
+            "still guards the downside independently.",
+            "The exit path cancels the bracket's OCO take-profit/stop-loss "
+            "legs before market-closing the position, so a manual close can "
+            "never collide with a resting leg or leave one dangling. The "
+            "resulting sell is reconciled into a trade record on the next "
+            "cycle, exactly like a bracket exit — one trade-recording path.",
+            "Exits run ahead of the entry gates each cycle: a full book "
+            "(max positions) or a RISK_OFF tape no longer blocks taking "
+            "profit on an exhausted bounce.",
+            "rsi_exit_signal is a first-class strategy parameter: editable "
+            "from Settings, tuned nightly by the optimizer (added to the grid "
+            "and modelled in the backtest at the bar close, so live and "
+            "backtest exits stay in lockstep), and shown in the /signals "
+            "dry-run and cycle trace.",
+        ],
+    },
     {
         "version": "2.6.3",
         "date": "2026-07-08",

@@ -7,7 +7,9 @@ Philosophy: trade small amounts on a large scale for quick flips.
 confirms the dip is real; curated news sentiment is the directional
 filter. Exits are volatility-adaptive: bracket stop/target distances are
 ATR multiples, and position size is chosen so each trade risks a roughly
-constant dollar amount. Nightly walk-forward optimization (optimizer.py)
+constant dollar amount. On top of the resting bracket, a held long is
+closed early when RSI recovers past the overbought exit level — the mean
+reversion has played out. Nightly walk-forward optimization (optimizer.py)
 re-tunes the strategy parameters — validated out-of-sample — in the
 shared bot_config table, which this engine re-reads on every cycle so
 new parameters are absorbed seamlessly without a restart.
@@ -88,7 +90,8 @@ COOLDOWN_MINUTES = float(os.getenv("COOLDOWN_MINUTES", "30"))
 
 
 class ArgusBot:
-    """Asynchronous 1-minute execution engine with bracket-order exits."""
+    """Asynchronous 1-minute execution engine with bracket-order and
+    RSI-signal exits."""
 
     def __init__(self) -> None:
         if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
@@ -105,6 +108,11 @@ class ArgusBot:
         self.watchlist: list = universe.get_watchlist()
         self.last_cycle: Dict[str, Any] = {}
         self._open_entries: Dict[str, Dict[str, Any]] = {}
+        # Symbols with a signal-exit close submitted but not yet filled —
+        # guards against re-submitting the close on the next cycle before
+        # the sell reports back. Cleared in sync_portfolio once the position
+        # is gone.
+        self._closing: set = set()
         # symbol -> time.monotonic() deadline until which entries are benched
         self._cooldowns: Dict[str, float] = {}
         self._current_day: Optional[str] = None
@@ -151,13 +159,21 @@ class ArgusBot:
     # market data & signals
     # ------------------------------------------------------------------ #
 
-    async def fetch_minute_bars(self) -> Dict[str, pd.DataFrame]:
-        """Fetch recent 1-minute bars for the whole watchlist in one request."""
-        if not self.watchlist:
+    async def fetch_minute_bars(
+        self, symbols: Optional[List[str]] = None
+    ) -> Dict[str, pd.DataFrame]:
+        """Fetch recent 1-minute bars for a set of symbols in one request.
+
+        Defaults to the whole watchlist (entry evaluation); the exit phase
+        passes the held symbols explicitly, which in whole-market mode may
+        no longer be on the current most-actives watchlist.
+        """
+        targets = self.watchlist if symbols is None else symbols
+        if not targets:
             return {}
         start = datetime.now(timezone.utc) - timedelta(minutes=BAR_LOOKBACK_MINUTES)
         request = StockBarsRequest(
-            symbol_or_symbols=self.watchlist,
+            symbol_or_symbols=targets,
             timeframe=TimeFrame.Minute,
             start=start,
         )
@@ -172,7 +188,7 @@ class ArgusBot:
         df = bars.df
         if df is None or df.empty:
             return frames
-        for symbol in self.watchlist:
+        for symbol in targets:
             try:
                 symbol_df = df.xs(symbol, level="symbol")
             except KeyError:
@@ -244,6 +260,20 @@ class ArgusBot:
             "sentiment": sentiment,
             "sentiment_source": source,
         }
+
+    def evaluate_exit(self, bars: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        """Early-exit decision for a held long: the mean reversion has run
+        its course once RSI recovers to the overbought exit level. Returns
+        exit context, or None to keep holding. Purely the symmetric mirror
+        of the RSI entry trigger — the bracket's stop/target still guard the
+        position independently; this only banks the bounce sooner."""
+        period = max(int(self.config["rsi_period"]), 2)
+        if len(bars) < period * 2:
+            return None
+        latest_rsi = float(compute_rsi(bars["close"], period).iloc[-1])
+        if np.isnan(latest_rsi) or latest_rsi < self.config["rsi_exit_signal"]:
+            return None
+        return {"rsi": latest_rsi, "close": float(bars["close"].iloc[-1])}
 
     # ------------------------------------------------------------------ #
     # order placement
@@ -338,6 +368,94 @@ class ArgusBot:
         logger.info("Submitted bracket BUY for %s x%d @ ~%.2f", symbol, qty, price)
 
     # ------------------------------------------------------------------ #
+    # signal-driven exits
+    # ------------------------------------------------------------------ #
+
+    async def evaluate_and_close_exits(
+        self, portfolio: Dict[str, Any], frames: Dict[str, pd.DataFrame]
+    ) -> Dict[str, str]:
+        """Check each held long for an early-exit signal and close the ones
+        that fire. Deliberately runs before the entry gates so a full book
+        or a RISK_OFF tape can still take profit — exits are never blocked
+        by the conditions that only govern new entries."""
+        exits: Dict[str, str] = {}
+        for position in portfolio["positions"]:
+            symbol = position["symbol"]
+            if symbol in self._closing:
+                continue  # a close is already submitted, awaiting the fill
+            if float(position.get("qty", 0.0)) <= 0:
+                continue  # long-only engine; never signal-exit a short
+            bars = frames.get(symbol)
+            if bars is None or bars.empty:
+                continue
+            exit_signal = self.evaluate_exit(bars)
+            if exit_signal is None:
+                continue
+            await self.close_position_now(symbol, position, exit_signal)
+            exits[symbol] = "signal-exit"
+        return exits
+
+    async def _cancel_symbol_orders(self, symbol: str) -> None:
+        """Cancel a symbol's resting orders — critically the bracket's OCO
+        take-profit / stop-loss legs — before a manual close, so the close
+        cannot collide with a leg and no leg is left dangling to sell shares
+        the position no longer holds."""
+        try:
+            open_orders = await asyncio.to_thread(
+                self.trading.get_orders,
+                GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol]),
+            )
+        except Exception as exc:
+            logger.error("Open-order fetch failed for %s: %s", symbol, exc)
+            self.db.add_log("ERROR", f"{symbol}: open-order fetch failed: {exc}")
+            return
+        for order in open_orders:
+            try:
+                await asyncio.to_thread(self.trading.cancel_order_by_id, order.id)
+            except Exception as exc:
+                logger.error(
+                    "Order cancel failed for %s (%s): %s", symbol, order.id, exc
+                )
+                self.db.add_log("ERROR", f"{symbol}: order cancel failed: {exc}")
+
+    async def close_position_now(
+        self,
+        symbol: str,
+        position: Dict[str, Any],
+        exit_signal: Dict[str, Any],
+    ) -> None:
+        """Cancel the bracket legs and market-close a held long early. The
+        resulting SELL fill is turned into a trade record on the next cycle
+        by sync_portfolio/reconcile_closed_trade — exactly like a bracket
+        TP/SL exit — so there is a single trade-recording path."""
+        # Guard against re-submitting the close while it is still in flight.
+        self._closing.add(symbol)
+        await self._cancel_symbol_orders(symbol)
+        try:
+            order = await asyncio.to_thread(self.trading.close_position, symbol)
+        except Exception as exc:
+            # Let the next cycle retry: the legs are already cancelled, so a
+            # repeat cancel is a harmless no-op.
+            self._closing.discard(symbol)
+            logger.error("Signal-exit close failed for %s: %s", symbol, exc)
+            self.db.add_log("ERROR", f"{symbol}: signal-exit close failed: {exc}")
+            return
+
+        entry = self._open_entries.get(symbol, {})
+        entry_price = float(
+            entry.get("entry_price", position.get("avg_entry_price", 0.0))
+        )
+        qty = abs(float(position.get("qty", 0.0)))
+        self.db.add_log(
+            "TRADE",
+            f"SIGNAL EXIT {symbol} x{qty:g} @ ~${exit_signal['close']:.2f} | "
+            f"RSI {exit_signal['rsi']:.1f} >= exit level "
+            f"{self.config['rsi_exit_signal']:.0f} | entry ~${entry_price:.2f} | "
+            f"order {getattr(order, 'id', '?')}",
+        )
+        logger.info("Signal-exit close for %s x%g", symbol, qty)
+
+    # ------------------------------------------------------------------ #
     # portfolio sync & trade reconciliation
     # ------------------------------------------------------------------ #
 
@@ -371,6 +489,10 @@ class ArgusBot:
         self.db.replace_positions(snapshot)
 
         live_symbols = {p["symbol"] for p in snapshot}
+        # Drop close-in-flight guards for positions that have now exited
+        # (their signal-exit close filled); keep guards for any still held so
+        # the next cycle does not double-submit a close.
+        self._closing.intersection_update(live_symbols)
         for symbol, entry in list(self._open_entries.items()):
             if symbol in live_symbols:
                 continue
@@ -649,8 +771,22 @@ class ArgusBot:
             return
 
         held_symbols = {p["symbol"] for p in portfolio["positions"]}
-        open_slots = MAX_POSITIONS - len(held_symbols)
         cycle["held_symbols"] = sorted(held_symbols)
+
+        # Phase 0: signal-driven early exits on held longs. Runs ahead of
+        # the entry gates on purpose — a full book or a RISK_OFF tape must
+        # never stop us banking a bounce that is exhausted. Held symbols may
+        # have fallen off the current watchlist, so fetch their bars directly.
+        if held_symbols:
+            exit_frames = await self.fetch_minute_bars(sorted(held_symbols))
+            signal_exits = await self.evaluate_and_close_exits(portfolio, exit_frames)
+            if signal_exits:
+                cycle["signal_exits"] = signal_exits
+
+        # Open slots count still-held positions: a close submitted this cycle
+        # only frees its slot once the sell fills (reconciled next cycle), so
+        # we never over-allocate into a slot that is only theoretically free.
+        open_slots = MAX_POSITIONS - len(held_symbols)
         cycle["open_slots"] = open_slots
         if open_slots <= 0:
             cycle["stage"] = "max-positions"

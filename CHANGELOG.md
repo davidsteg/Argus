@@ -9,6 +9,34 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.7.0] - 2026-07-08
+
+### Added
+- **Signal-driven exits** — a held long now closes early at market when RSI
+  recovers past the new `rsi_exit_signal` level (default `70`), the symmetric
+  mirror of the RSI-oversold entry. Until now a position only ever exited when
+  its bracket take-profit or stop-loss filled, so a bounce that stalled below
+  the take-profit just round-tripped back down. The resting bracket still
+  guards the downside independently — this only banks the reversion sooner.
+- `rsi_exit_signal` is a first-class strategy parameter: it lives in
+  `bot_config` (editable from the Settings tab), is tuned nightly by the
+  optimizer (added to `PARAMETER_GRID` and modelled in `backtest()` as a fill
+  at the bar close when neither bracket leg triggers intra-bar, so live and
+  backtest exits never drift), and is surfaced in the `/signals` dry-run and
+  the per-cycle trace (`signal_exits`).
+
+### Changed
+- The exit path cancels the bracket's OCO take-profit/stop-loss legs before
+  market-closing the position, so a manual close can never collide with a
+  resting leg or leave one dangling to sell shares the position no longer
+  holds. The resulting sell is reconciled into a trade record on the next
+  cycle by `sync_portfolio`/`reconcile_closed_trade`, exactly like a bracket
+  exit — a single trade-recording path.
+- Signal exits are evaluated ahead of the entry gates each cycle, so a full
+  book (`MAX_POSITIONS`) or a `RISK_OFF` tape no longer blocks taking profit
+  on an exhausted bounce. Open-slot accounting still counts a closing position
+  as held until its sell fills, so the freed slot is never double-allocated.
+
 ## [v2.6.3] - 2026-07-08
 
 ### Fixed

@@ -49,6 +49,7 @@ DB_PATH = os.getenv(
 DEFAULT_CONFIG: Dict[str, float] = {
     "rsi_period": 14.0,        # RSI lookback in 1-minute bars
     "rsi_buy_signal": 30.0,    # enter long when RSI drops below this level
+    "rsi_exit_signal": 70.0,   # close a long early when RSI recovers above this
     "news_cutoff": 0.55,       # minimum sentiment score required to trade
     "atr_stop_mult": 1.5,      # bracket stop-loss distance, ATR multiples
     "atr_target_mult": 2.5,    # bracket take-profit distance, ATR multiples

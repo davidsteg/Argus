@@ -152,6 +152,11 @@ PARAM_META: Dict[str, Dict[str, Any]] = {
         "hint": "enter long when RSI drops below this level",
         "min": 5.0, "max": 50.0, "step": 0.5, "int": False,
     },
+    "rsi_exit_signal": {
+        "label": "RSI Exit Signal",
+        "hint": "close a long early when RSI recovers above this level",
+        "min": 50.0, "max": 95.0, "step": 0.5, "int": False,
+    },
     "news_cutoff": {
         "label": "News Cutoff",
         "hint": "minimum sentiment score to trade (0.50 = neutral/no news)",

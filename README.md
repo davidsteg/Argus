@@ -55,6 +55,11 @@ active US equities, refreshed every 15 minutes):
    multiples (a quiet megacap gets a tight bracket, a high-beta mover a
    wide one), and share count is chosen so hitting the stop loses about
    `RISK_PER_TRADE_USD`, capped by `POSITION_SIZE_USD` notional.
+7. **Signal exit** — on top of the resting bracket, a held long is closed
+   early at market when RSI recovers past `rsi_exit_signal` (the mirror of
+   the entry trigger): the mean reversion has played out, so bank the
+   bounce instead of waiting for the take-profit. The bracket's stop still
+   guards the downside independently.
 
 ### Safety nets
 - Hard **daily loss limit** → kill-sequence: cancel all orders, liquidate
@@ -148,9 +153,9 @@ the backend API.
 | `REGIME_MAX_ANN_VOL` | `35` | annualized SPY vol (%) above which the tape is stressed |
 | `BACKEND_API_URL` | `http://trading_backend:8000` | how the dashboard reaches the debug API for actions |
 
-Strategy parameters (`rsi_period`, `rsi_buy_signal`, `atr_stop_mult`,
-`atr_target_mult`, `news_cutoff`) live in the shared `bot_config` table
-and are rewritten nightly by the optimizer — not env vars.
+Strategy parameters (`rsi_period`, `rsi_buy_signal`, `rsi_exit_signal`,
+`atr_stop_mult`, `atr_target_mult`, `news_cutoff`) live in the shared
+`bot_config` table and are rewritten nightly by the optimizer — not env vars.
 
 ## Project structure
 
