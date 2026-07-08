@@ -224,18 +224,60 @@ SCREENER_PARAM_META: Dict[str, Dict[str, Any]] = {
 
 ENVIRONMENT_LABELS: Dict[str, str] = {
     "universe_mode": "Universe",
-    "watchlist_size": "Watchlist size",
-    "position_size_usd": "Position size (USD)",
-    "risk_per_trade_usd": "Risk per trade (USD)",
-    "max_positions": "Max positions",
-    "daily_stop_loss": "Daily stop loss (USD)",
-    "min_price_usd": "Min price (USD)",
-    "cooldown_minutes": "Loser cooldown (min)",
-    "poll_interval_seconds": "Poll interval (s)",
-    "bar_lookback_minutes": "Bar lookback (min)",
     "regime_symbol": "Regime symbol",
     "engine_version": "Engine version",
     "engine_started_at": "Engine started",
+    "paper_trading": "Paper trading",
+}
+
+# Editable operational environment — these used to be env vars, now live
+# in bot_config so they can be tuned from the dashboard without a restart.
+OPERATIONAL_PARAM_META: Dict[str, Dict[str, Any]] = {
+    "position_size_usd": {
+        "label": "Position Size (USD)",
+        "hint": "max notional per trade",
+        "min": 100.0, "max": 100000.0, "step": 100.0, "int": True,
+    },
+    "risk_per_trade_usd": {
+        "label": "Risk per Trade (USD)",
+        "hint": "dollar amount to risk per trade (0 = notional-only sizing)",
+        "min": 0.0, "max": 10000.0, "step": 5.0, "int": True,
+    },
+    "max_positions": {
+        "label": "Max Positions",
+        "hint": "concurrent position slots",
+        "min": 1.0, "max": 50.0, "step": 1.0, "int": True,
+    },
+    "daily_stop_loss": {
+        "label": "Daily Stop Loss (USD)",
+        "hint": "hard daily loss limit before emergency kill",
+        "min": 10.0, "max": 100000.0, "step": 10.0, "int": True,
+    },
+    "min_price_usd": {
+        "label": "Min Price (USD)",
+        "hint": "skip symbols below this price",
+        "min": 1.0, "max": 100.0, "step": 0.5, "int": False,
+    },
+    "cooldown_minutes": {
+        "label": "Loser Cooldown (min)",
+        "hint": "minutes to bench a symbol after a losing exit",
+        "min": 0.0, "max": 480.0, "step": 5.0, "int": True,
+    },
+    "poll_interval_seconds": {
+        "label": "Poll Interval (s)",
+        "hint": "seconds between trading cycles",
+        "min": 10.0, "max": 300.0, "step": 5.0, "int": True,
+    },
+    "bar_lookback_minutes": {
+        "label": "Bar Lookback (min)",
+        "hint": "minutes of 1-minute bars to fetch per cycle",
+        "min": 30.0, "max": 1440.0, "step": 10.0, "int": True,
+    },
+    "watchlist_size": {
+        "label": "Watchlist Size",
+        "hint": "top N most-active symbols (whole-market mode, max 100)",
+        "min": 5.0, "max": 100.0, "step": 5.0, "int": True,
+    },
 }
 
 EQUITY_RANGES: Dict[str, Optional[timedelta]] = {
@@ -1596,11 +1638,88 @@ def dashboard() -> None:
                         ).classes(f"text-xs {TEXT_MUTED} mt-1")
 
                     with card():
+                        card_title("🌍 Operational Environment")
+                        ui.label(
+                            "These used to be env vars — now live in bot_config "
+                            "so you can tune them from the dashboard. Changes "
+                            "take effect on the next engine cycle."
+                        ).classes(f"text-xs {TEXT_MUTED}")
+                        op_param_inputs: Dict[str, Any] = {}
+                        for key, meta in OPERATIONAL_PARAM_META.items():
+                            with ui.row().classes(
+                                "w-full items-center justify-between gap-4 "
+                                "flex-nowrap"
+                            ):
+                                with ui.column().classes("gap-0 min-w-0"):
+                                    ui.label(meta["label"]).classes(
+                                        "text-sm text-white"
+                                    )
+                                    ui.label(meta["hint"]).classes(
+                                        f"text-xs {TEXT_MUTED}"
+                                    )
+                                op_param_inputs[key] = ui.number(
+                                    value=(
+                                        int(initial_config.get(key, meta["min"]))
+                                        if meta["int"]
+                                        else round(float(initial_config.get(key, meta["min"])), 2)
+                                    ),
+                                    min=meta["min"],
+                                    max=meta["max"],
+                                    step=meta["step"],
+                                ).props("dense outlined").classes("w-32 shrink-0")
+
+                        async def apply_operational() -> None:
+                            updates: Dict[str, float] = {}
+                            for key, meta in OPERATIONAL_PARAM_META.items():
+                                raw = op_param_inputs[key].value
+                                if raw is None:
+                                    ui.notify(
+                                        f"{meta['label']} is empty",
+                                        type="warning",
+                                    )
+                                    return
+                                value = max(
+                                    float(meta["min"]),
+                                    min(float(meta["max"]), float(raw)),
+                                )
+                                if meta["int"]:
+                                    value = float(int(value))
+                                updates[key] = value
+                            await run.io_bound(db.set_config, updates)
+                            await run.io_bound(
+                                db.add_log,
+                                "WARNING",
+                                "Operational environment changed from dashboard: "
+                                + ", ".join(f"{k}={v:g}" for k, v in updates.items()),
+                            )
+                            ui.notify(
+                                "Operational settings applied — engine picks them "
+                                "up on its next cycle",
+                                type="positive",
+                            )
+
+                        def reload_operational_from_db() -> None:
+                            live = db.get_config()
+                            for key, meta in OPERATIONAL_PARAM_META.items():
+                                op_param_inputs[key].value = (
+                                    int(live.get(key, meta["min"]))
+                                    if meta["int"]
+                                    else round(float(live.get(key, meta["min"])), 2)
+                                )
+                            ui.notify("Reloaded live values from the database")
+
+                        with ui.row().classes("w-full gap-2 mt-2"):
+                            ui.button(
+                                "Apply", on_click=apply_operational
+                            ).props("no-caps unelevated color=primary")
+                            ui.button(
+                                "Reload from DB", on_click=reload_operational_from_db
+                            ).props("no-caps flat")
+
+                    with card():
                         card_title("🌍 Operational Environment", "read-only")
                         ui.label(
-                            "Set via .env / docker-compose and applied when "
-                            "the engine (re)starts — not tunable at runtime "
-                            "by design."
+                            "Read-only info published by the engine."
                         ).classes(f"text-xs {TEXT_MUTED}")
                         environment_labels: Dict[str, ui.label] = {
                             key: kv_row(label)

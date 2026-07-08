@@ -62,6 +62,16 @@ DEFAULT_CONFIG: Dict[str, float] = {
     "screener_enabled": 0.0,       # 0 = off, 1 = on — opportunity screener
     "screener_pool_size": 200.0,   # how many most-active symbols to scan
     "screener_max_candidates": 5.0,  # top N candidates to surface
+    # Operational environment — tunable from the dashboard, not env vars
+    "position_size_usd": 500.0,
+    "risk_per_trade_usd": 20.0,
+    "max_positions": 5.0,
+    "daily_stop_loss": 100.0,
+    "min_price_usd": 5.0,
+    "cooldown_minutes": 30.0,
+    "poll_interval_seconds": 60.0,
+    "bar_lookback_minutes": 180.0,
+    "watchlist_size": 50.0,
 }
 
 STATUS_RUNNING = "RUNNING"

@@ -9,6 +9,22 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.10.0] - 2026-07-08
+
+### Changed
+- **Operational environment moved from env vars to DB** — `position_size_usd`,
+  `risk_per_trade_usd`, `max_positions`, `daily_stop_loss`, `min_price_usd`,
+  `cooldown_minutes`, `poll_interval_seconds`, `bar_lookback_minutes`, and
+  `watchlist_size` are now stored in `bot_config` and editable from
+  **Settings → Operational Environment**. No more env vars or restarts needed
+  to tune them.
+- Only secrets (`ALPACA_API_KEY`, `ANTHROPIC_API_KEY`, `ANALYST_OLLAMA_API_KEY`)
+  and deployment-level settings (`TRADING_SYMBOLS`, `REGIME_*`, `OPTIMIZER_*`)
+  remain as env vars.
+- `docker-compose.yml` cleaned up — removed 8 operational env vars from the
+  backend service.
+- `.env.example` and `README.md` updated to reflect the change.
+
 ## [v2.9.1] - 2026-07-08
 
 ### Changed

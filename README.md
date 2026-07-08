@@ -142,16 +142,14 @@ the backend API.
 | `ANTHROPIC_API_KEY` | — | enables Claude-scored news sentiment |
 | `SENTIMENT_MODEL` | `claude-opus-4-8` | sentiment model (`claude-haiku-4-5` = cheapest) |
 | `TRADING_SYMBOLS` | `ALL` | `ALL` = dynamic most-actives watchlist, or `AAPL,MSFT,…` |
-| `WATCHLIST_SIZE` | `50` | symbols in dynamic mode (max 100) |
-| `POSITION_SIZE_USD` | `500` | max notional per position |
-| `RISK_PER_TRADE_USD` | `20` | target dollar loss if the stop is hit (0 = disable) |
-| `COOLDOWN_MINUTES` | `30` | bench time for a symbol after a losing exit |
-| `MAX_POSITIONS` | `5` | concurrent position cap |
-| `DAILY_STOP_LOSS` | `100` | daily loss (USD) that triggers the kill-sequence |
-| `MIN_PRICE_USD` | `5` | penny-stock filter |
-| `POLL_INTERVAL_SECONDS` | `60` | engine cycle interval |
 | `REGIME_MAX_ANN_VOL` | `35` | annualized SPY vol (%) above which the tape is stressed |
 | `BACKEND_API_URL` | `http://trading_backend:8000` | how the dashboard reaches the debug API for actions |
+
+Operational environment (`position_size_usd`, `risk_per_trade_usd`,
+`max_positions`, `daily_stop_loss`, `min_price_usd`, `cooldown_minutes`,
+`poll_interval_seconds`, `bar_lookback_minutes`, `watchlist_size`) is now
+tunable from the dashboard's **Settings → Operational Environment** card —
+no longer env vars. Changes take effect on the next engine cycle.
 
 Strategy parameters (`rsi_period`, `rsi_buy_signal`, `rsi_exit_signal`,
 `atr_stop_mult`, `atr_target_mult`, `news_cutoff`) live in the shared

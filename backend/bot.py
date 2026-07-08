@@ -70,23 +70,7 @@ ZURICH = ZoneInfo("Europe/Zurich")
 
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
-POSITION_SIZE_USD = float(os.getenv("POSITION_SIZE_USD", "500"))
-MAX_POSITIONS = int(os.getenv("MAX_POSITIONS", "5"))
-DAILY_STOP_LOSS = float(os.getenv("DAILY_STOP_LOSS", "100"))
-POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "60"))
-BAR_LOOKBACK_MINUTES = int(os.getenv("BAR_LOOKBACK_MINUTES", "180"))
-# Quick flips need liquid, penny-increment names; sub-$MIN_PRICE symbols
-# from the most-actives screener are skipped.
-MIN_PRICE_USD = float(os.getenv("MIN_PRICE_USD", "5"))
 API_PORT = int(os.getenv("API_PORT", "8000"))
-# Volatility-scaled sizing: shares are chosen so that hitting the stop
-# loses about this many dollars, capped by POSITION_SIZE_USD notional.
-# Set to 0 to disable and size purely by notional.
-RISK_PER_TRADE_USD = float(os.getenv("RISK_PER_TRADE_USD", "20"))
-# After a losing exit a symbol is benched for this long — a stopped-out
-# dip that keeps falling keeps triggering RSI, and re-buying the same
-# knife each minute is how mean reversion bleeds out.
-COOLDOWN_MINUTES = float(os.getenv("COOLDOWN_MINUTES", "30"))
 
 
 class ArgusBot:
@@ -137,8 +121,9 @@ class ArgusBot:
         return remaining / 60.0
 
     def start_cooldown(self, symbol: str) -> None:
-        if COOLDOWN_MINUTES > 0:
-            self._cooldowns[symbol] = time.monotonic() + COOLDOWN_MINUTES * 60.0
+        cd = self.config.get("cooldown_minutes", 30.0)
+        if cd > 0:
+            self._cooldowns[symbol] = time.monotonic() + cd * 60.0
 
     # ------------------------------------------------------------------ #
     # sentiment filter
@@ -172,7 +157,7 @@ class ArgusBot:
         targets = self.watchlist if symbols is None else symbols
         if not targets:
             return {}
-        start = datetime.now(timezone.utc) - timedelta(minutes=BAR_LOOKBACK_MINUTES)
+        start = datetime.now(timezone.utc) - timedelta(minutes=self.config.get("bar_lookback_minutes", 180))
         request = StockBarsRequest(
             symbol_or_symbols=targets,
             timeframe=TimeFrame.Minute,
@@ -211,7 +196,7 @@ class ArgusBot:
         rsi_series = compute_rsi(bars["close"], period)
         latest_rsi = float(rsi_series.iloc[-1])
         latest_close = float(bars["close"].iloc[-1])
-        if np.isnan(latest_rsi) or latest_close < MIN_PRICE_USD:
+        if np.isnan(latest_rsi) or latest_close < self.config.get("min_price_usd", 5.0):
             return None
 
         vwap = float(compute_vwap(bars).iloc[-1])
@@ -330,7 +315,7 @@ class ArgusBot:
         price = signal["price"]
 
         # The signal price comes from the last completed 1-minute bar, which
-        # can be up to POLL_INTERVAL_SECONDS stale. On cheap, low-volatility
+        # can be up to poll_interval_seconds stale. On cheap, low-volatility
         # tickers the ATR-scaled stop distance is only a few cents, so a
         # bracket priced off a stale bar routinely landed on the wrong side
         # of Alpaca's live quote and was rejected outright. Re-price against
@@ -361,14 +346,16 @@ class ArgusBot:
         # Volatility-scaled sizing: risk a roughly constant dollar amount
         # per trade, capped by the notional position size. Wide stop on a
         # volatile name → fewer shares; tight stop on a quiet name → more.
-        qty = int(POSITION_SIZE_USD // price)
-        if RISK_PER_TRADE_USD > 0:
-            qty = min(qty, int(RISK_PER_TRADE_USD // stop_distance))
+        pos_size = self.config.get("position_size_usd", 500.0)
+        risk_per = self.config.get("risk_per_trade_usd", 20.0)
+        qty = int(pos_size // price)
+        if risk_per > 0:
+            qty = min(qty, int(risk_per // stop_distance))
         if qty < 1:
             self.db.add_log(
                 "WARNING",
                 f"{symbol}: cannot size a whole share within notional "
-                f"${POSITION_SIZE_USD:.0f} and risk ${RISK_PER_TRADE_USD:.0f} "
+                f"${pos_size:.0f} and risk ${risk_per:.0f} "
                 f"(price ${price:.2f}, stop distance ${stop_distance:.2f})",
             )
             return
@@ -439,14 +426,16 @@ class ArgusBot:
             self.config["atr_target_mult"],
         )
 
-        qty = int(POSITION_SIZE_USD // price)
-        if RISK_PER_TRADE_USD > 0:
-            qty = min(qty, int(RISK_PER_TRADE_USD // stop_distance))
+        pos_size = self.config.get("position_size_usd", 500.0)
+        risk_per = self.config.get("risk_per_trade_usd", 20.0)
+        qty = int(pos_size // price)
+        if risk_per > 0:
+            qty = min(qty, int(risk_per // stop_distance))
         if qty < 1:
             self.db.add_log(
                 "WARNING",
                 f"{symbol}: cannot size a whole share within notional "
-                f"${POSITION_SIZE_USD:.0f} and risk ${RISK_PER_TRADE_USD:.0f} "
+                f"${pos_size:.0f} and risk ${risk_per:.0f} "
                 f"(price ${price:.2f}, stop distance ${stop_distance:.2f})",
             )
             return
@@ -712,12 +701,13 @@ class ArgusBot:
         """Return True when trading may continue, False after a kill."""
         status = self.db.get_status()
         daily_pnl = equity - status["daily_start_balance"]
-        if status["daily_start_balance"] > 0 and daily_pnl <= -DAILY_STOP_LOSS:
+        stop_loss = self.config.get("daily_stop_loss", 100.0)
+        if status["daily_start_balance"] > 0 and daily_pnl <= -stop_loss:
             logger.critical(
-                "Daily loss limit breached: %.2f <= -%.2f", daily_pnl, DAILY_STOP_LOSS
+                "Daily loss limit breached: %.2f <= -%.2f", daily_pnl, stop_loss
             )
             await self.kill_sequence(
-                f"Daily loss ${-daily_pnl:.2f} breached limit ${DAILY_STOP_LOSS:.2f}"
+                f"Daily loss ${-daily_pnl:.2f} breached limit ${stop_loss:.2f}"
             )
             return False
         return True
@@ -780,32 +770,33 @@ class ArgusBot:
             return
 
         self.db.set_status(status=STATUS_RUNNING)
+        cfg = self.config
         self.db.add_log(
             "INFO",
             f"Argus engine started (paper trading) — universe "
-            f"{universe.describe_mode()} | position size ${POSITION_SIZE_USD:.0f} "
-            f"| risk/trade ${RISK_PER_TRADE_USD:.0f} | max positions "
-            f"{MAX_POSITIONS} | daily stop ${DAILY_STOP_LOSS:.0f} | loser "
-            f"cooldown {COOLDOWN_MINUTES:.0f}m | regime filter on "
+            f"{universe.describe_mode()} | position size ${cfg.get('position_size_usd', 500):.0f} "
+            f"| risk/trade ${cfg.get('risk_per_trade_usd', 20):.0f} | max positions "
+            f"{cfg.get('max_positions', 5):.0f} | daily stop ${cfg.get('daily_stop_loss', 100):.0f} | loser "
+            f"cooldown {cfg.get('cooldown_minutes', 30):.0f}m | regime filter on "
             f"{regime.REGIME_SYMBOL}",
         )
         logger.info("Argus engine started — universe %s", universe.describe_mode())
 
-        # Operational knobs are env vars the dashboard cannot see otherwise;
-        # publish them (no secrets) so the Settings tab can display them.
+        # Publish operational environment (no secrets) so the Settings tab
+        # can display and edit them.
         self.db.set_state(
             "environment",
             {
                 "universe_mode": universe.describe_mode(),
                 "watchlist_size": len(self.watchlist),
-                "position_size_usd": POSITION_SIZE_USD,
-                "risk_per_trade_usd": RISK_PER_TRADE_USD,
-                "max_positions": MAX_POSITIONS,
-                "daily_stop_loss": DAILY_STOP_LOSS,
-                "min_price_usd": MIN_PRICE_USD,
-                "cooldown_minutes": COOLDOWN_MINUTES,
-                "poll_interval_seconds": POLL_INTERVAL_SECONDS,
-                "bar_lookback_minutes": BAR_LOOKBACK_MINUTES,
+                "position_size_usd": cfg.get("position_size_usd", 500),
+                "risk_per_trade_usd": cfg.get("risk_per_trade_usd", 20),
+                "max_positions": cfg.get("max_positions", 5),
+                "daily_stop_loss": cfg.get("daily_stop_loss", 100),
+                "min_price_usd": cfg.get("min_price_usd", 5),
+                "cooldown_minutes": cfg.get("cooldown_minutes", 30),
+                "poll_interval_seconds": cfg.get("poll_interval_seconds", 60),
+                "bar_lookback_minutes": cfg.get("bar_lookback_minutes", 180),
                 "regime_symbol": regime.REGIME_SYMBOL,
                 "paper_trading": True,
                 "engine_version": __version__,
@@ -825,7 +816,7 @@ class ArgusBot:
                 self.db.add_log("ERROR", f"Unhandled cycle error: {exc}")
             try:
                 await asyncio.wait_for(
-                    self._shutdown.wait(), timeout=POLL_INTERVAL_SECONDS
+                    self._shutdown.wait(), timeout=self.config.get("poll_interval_seconds", 60)
                 )
             except asyncio.TimeoutError:
                 pass
@@ -915,7 +906,7 @@ class ArgusBot:
         # Open slots count still-held positions: a close submitted this cycle
         # only frees its slot once the sell fills (reconciled next cycle), so
         # we never over-allocate into a slot that is only theoretically free.
-        open_slots = MAX_POSITIONS - len(held_symbols)
+        open_slots = int(self.config.get("max_positions", 5)) - len(held_symbols)
         cycle["open_slots"] = open_slots
         if open_slots <= 0:
             cycle["stage"] = "max-positions"

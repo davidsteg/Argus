@@ -141,14 +141,6 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
             "environment": {
                 "universe_mode": universe.describe_mode(),
                 "watchlist": universe.get_watchlist(),
-                "position_size_usd": engine.POSITION_SIZE_USD,
-                "risk_per_trade_usd": engine.RISK_PER_TRADE_USD,
-                "cooldown_minutes": engine.COOLDOWN_MINUTES,
-                "max_positions": engine.MAX_POSITIONS,
-                "daily_stop_loss": engine.DAILY_STOP_LOSS,
-                "min_price_usd": engine.MIN_PRICE_USD,
-                "poll_interval_seconds": engine.POLL_INTERVAL_SECONDS,
-                "bar_lookback_minutes": engine.BAR_LOOKBACK_MINUTES,
                 "regime_symbol": regime_module.REGIME_SYMBOL,
                 "alpaca_api_key": _mask(engine.ALPACA_API_KEY),
                 "paper_trading": True,
@@ -209,12 +201,12 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
                 entry.update({"decision": "SKIP", "reason": "RSI not defined yet"})
                 evaluation[symbol] = entry
                 continue
-            if close < engine.MIN_PRICE_USD:
+            if close < probe_config.get("min_price_usd", 5.0):
                 entry.update(
                     {
                         "decision": "SKIP",
                         "reason": f"price ${close:.2f} below minimum "
-                        f"${engine.MIN_PRICE_USD:.2f}",
+                        f"${probe_config.get('min_price_usd', 5.0):.2f}",
                     }
                 )
                 evaluation[symbol] = entry

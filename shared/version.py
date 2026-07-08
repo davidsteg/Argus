@@ -10,18 +10,22 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.9.1"
+__version__ = "2.10.0"
 
 RELEASES: List[Dict[str, object]] = [
     {
-        "version": "2.9.1",
+        "version": "2.10.0",
         "date": "2026-07-08",
-        "title": "Regime states renamed: TREND_UP / CAUTION / TREND_DOWN",
+        "title": "Operational environment moved from env vars to DB — tunable from dashboard",
         "notes": [
-            "Renamed RISK_ON → TREND_UP, RISK_OFF → TREND_DOWN to describe "
-            "market conditions without directional bias — clearer for a "
-            "long+short strategy where TREND_DOWN blocks BUY but allows SELL.",
-            "CAUTION unchanged (one of trend down OR high vol).",
+            "position_size_usd, risk_per_trade_usd, max_positions, daily_stop_loss, "
+            "min_price_usd, cooldown_minutes, poll_interval_seconds, "
+            "bar_lookback_minutes, and watchlist_size are now stored in bot_config "
+            "and editable from Settings → Operational Environment. No more env vars "
+            "or restarts needed to tune them.",
+            "Only secrets (ALPACA_API_KEY, ANTHROPIC_API_KEY, ANALYST_OLLAMA_API_KEY) "
+            "and deployment-level settings (TRADING_SYMBOLS, REGIME_*, OPTIMIZER_*) "
+            "remain as env vars.",
         ],
     },
     {

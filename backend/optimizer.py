@@ -62,7 +62,7 @@ OPTIMIZER_MAX_SYMBOLS = int(os.getenv("OPTIMIZER_MAX_SYMBOLS", "10"))
 # the remainder is the untouched validation window.
 TRAIN_FRACTION = float(os.getenv("OPTIMIZER_TRAIN_FRACTION", "0.75"))
 # Post-loss re-entry bench, mirrored from the live engine (1 bar ≈ 1 min).
-COOLDOWN_MINUTES = float(os.getenv("COOLDOWN_MINUTES", "30"))
+# Read from bot_config at runtime so it's tunable from the dashboard.
 
 # Grid searched nightly. Kept deliberately compact: 4*4*3*4*3 = 576
 # combinations replayed over train+validation finish in a couple of
@@ -276,6 +276,7 @@ class _WindowData:
         rsi_exit_signal: float,
         rsi_short_signal: float = 999.0,
         rsi_short_exit: float = 0.0,
+        cooldown_bars: int = 30,
     ) -> Tuple[float, float, float, int]:
         """Aggregate (score, return, worst drawdown, trades) across symbols."""
         total_return = 0.0
@@ -295,7 +296,7 @@ class _WindowData:
                 rsi_exit_signal=rsi_exit_signal,
                 rsi_short_signal=rsi_short_signal,
                 rsi_short_exit=rsi_short_exit,
-                cooldown_bars=int(COOLDOWN_MINUTES),
+                cooldown_bars=cooldown_bars,
             )
             total_return += ret
             worst_drawdown = max(worst_drawdown, drawdown)
@@ -358,6 +359,9 @@ def run_optimization() -> Optional[Dict[str, float]]:
     train = _WindowData(train_frames)
     validation = _WindowData(validation_frames) if validation_frames else None
 
+    # Read cooldown from live config so the backtest matches the engine.
+    cooldown_bars = int(db.get_config().get("cooldown_minutes", 30.0))
+
     # Score every combination on the train window, rank best-first.
     ranked: List[Tuple[float, Dict[str, float], Tuple[float, float, int]]] = []
     for rsi_period, rsi_buy, stop_mult, target_mult, exit_signal, short_signal, short_exit in itertools.product(
@@ -377,6 +381,7 @@ def run_optimization() -> Optional[Dict[str, float]]:
             rsi_exit_signal=exit_signal,
             rsi_short_signal=short_signal,
             rsi_short_exit=short_exit,
+            cooldown_bars=cooldown_bars,
         )
         if trades == 0:
             continue
@@ -418,6 +423,7 @@ def run_optimization() -> Optional[Dict[str, float]]:
             rsi_exit_signal=params["rsi_exit_signal"],
             rsi_short_signal=params.get("rsi_short_signal", 999.0),
             rsi_short_exit=params.get("rsi_short_exit", 0.0),
+            cooldown_bars=cooldown_bars,
         )
         if val_return > 0.0:
             best_params, best_train_score, train_stats = params, score, stats

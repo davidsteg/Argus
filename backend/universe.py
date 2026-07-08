@@ -43,10 +43,10 @@ STATIC_SYMBOLS: List[str] = (
     else [s.strip().upper() for s in _RAW_SYMBOLS.split(",") if s.strip()]
 )
 
-# Alpaca's most-actives screener caps at 100 symbols per request. This one
-# stays an environment setting: it defines the deployment's universe size,
-# not a strategy dial to retune live.
-WATCHLIST_SIZE = min(int(os.getenv("WATCHLIST_SIZE", "50")), 100)
+# Alpaca's most-actives screener caps at 100 symbols per request. This
+# is the hard cap; the actual size is read from bot_config.watchlist_size
+# at runtime so it can be tuned from the dashboard.
+HARD_WATCHLIST_CAP = 100
 
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
@@ -68,6 +68,14 @@ def _override_ttl_minutes() -> float:
         )
     except Exception:
         return 30.0
+
+
+def _watchlist_size() -> int:
+    try:
+        from shared.database import get_db
+        return min(int(get_db().get_config().get("watchlist_size", 50.0)), HARD_WATCHLIST_CAP)
+    except Exception:
+        return 50
 
 _lock = threading.Lock()
 _cached_symbols: List[str] = []
@@ -142,7 +150,7 @@ def get_screener_watchlist() -> List[str]:
         if _cached_symbols and age < _refresh_minutes() * 60:
             return list(_cached_symbols)
         try:
-            symbols = _fetch_most_actives(WATCHLIST_SIZE)
+            symbols = _fetch_most_actives(_watchlist_size())
         except Exception as exc:
             logger.error("Most-actives screener failed: %s", exc)
             if _cached_symbols:
@@ -162,7 +170,7 @@ def get_screener_watchlist() -> List[str]:
 def describe_mode() -> str:
     if DYNAMIC_MODE:
         return (
-            f"whole-market (top {WATCHLIST_SIZE} most active by volume, "
+            f"whole-market (top {_watchlist_size()} most active by volume, "
             f"refresh {_refresh_minutes():g}m)"
         )
     return f"static ({', '.join(STATIC_SYMBOLS)})"
