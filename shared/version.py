@@ -10,9 +10,19 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.4.11"
+__version__ = "2.4.12"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.4.12",
+        "date": "2026-07-08",
+        "title": "Increase LLM max_tokens to 8192 for complete JSON responses",
+        "notes": [
+            "The LLM now returns valid JSON but gets truncated at 2048 "
+            "tokens, producing incomplete JSON that fails to parse. "
+            "Increased to 8192.",
+        ],
+    },
     {
         "version": "2.4.11",
         "date": "2026-07-08",

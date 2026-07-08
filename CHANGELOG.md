@@ -9,6 +9,12 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.4.12] - 2026-07-08
+
+### Fixed
+- LLM now returns valid JSON but gets truncated at 2048 tokens, producing
+  incomplete JSON that fails to parse. Increased `max_tokens` to 8192.
+
 ## [v2.4.11] - 2026-07-08
 
 ### Fixed
