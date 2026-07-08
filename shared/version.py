@@ -10,9 +10,19 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.5.0"
+__version__ = "2.5.1"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.5.1",
+        "date": "2026-07-08",
+        "title": "Automatic decision memory lesson extraction",
+        "notes": [
+            "Lesson extraction now runs every 50 cycles instead of requiring "
+            "a manual POST /analyst/extract-lessons call. The system is now "
+            "fully autonomous.",
+        ],
+    },
     {
         "version": "2.5.0",
         "date": "2026-07-08",

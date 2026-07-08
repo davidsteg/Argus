@@ -109,6 +109,7 @@ class ArgusBot:
         self._cooldowns: Dict[str, float] = {}
         self._current_day: Optional[str] = None
         self._shutdown = asyncio.Event()
+        self._cycle_count: int = 0
 
     # ------------------------------------------------------------------ #
     # loser cooldown
@@ -764,6 +765,14 @@ class ArgusBot:
                     )
         except Exception as exc:
             logger.error("Watchlist review failed: %s", exc)
+
+        # Periodic decision memory lesson extraction (every 50 cycles).
+        try:
+            analyst = get_analyst()
+            if analyst.enabled(self.db) and self._cycle_count % 50 == 0:
+                await asyncio.to_thread(analyst.extract_lessons, self.db)
+        except Exception as exc:
+            logger.error("Lesson extraction failed: %s", exc)
 
 
 class EngineController:

@@ -9,6 +9,12 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.5.1] - 2026-07-08
+
+### Fixed
+- Decision memory lesson extraction now runs every 50 cycles automatically
+  instead of requiring a manual API call. The system is fully autonomous.
+
 ## [v2.5.0] - 2026-07-08
 
 ### Added
