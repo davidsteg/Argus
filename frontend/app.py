@@ -1801,9 +1801,6 @@ def dashboard() -> None:
         enabled = bool(config.get("analyst_enabled", 0.0))
         if render_state["analyst_enabled"] != enabled:
             render_state["analyst_enabled"] = enabled
-            analyst_toggle._suppress_change = True
-            analyst_toggle.set_value(enabled)
-            analyst_toggle._suppress_change = False
 
         analyst_cfg = snapshot.get("analyst_config") or {}
         model = analyst_cfg.get("model", "deepseek-r1")

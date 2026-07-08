@@ -10,9 +10,22 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.4.7"
+__version__ = "2.4.8"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.4.8",
+        "date": "2026-07-08",
+        "title": "Fix toggle loop and expose LLM response in error logs",
+        "notes": [
+            "Removed set_value from render_analyst — the switch is now "
+            "managed by user clicks only, eliminating the async race that "
+            "caused the infinite toggle loop",
+            "LLM response text (first 500 chars) is now included in the "
+            "exception message so it shows up in GET /logs instead of "
+            "requiring docker exec",
+        ],
+    },
     {
         "version": "2.4.7",
         "date": "2026-07-08",

@@ -9,6 +9,15 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.4.8] - 2026-07-08
+
+### Fixed
+- Toggle infinite loop: removed `set_value` from `render_analyst` — the
+  switch is now managed by user clicks only, eliminating the async race
+  that caused the callback to fire on every refresh cycle
+- LLM response text (first 500 chars) is now included in the exception
+  message so it shows up in `GET /logs` instead of requiring `docker exec`
+
 ## [v2.4.7] - 2026-07-08
 
 ### Fixed

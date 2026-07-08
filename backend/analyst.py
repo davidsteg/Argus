@@ -353,10 +353,13 @@ class StrategyAnalyst:
         try:
             result = self._parse_json(text)
         except json.JSONDecodeError:
-            logger.error("Analyst %s review — failed to parse JSON from LLM response. "
-                          "Raw response (first 2000 chars): %s",
-                          review_type, text[:2000])
-            raise
+            snippet = text[:500]
+            logger.error("Analyst %s review — failed to parse JSON. "
+                          "Raw response (first 500 chars): %s",
+                          review_type, snippet)
+            raise RuntimeError(
+                f"LLM returned non-JSON response: {snippet}"
+            )
         return {
             "summary": str(result.get("summary", "")),
             "warnings": [
