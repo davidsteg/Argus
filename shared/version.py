@@ -10,9 +10,19 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.4.8"
+__version__ = "2.4.9"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.4.9",
+        "date": "2026-07-08",
+        "title": "Detailed LLM error logging for empty/refused responses",
+        "notes": [
+            "Log finish_reason and refusal field when LLM returns empty "
+            "content, so we can distinguish model-not-found from "
+            "content-policy blocks without docker exec",
+        ],
+    },
     {
         "version": "2.4.8",
         "date": "2026-07-08",

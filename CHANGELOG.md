@@ -9,6 +9,13 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.4.9] - 2026-07-08
+
+### Fixed
+- Log `finish_reason` and `refusal` field when LLM returns empty content,
+  so we can distinguish model-not-found from content-policy blocks without
+  `docker exec`
+
 ## [v2.4.8] - 2026-07-08
 
 ### Fixed

@@ -330,26 +330,49 @@ class StrategyAnalyst:
         payload = json.dumps(data, default=str, indent=2)
         logger.info("Analyst calling %s for %s review (%d chars)",
                      model, review_type, len(payload))
-        response = self._client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        f"Analyze this {review_type} data and return your "
-                        f"assessment as JSON:\n\n{payload}"
-                    ),
-                },
-            ],
-            temperature=0.3,
-            max_tokens=2048,
-        )
-        text = response.choices[0].message.content
+        try:
+            response = self._client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Analyze this {review_type} data and return your "
+                            f"assessment as JSON:\n\n{payload}"
+                        ),
+                    },
+                ],
+                temperature=0.3,
+                max_tokens=2048,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"OpenAI API call failed: {type(exc).__name__}: {exc}"
+            )
+
+        choice = response.choices[0]
+        msg = choice.message
+        text = msg.content
+        finish = choice.finish_reason
+
         if text is None:
-            raise RuntimeError("LLM returned empty response")
-        logger.info("Analyst %s review response received (%d chars)",
-                     review_type, len(text))
+            details = f"finish_reason={finish}"
+            if hasattr(msg, "refusal") and msg.refusal:
+                details += f" refusal={msg.refusal}"
+            raise RuntimeError(
+                f"LLM returned empty content ({details})"
+            )
+        if not text.strip():
+            details = f"finish_reason={finish}"
+            if hasattr(msg, "refusal") and msg.refusal:
+                details += f" refusal={msg.refusal}"
+            raise RuntimeError(
+                f"LLM returned blank content ({details})"
+            )
+
+        logger.info("Analyst %s review response received (%d chars, finish=%s)",
+                     review_type, len(text), finish)
         try:
             result = self._parse_json(text)
         except json.JSONDecodeError:
