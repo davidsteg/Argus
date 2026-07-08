@@ -57,7 +57,12 @@ SYSTEM_PROMPT = (
     "Flag overfitting, insufficient sample sizes, regime mismatches, "
     "and parameter drift. Never suggest removing safety mechanisms "
     "(daily stop-loss, bracket orders, paper trading).\n\n"
-    "Respond with valid JSON only, no markdown, no preamble."
+    "You MUST respond with ONLY a valid JSON object. No markdown, no "
+    "code fences, no preamble, no explanation. Use this exact structure:\n"
+    '{"summary": "one-paragraph assessment", '
+    '"warnings": ["warning1", "warning2"], '
+    '"suggestions": ["suggestion1", "suggestion2"], '
+    '"confidence": 0.0-1.0}'
 )
 
 

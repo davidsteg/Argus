@@ -10,9 +10,19 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.4.10"
+__version__ = "2.4.11"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.4.11",
+        "date": "2026-07-08",
+        "title": "Force JSON output from LLM with explicit template",
+        "notes": [
+            "DeepSeek models ignore 'respond with JSON only' and write "
+            "prose. System prompt now includes an exact JSON template to "
+            "fill in, which forces structured output.",
+        ],
+    },
     {
         "version": "2.4.10",
         "date": "2026-07-08",

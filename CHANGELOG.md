@@ -9,6 +9,13 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.4.11] - 2026-07-08
+
+### Fixed
+- DeepSeek models ignore "respond with JSON only" and write prose. System
+  prompt now includes an exact JSON template to fill in, which forces
+  structured output.
+
 ## [v2.4.10] - 2026-07-08
 
 ### Fixed
