@@ -9,6 +9,14 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.4.13] - 2026-07-08
+
+### Added
+- The analyst now validates the optimizer's winning parameter combination
+  and can **accept**, **override** (pick a different rank), or **reject**
+  it. If rejected, current params stay unchanged. The write to `bot_config`
+  only happens after the analyst has spoken.
+
 ## [v2.4.12] - 2026-07-08
 
 ### Fixed

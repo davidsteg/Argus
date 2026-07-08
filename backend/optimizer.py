@@ -357,6 +357,38 @@ def run_optimization() -> Optional[Dict[str, float]]:
     current = db.get_config()
     best_params["news_cutoff"] = current["news_cutoff"]
     best_params["analyst_enabled"] = current.get("analyst_enabled", 0.0)
+
+    # Post-optimization LLM review (if analyst is enabled).
+    # The analyst can accept, override (pick a different rank), or reject
+    # the winner. If it rejects, keep current params unchanged.
+    try:
+        from analyst import get_analyst
+        import regime as regime_module
+
+        analyst = get_analyst()
+        regime_info = regime_module.get_regime()
+        analyst_result = analyst.review_optimization(
+            ranked, best_params, regime_info, db
+        )
+        if analyst_result is None:
+            db.add_log(
+                "ANALYST",
+                "LLM rejected optimizer winner — keeping current parameters",
+            )
+            return None
+        if analyst_result != best_params:
+            best_params = analyst_result
+            db.add_log(
+                "ANALYST",
+                f"LLM overrode optimizer winner — new params: "
+                f"RSI({int(best_params['rsi_period'])}) "
+                f"buy<{best_params['rsi_buy_signal']:.0f}, "
+                f"stop {best_params['atr_stop_mult']:.1f}×ATR, "
+                f"target {best_params['atr_target_mult']:.1f}×ATR",
+            )
+    except Exception as exc:
+        logger.error("Post-optimization analyst review failed: %s", exc)
+
     db.set_config(best_params)
 
     total_return, drawdown, trades = train_stats
@@ -381,17 +413,6 @@ def run_optimization() -> Optional[Dict[str, float]]:
         best_params,
         best_train_score,
     )
-
-    # Post-optimization LLM review (if analyst is enabled).
-    try:
-        from analyst import get_analyst
-        import regime as regime_module
-
-        analyst = get_analyst()
-        regime_info = regime_module.get_regime()
-        analyst.review_optimization(ranked, best_params, regime_info, db)
-    except Exception as exc:
-        logger.error("Post-optimization analyst review failed: %s", exc)
 
     return best_params
 

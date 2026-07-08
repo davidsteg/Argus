@@ -10,9 +10,21 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.4.12"
+__version__ = "2.4.13"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.4.13",
+        "date": "2026-07-08",
+        "title": "Close the loop: LLM validates and can override optimizer winner",
+        "notes": [
+            "The analyst now makes a decision (accept/override/reject) on "
+            "the optimizer's winning parameter combination. If it rejects, "
+            "current params stay unchanged. If it overrides, a different "
+            "rank from the grid search is applied instead. The write to "
+            "bot_config only happens after the analyst has spoken.",
+        ],
+    },
     {
         "version": "2.4.12",
         "date": "2026-07-08",

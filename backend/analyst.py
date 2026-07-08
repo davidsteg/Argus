@@ -57,12 +57,22 @@ SYSTEM_PROMPT = (
     "Flag overfitting, insufficient sample sizes, regime mismatches, "
     "and parameter drift. Never suggest removing safety mechanisms "
     "(daily stop-loss, bracket orders, paper trading).\n\n"
+    "For optimization reviews you also make a DECISION about whether the "
+    "winner should go live. The ranked candidates are ordered by "
+    "train-window score (best first). The winner is the first candidate "
+    "that also passed out-of-sample validation. You can:\n"
+    "- \"accept\": let the winner go live (default if confident)\n"
+    "- \"override\": pick a different rank from the list (set override_rank "
+    "to the 1-based rank you prefer)\n"
+    "- \"reject\": keep current parameters unchanged\n\n"
     "You MUST respond with ONLY a valid JSON object. No markdown, no "
     "code fences, no preamble, no explanation. Use this exact structure:\n"
     '{"summary": "one-paragraph assessment", '
     '"warnings": ["warning1", "warning2"], '
     '"suggestions": ["suggestion1", "suggestion2"], '
-    '"confidence": 0.0-1.0}'
+    '"confidence": 0.0-1.0, '
+    '"decision": {"action": "accept|override|reject", '
+    '"override_rank": 3, "reason": "why"}}'
 )
 
 
@@ -120,9 +130,13 @@ class StrategyAnalyst:
         regime: Dict[str, Any],
         db,
     ) -> Optional[Dict[str, Any]]:
-        """Analyze grid search results after the nightly optimizer runs."""
+        """Analyze grid search results after the nightly optimizer runs.
+
+        Returns the final parameter dict (possibly overridden by the LLM)
+        or None to reject the winner and keep current params unchanged.
+        """
         if not self.available or not self.enabled(db):
-            return None
+            return winner
 
         reviewed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -172,7 +186,7 @@ class StrategyAnalyst:
                 db.add_log("ERROR", f"Optimization review failed: {exc}")
             except Exception:
                 pass
-            return None
+            return winner
 
         result["reviewed_at"] = reviewed_at
         result["type"] = "optimization"
@@ -180,7 +194,36 @@ class StrategyAnalyst:
             db.set_state("analyst_optimization", result)
         except Exception as exc:
             logger.error("Failed to store optimization review: %s", exc)
-        return result
+
+        # Apply the LLM's decision about which params go live.
+        decision = result.get("decision", {})
+        action = decision.get("action", "accept")
+        if action == "reject":
+            db.add_log(
+                "ANALYST",
+                f"LLM rejected optimizer winner — keeping current params. "
+                f"Reason: {decision.get('reason', 'not specified')}",
+            )
+            return None
+        elif action == "override":
+            override_rank = int(decision.get("override_rank", 1))
+            if 1 <= override_rank <= len(ranked):
+                _, override_params, _ = ranked[override_rank - 1]
+                db.add_log(
+                    "ANALYST",
+                    f"LLM overrode optimizer winner — using rank "
+                    f"{override_rank} instead. "
+                    f"Reason: {decision.get('reason', 'not specified')}",
+                )
+                return override_params
+            else:
+                db.add_log(
+                    "WARNING",
+                    f"LLM requested invalid rank {override_rank} "
+                    f"(max {len(ranked)}) — falling back to winner",
+                )
+
+        return winner
 
     def review_trades(
         self,
