@@ -10,9 +10,20 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.9.0"
+__version__ = "2.9.1"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.9.1",
+        "date": "2026-07-08",
+        "title": "Regime states renamed: TREND_UP / CAUTION / TREND_DOWN",
+        "notes": [
+            "Renamed RISK_ON → TREND_UP, RISK_OFF → TREND_DOWN to describe "
+            "market conditions without directional bias — clearer for a "
+            "long+short strategy where TREND_DOWN blocks BUY but allows SELL.",
+            "CAUTION unchanged (one of trend down OR high vol).",
+        ],
+    },
     {
         "version": "2.9.0",
         "date": "2026-07-08",

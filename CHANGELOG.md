@@ -9,6 +9,14 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.9.1] - 2026-07-08
+
+### Changed
+- **Regime states renamed**: `RISK_ON` → `TREND_UP`, `RISK_OFF` → `TREND_DOWN`
+  to describe market conditions without directional bias — clearer for a
+  long+short strategy where `TREND_DOWN` blocks BUY but allows SELL.
+  `CAUTION` unchanged (one of trend down OR high vol).
+
 ## [v2.9.0] - 2026-07-08
 
 ### Added
