@@ -78,6 +78,48 @@ SERIES_BLUE = "#3987e5"
 PNL_GREEN = "#34d399"
 PNL_RED = "#f87171"
 CHART_GRID = "#232938"
+
+# Argus mark — the hundred-eyed watchman, reduced to seven: one central
+# eye flanked by six smaller ones, in gold on the near-black canvas.
+# A single SVG body serves both the header logo and (with a dark rounded
+# tile behind it) the browser favicon.
+_LOGO_GOLD = """
+<defs>
+  <linearGradient id="au" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#eecf7a"/>
+    <stop offset="0.55" stop-color="#d4a94a"/>
+    <stop offset="1" stop-color="#9a7422"/>
+  </linearGradient>
+  <g id="mini">
+    <path d="M-11 0 Q0 -8.5 11 0 Q0 8.5 -11 0 Z" fill="none"
+      stroke="url(#au)" stroke-width="2.6" stroke-linejoin="round"/>
+    <circle r="3.4" fill="url(#au)"/>
+    <circle r="1.5" fill="#10141c"/>
+  </g>
+</defs>
+<use href="#mini" transform="translate(50 13)"/>
+<use href="#mini" transform="translate(22 27)"/>
+<use href="#mini" transform="translate(78 27)"/>
+<use href="#mini" transform="translate(22 73)"/>
+<use href="#mini" transform="translate(78 73)"/>
+<use href="#mini" transform="translate(50 87)"/>
+<path d="M11 50 Q50 23 89 50 Q50 77 11 50 Z" fill="none"
+  stroke="url(#au)" stroke-width="3.4" stroke-linejoin="round"/>
+<circle cx="50" cy="50" r="13.5" fill="url(#au)"/>
+<circle cx="50" cy="50" r="7" fill="#10141c"/>
+<circle cx="54.5" cy="45.5" r="2.4" fill="#f6ead0"/>
+"""
+
+ARGUS_LOGO_SVG = (
+    '<svg viewBox="0 0 100 100" width="40" height="40" '
+    'xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Argus">'
+    f"{_LOGO_GOLD}</svg>"
+)
+ARGUS_FAVICON_SVG = (
+    '<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">'
+    '<rect width="100" height="100" rx="22" fill="#10141c"/>'
+    f"{_LOGO_GOLD}</svg>"
+)
 CHART_INK = "#8b93a7"
 
 LEVEL_COLORS: Dict[str, str] = {
@@ -576,7 +618,7 @@ def dashboard() -> None:
         "border-b border-[#2a3140] sticky top-0 z-50"
     ):
         with ui.row().classes("items-center gap-3"):
-            ui.label("🛡️").classes("text-3xl")
+            ui.html(ARGUS_LOGO_SVG).classes("shrink-0")
             with ui.column().classes("gap-0"):
                 with ui.row().classes("items-center gap-2"):
                     ui.label("ARGUS").classes(
@@ -1959,7 +2001,7 @@ if __name__ in {"__main__", "__mp_main__"}:
         host="0.0.0.0",
         port=8080,
         title="Argus Command Center",
-        favicon="🛡️",
+        favicon=ARGUS_FAVICON_SVG,
         dark=True,
         reload=False,
         show=False,

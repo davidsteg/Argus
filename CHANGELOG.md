@@ -9,6 +9,18 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.5.2] - 2026-07-08
+
+### Changed
+- New multi-eye Argus logo: a central gold eye with six smaller eyes,
+  inspired by the hundred-eyed watchman. Rendered as inline SVG in the
+  dashboard header and served as the browser favicon (previously a 🛡️
+  emoji in both places).
+
+### Removed
+- Six unused logo/favicon PNGs in `frontend/static/` — nothing
+  referenced them.
+
 ## [v2.5.1] - 2026-07-08
 
 ### Fixed

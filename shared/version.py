@@ -10,9 +10,20 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.5.1"
+__version__ = "2.5.2"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.5.2",
+        "date": "2026-07-08",
+        "title": "New Argus logo",
+        "notes": [
+            "New multi-eye Argus mark, inspired by the hundred-eyed "
+            "watchman: a central gold eye with six smaller eyes, rendered "
+            "as inline SVG in the header and as the browser favicon.",
+            "Removed six unused logo/favicon PNGs from frontend/static.",
+        ],
+    },
     {
         "version": "2.5.1",
         "date": "2026-07-08",
