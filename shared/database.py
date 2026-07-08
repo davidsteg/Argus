@@ -53,6 +53,8 @@ DEFAULT_CONFIG: Dict[str, float] = {
     "atr_stop_mult": 1.5,      # bracket stop-loss distance, ATR multiples
     "atr_target_mult": 2.5,    # bracket take-profit distance, ATR multiples
     "analyst_enabled": 0.0,    # 0 = off, 1 = on — LLM strategy analyst toggle
+    "watchlist_refresh_minutes": 15.0,      # dynamic-mode screener refresh cadence
+    "watchlist_override_ttl_minutes": 30.0,  # analyst watchlist override expiry
 }
 
 STATUS_RUNNING = "RUNNING"

@@ -10,9 +10,22 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.6.0"
+__version__ = "2.6.1"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.6.1",
+        "date": "2026-07-08",
+        "title": "Watchlist timing moves to the dashboard, not the environment",
+        "notes": [
+            "Screener refresh interval and analyst watchlist override TTL "
+            "are now bot_config values editable from the new Watchlist "
+            "card in Settings — no restart, no environment variable.",
+            "Watchlist Model and Risk Model fields added to the Analyst "
+            "tab — the backend already supported per-agent model overrides "
+            "but the dashboard had no inputs for them.",
+        ],
+    },
     {
         "version": "2.6.0",
         "date": "2026-07-08",

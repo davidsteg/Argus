@@ -169,6 +169,21 @@ PARAM_META: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# Editable watchlist/universe timing — same bot_config table, own card since
+# these govern the dynamic universe rather than the entry/exit signal.
+WATCHLIST_PARAM_META: Dict[str, Dict[str, Any]] = {
+    "watchlist_refresh_minutes": {
+        "label": "Screener Refresh",
+        "hint": "minutes between most-actives screener refreshes (whole-market mode)",
+        "min": 1.0, "max": 120.0, "step": 1.0, "int": True,
+    },
+    "watchlist_override_ttl_minutes": {
+        "label": "Analyst Override TTL",
+        "hint": "minutes an LLM-curated watchlist stays live before reverting to the screener",
+        "min": 1.0, "max": 240.0, "step": 1.0, "int": True,
+    },
+}
+
 ENVIRONMENT_LABELS: Dict[str, str] = {
     "universe_mode": "Universe",
     "watchlist_size": "Watchlist size",
@@ -979,6 +994,32 @@ def dashboard() -> None:
                         "w-full items-center justify-between gap-4 flex-nowrap"
                     ):
                         with ui.column().classes("gap-0 min-w-0"):
+                            ui.label("Watchlist Model").classes(
+                                "text-sm text-white"
+                            )
+                            ui.label(
+                                "Cheaper/faster model for hourly watchlist "
+                                "curation — leave empty to use Model"
+                            ).classes(f"text-xs {TEXT_MUTED}")
+                        analyst_watchlist_model_input = ui.input(
+                            value="", placeholder="(same as Model)"
+                        ).props("dense outlined").classes("w-56 shrink-0")
+                    with ui.row().classes(
+                        "w-full items-center justify-between gap-4 flex-nowrap"
+                    ):
+                        with ui.column().classes("gap-0 min-w-0"):
+                            ui.label("Risk Model").classes("text-sm text-white")
+                            ui.label(
+                                "Cheaper/faster model for pre-trade risk "
+                                "checks — leave empty to use Model"
+                            ).classes(f"text-xs {TEXT_MUTED}")
+                        analyst_risk_model_input = ui.input(
+                            value="", placeholder="(same as Model)"
+                        ).props("dense outlined").classes("w-56 shrink-0")
+                    with ui.row().classes(
+                        "w-full items-center justify-between gap-4 flex-nowrap"
+                    ):
+                        with ui.column().classes("gap-0 min-w-0"):
                             ui.label("API Key").classes("text-sm text-white")
                             ui.label(
                                 "Bearer token (required for Ollama Cloud, "
@@ -1021,6 +1062,8 @@ def dashboard() -> None:
                             "base_url": analyst_base_url_input.value or "",
                             "api_key": analyst_api_key_input.value or "",
                             "model": analyst_model_input.value or "deepseek-r1",
+                            "watchlist_model": analyst_watchlist_model_input.value or "",
+                            "risk_model": analyst_risk_model_input.value or "",
                             "trade_review_interval_hours": float(
                                 analyst_interval_input.value or 4
                             ),
@@ -1261,6 +1304,69 @@ def dashboard() -> None:
                             ui.button(
                                 "Restore defaults", on_click=restore_defaults
                             ).props("no-caps flat color=orange")
+
+                    with card():
+                        card_title("📡 Watchlist")
+                        ui.label(
+                            "Whole-market mode only. Written to the shared "
+                            "bot_config table and read on the next screener "
+                            "check or watchlist override lookup — no restart "
+                            "needed."
+                        ).classes(f"text-xs {TEXT_MUTED}")
+                        watchlist_param_inputs: Dict[str, ui.number] = {}
+                        for key, meta in WATCHLIST_PARAM_META.items():
+                            with ui.row().classes(
+                                "w-full items-center justify-between gap-4 "
+                                "flex-nowrap"
+                            ):
+                                with ui.column().classes("gap-0 min-w-0"):
+                                    ui.label(meta["label"]).classes(
+                                        "text-sm text-white"
+                                    )
+                                    ui.label(meta["hint"]).classes(
+                                        f"text-xs {TEXT_MUTED}"
+                                    )
+                                watchlist_param_inputs[key] = ui.number(
+                                    value=int(initial_config[key]),
+                                    min=meta["min"],
+                                    max=meta["max"],
+                                    step=meta["step"],
+                                ).props("dense outlined").classes("w-32 shrink-0")
+
+                        async def apply_watchlist_parameters() -> None:
+                            updates: Dict[str, float] = {}
+                            for key, meta in WATCHLIST_PARAM_META.items():
+                                raw = watchlist_param_inputs[key].value
+                                if raw is None:
+                                    ui.notify(
+                                        f"{meta['label']} is empty",
+                                        type="warning",
+                                    )
+                                    return
+                                value = max(
+                                    float(meta["min"]),
+                                    min(float(meta["max"]), float(raw)),
+                                )
+                                updates[key] = float(int(value))
+                            await run.io_bound(db.set_config, updates)
+                            ui.notify(
+                                "Watchlist settings applied",
+                                type="positive",
+                            )
+
+                        def reload_watchlist_from_db() -> None:
+                            live = db.get_config()
+                            for key in WATCHLIST_PARAM_META:
+                                watchlist_param_inputs[key].value = int(live[key])
+                            ui.notify("Reloaded live values from the database")
+
+                        with ui.row().classes("w-full gap-2 mt-2"):
+                            ui.button(
+                                "Apply", on_click=apply_watchlist_parameters
+                            ).props("no-caps unelevated color=primary")
+                            ui.button(
+                                "Reload from DB", on_click=reload_watchlist_from_db
+                            ).props("no-caps flat")
 
                     with card():
                         card_title("🖥️ Dashboard")
@@ -1859,6 +1965,12 @@ def dashboard() -> None:
             analyst_api_key_input.value = analyst_cfg.get("api_key", "")
         if not analyst_model_input.value or analyst_model_input.value == "deepseek-r1":
             analyst_model_input.value = model
+        if not analyst_watchlist_model_input.value:
+            analyst_watchlist_model_input.value = analyst_cfg.get(
+                "watchlist_model", ""
+            )
+        if not analyst_risk_model_input.value:
+            analyst_risk_model_input.value = analyst_cfg.get("risk_model", "")
         if not analyst_interval_input.value or analyst_interval_input.value == 4:
             analyst_interval_input.value = float(
                 analyst_cfg.get("trade_review_interval_hours", 4)

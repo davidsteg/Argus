@@ -11,6 +11,11 @@ TRADING_SYMBOLS environment variable:
   "trades on the whole market" without polling thousands of tickers —
   liquidity concentrates in the most active names, which is exactly what
   a quick-flip strategy needs.
+
+The refresh cadence and override TTL (below) are runtime-tunable strategy
+parameters in bot_config — edit them from the dashboard's Settings tab,
+same as RSI/ATR — not environment variables, so they take effect on the
+next call without a restart.
 """
 
 from __future__ import annotations
@@ -38,17 +43,31 @@ STATIC_SYMBOLS: List[str] = (
     else [s.strip().upper() for s in _RAW_SYMBOLS.split(",") if s.strip()]
 )
 
-# Alpaca's most-actives screener caps at 100 symbols per request.
+# Alpaca's most-actives screener caps at 100 symbols per request. This one
+# stays an environment setting: it defines the deployment's universe size,
+# not a strategy dial to retune live.
 WATCHLIST_SIZE = min(int(os.getenv("WATCHLIST_SIZE", "50")), 100)
-WATCHLIST_REFRESH_MINUTES = int(os.getenv("WATCHLIST_REFRESH_MINUTES", "15"))
-# Analyst watchlist overrides expire after this long, so a stale LLM
-# curation can never permanently replace fresh screener liquidity data.
-OVERRIDE_TTL_MINUTES = float(
-    os.getenv("WATCHLIST_OVERRIDE_TTL_MINUTES", str(WATCHLIST_REFRESH_MINUTES * 2))
-)
 
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
+
+
+def _refresh_minutes() -> float:
+    try:
+        from shared.database import get_db
+        return float(get_db().get_config().get("watchlist_refresh_minutes", 15.0))
+    except Exception:
+        return 15.0
+
+
+def _override_ttl_minutes() -> float:
+    try:
+        from shared.database import get_db
+        return float(
+            get_db().get_config().get("watchlist_override_ttl_minutes", 30.0)
+        )
+    except Exception:
+        return 30.0
 
 _lock = threading.Lock()
 _cached_symbols: List[str] = []
@@ -83,7 +102,7 @@ def _read_override() -> Optional[List[str]]:
         age = datetime.now(timezone.utc) - datetime.fromisoformat(str(written_at))
     except (ValueError, TypeError):
         return None
-    if age > timedelta(minutes=OVERRIDE_TTL_MINUTES):
+    if age > timedelta(minutes=_override_ttl_minutes()):
         return None
     return [str(s).upper() for s in symbols]
 
@@ -92,12 +111,13 @@ def get_watchlist(limit: Optional[int] = None) -> List[str]:
     """Return the current trading universe (thread-safe, cached).
 
     Static mode returns the configured list. Dynamic mode returns the
-    most active symbols, refreshed at most every WATCHLIST_REFRESH_MINUTES;
-    on screener failure the last good list is kept so the engine never
-    loses its universe mid-session.
+    most active symbols, refreshed at most every watchlist_refresh_minutes
+    (bot_config); on screener failure the last good list is kept so the
+    engine never loses its universe mid-session.
 
     A fresh analyst watchlist_override takes precedence, but it expires
-    after OVERRIDE_TTL_MINUTES and never displaces the screener cache.
+    after watchlist_override_ttl_minutes and never displaces the screener
+    cache.
     """
     if not DYNAMIC_MODE:
         return STATIC_SYMBOLS[:limit] if limit else list(STATIC_SYMBOLS)
@@ -112,14 +132,14 @@ def get_watchlist(limit: Optional[int] = None) -> List[str]:
 
 def get_screener_watchlist() -> List[str]:
     """Most-actives screener list, bypassing any analyst override
-    (thread-safe, cached for WATCHLIST_REFRESH_MINUTES)."""
+    (thread-safe, cached for watchlist_refresh_minutes)."""
     if not DYNAMIC_MODE:
         return list(STATIC_SYMBOLS)
 
     global _cached_symbols, _cached_at
     with _lock:
         age = time.monotonic() - _cached_at
-        if _cached_symbols and age < WATCHLIST_REFRESH_MINUTES * 60:
+        if _cached_symbols and age < _refresh_minutes() * 60:
             return list(_cached_symbols)
         try:
             symbols = _fetch_most_actives(WATCHLIST_SIZE)
@@ -143,6 +163,6 @@ def describe_mode() -> str:
     if DYNAMIC_MODE:
         return (
             f"whole-market (top {WATCHLIST_SIZE} most active by volume, "
-            f"refresh {WATCHLIST_REFRESH_MINUTES}m)"
+            f"refresh {_refresh_minutes():g}m)"
         )
     return f"static ({', '.join(STATIC_SYMBOLS)})"

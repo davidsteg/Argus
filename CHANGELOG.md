@@ -9,6 +9,22 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.6.1] - 2026-07-08
+
+### Changed
+- **Watchlist timing is now dashboard-editable, not environment-only**:
+  `watchlist_refresh_minutes` and `watchlist_override_ttl_minutes` moved
+  into the shared `bot_config` table (same mechanism as RSI/ATR strategy
+  parameters) with a new **📡 Watchlist** card in the Settings tab.
+  Changes take effect on the next screener check or override lookup — no
+  restart, no `.env` edit. `WATCHLIST_SIZE` and `TRADING_SYMBOLS` remain
+  environment variables since they define the deployment's universe
+  mode/size rather than a live-tunable dial.
+- Added **Watchlist Model** and **Risk Model** inputs to the Analyst tab's
+  Connection & Schedule card. The backend has supported per-agent model
+  overrides since v2.4.14/v2.5.0, but the dashboard never exposed input
+  fields for them — they were only reachable via a raw API call.
+
 ## [v2.6.0] - 2026-07-08
 
 ### Fixed
