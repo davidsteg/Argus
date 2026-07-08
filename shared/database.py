@@ -53,7 +53,7 @@ DEFAULT_CONFIG: Dict[str, float] = {
     "rsi_short_signal": 70.0,  # enter short when RSI rises above this level
     "rsi_short_exit": 30.0,    # cover short early when RSI drops below this
     "short_enabled": 0.0,      # 0 = off, 1 = on — short selling toggle
-    "news_cutoff": 0.55,       # minimum sentiment score required to trade
+    "news_cutoff": 0.45,       # minimum sentiment score required to trade (below 0.50 so no-news/neutral passes)
     "atr_stop_mult": 1.5,      # bracket stop-loss distance, ATR multiples
     "atr_target_mult": 2.5,    # bracket take-profit distance, ATR multiples
     "analyst_enabled": 0.0,    # 0 = off, 1 = on — LLM strategy analyst toggle
@@ -72,6 +72,10 @@ DEFAULT_CONFIG: Dict[str, float] = {
     "poll_interval_seconds": 60.0,
     "bar_lookback_minutes": 180.0,
     "watchlist_size": 50.0,
+    # Close everything this many minutes before the bell: the bracket legs
+    # are DAY orders that expire at the close, so an overnight hold would
+    # sit unprotected. 0 disables the flatten (allow overnight holds).
+    "eod_flatten_minutes": 10.0,
 }
 
 STATUS_RUNNING = "RUNNING"
@@ -200,6 +204,11 @@ class Database:
                     self._conn.execute(
                         f"ALTER TABLE {table} ADD COLUMN {column} {column_type}"
                     )
+        # Data fix: releases before v2.9.0 recorded long trades with side
+        # 'LONG'; since then the engine writes 'BUY'/'SELL'. Normalize so
+        # side-based analytics never split one direction across two labels.
+        # Idempotent and cheap on every init.
+        self._conn.execute("UPDATE trades SET side = 'BUY' WHERE side = 'LONG'")
 
     def _seed_defaults(self) -> None:
         now = _utcnow()

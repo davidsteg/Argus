@@ -52,17 +52,25 @@ DEFAULT_ANALYST_CONFIG: Dict[str, Any] = {
 
 RISK_AGENT_PROMPT = (
     "You are a risk management agent for an automated paper-trading bot "
-    "called Argus. The bot runs a long-only mean-reversion strategy on "
-    "US equities: it buys when RSI dips below a threshold, price is below "
-    "VWAP, and news sentiment is positive. Exits are ATR-scaled bracket "
-    "orders (stop-loss + take-profit).\n\n"
-    "Your job is to evaluate each BUY signal before it becomes a trade. "
-    "You can approve, reject, or flag for review. Consider:\n"
+    "called Argus. The bot runs a two-sided intraday mean-reversion "
+    "strategy on US equities:\n"
+    "- BUY (long): RSI oversold below a threshold, price BELOW VWAP (a "
+    "real dip), sentiment not bearish.\n"
+    "- SELL (short): RSI overbought above a threshold, price ABOVE VWAP "
+    "(a real overextension), sentiment not bullish.\n"
+    "Exits are ATR-scaled bracket orders (stop-loss + take-profit).\n\n"
+    "Your job is to evaluate each signal before it becomes a trade. The "
+    "signal's `side` field tells you its direction. IMPORTANT: judge the "
+    "signal against the entry rules FOR ITS OWN SIDE — an overbought RSI "
+    "above VWAP is the CORRECT setup for a SELL signal, not a rule "
+    "violation. Do not reject a SELL for being overbought or a BUY for "
+    "being oversold; that is what triggered it. You can approve, reject, "
+    "or flag for review. Consider:\n"
     "- Sector concentration: is this the 3rd tech ETF already held?\n"
     "- Correlation: does this move with existing positions?\n"
     "- Recent losses: has this symbol been stopped out recently?\n"
     "- Position sizing: does the risk amount make sense?\n"
-    "- Regime fit: is this symbol appropriate for current market conditions?\n\n"
+    "- Regime fit: is this side appropriate for current market conditions?\n\n"
     "Be conservative. It's better to skip a marginal trade than to add risk.\n\n"
     "You MUST respond with ONLY a valid JSON object. No markdown, no "
     "code fences, no preamble. Use this exact structure:\n"
@@ -74,8 +82,13 @@ RISK_AGENT_PROMPT = (
 
 PORTFOLIO_MANAGER_PROMPT = (
     "You are a portfolio manager for an automated paper-trading bot called "
-    "Argus. The bot runs a long-only mean-reversion strategy on US equities.\n\n"
-    "Your job is to review all pending BUY signals that passed the risk agent "
+    "Argus. The bot runs a two-sided intraday mean-reversion strategy on US "
+    "equities: BUY signals fade oversold dips (RSI low, price below VWAP), "
+    "SELL signals short overbought overextensions (RSI high, price above "
+    "VWAP). Each pending signal's `side` field tells you its direction — "
+    "both sides are valid strategy trades; judge each against its own "
+    "side's criteria.\n\n"
+    "Your job is to review all pending signals that passed the risk agent "
     "and decide which ones to execute and in what order. Consider:\n"
     "- Portfolio diversification: avoid over-concentration in one sector\n"
     "- Signal quality: prioritize higher-confidence signals\n"
@@ -107,10 +120,11 @@ DECISION_MEMORY_PROMPT = (
 
 TRADE_REVIEW_PROMPT = (
     "You are a quantitative performance reviewer for an automated "
-    "paper-trading bot called Argus. The bot runs a long-only "
-    "mean-reversion strategy on US equities: it buys when RSI dips below "
-    "a threshold, price is below VWAP, and news sentiment is positive. "
-    "Exits are ATR-scaled bracket orders (stop-loss + take-profit).\n\n"
+    "paper-trading bot called Argus. The bot runs a two-sided intraday "
+    "mean-reversion strategy on US equities: it buys RSI-oversold dips "
+    "below VWAP and (when shorting is enabled) sells RSI-overbought "
+    "overextensions above VWAP. Exits are ATR-scaled bracket orders "
+    "(stop-loss + take-profit) plus an RSI-recovery early exit.\n\n"
     "Your job is to review recent closed trades and the aggregate stats "
     "for failure patterns. Consider:\n"
     "- Are losses concentrated in certain symbols, times of day, or "
@@ -148,13 +162,16 @@ OPTIMIZATION_REVIEW_PROMPT = (
 
 WATCHLIST_REVIEW_PROMPT = (
     "You are a watchlist curator for an automated paper-trading bot "
-    "called Argus. The bot runs a long-only mean-reversion strategy: "
-    "RSI dip below threshold, price below VWAP, positive news sentiment.\n\n"
+    "called Argus. The bot runs a two-sided intraday mean-reversion "
+    "strategy: it buys RSI-oversold dips below VWAP and shorts "
+    "RSI-overbought overextensions above VWAP.\n\n"
     "Your job is to select symbols for the trading watchlist. You MUST "
     "select ONLY from the provided candidate_pool (the live most-actives "
     "screener) — symbols outside that pool will be discarded. Consider "
     "sector diversification, current market regime, and whether a symbol "
-    "is a good fit for a mean-reversion dip-buying strategy.\n\n"
+    "is a good fit for intraday mean reversion in either direction. "
+    "Avoid leveraged or inverse ETPs — their built-in decay and reset "
+    "mechanics fight mean reversion.\n\n"
     "You MUST respond with ONLY a valid JSON object. No markdown, no "
     "code fences, no preamble. Use this exact structure:\n"
     '{"watchlist": ["SYMBOL1", "SYMBOL2"], '
@@ -229,7 +246,7 @@ class StrategyAnalyst:
         regime: Dict[str, Any],
         db,
     ) -> Dict[str, Any]:
-        """Evaluate a single BUY signal before it becomes a trade.
+        """Evaluate a single BUY or SELL signal before it becomes a trade.
 
         Returns {"approved": bool, "reason": str, "risk_score": float,
                  "warnings": list}
@@ -247,6 +264,7 @@ class StrategyAnalyst:
         prompt_data = {
             "signal": {
                 "symbol": signal.get("symbol"),
+                "side": signal.get("side", "BUY"),
                 "price": signal.get("price"),
                 "rsi": signal.get("rsi"),
                 "vwap": signal.get("vwap"),
@@ -322,6 +340,7 @@ class StrategyAnalyst:
             "pending_signals": [
                 {
                     "symbol": s.get("symbol"),
+                    "side": s.get("side", "BUY"),
                     "price": s.get("price"),
                     "rsi": s.get("rsi"),
                     "sentiment": s.get("sentiment"),
@@ -652,7 +671,7 @@ class StrategyAnalyst:
             candidate_pool = list(current_symbols)
 
         prompt_data = {
-            "context": "Watchlist curation for a long-only mean-reversion bot.",
+            "context": "Watchlist curation for a two-sided intraday mean-reversion bot.",
             "regime": {
                 "regime": regime.get("regime", "UNKNOWN"),
                 "symbol": regime.get("symbol", "SPY"),
@@ -665,7 +684,7 @@ class StrategyAnalyst:
                 "min_price": 5.0,
                 "max_symbols": len(current_symbols),
                 "rule": "select symbols ONLY from candidate_pool — anything else is discarded",
-                "strategy": "long-only mean-reversion, RSI dip below threshold, price below VWAP, positive sentiment",
+                "strategy": "two-sided intraday mean-reversion: long RSI dips below VWAP, short RSI overextensions above VWAP; avoid leveraged/inverse ETPs",
             },
         }
 

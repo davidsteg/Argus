@@ -39,8 +39,9 @@ active US equities, refreshed every 15 minutes):
 
 1. **Regime gate** — SPY trend + realized volatility (`regime.py`).
    When the index trades below its short-term EMA *and* volatility is
-   stressed (`RISK_OFF`), no new positions are opened: in a broad
-   sell-off every dip is a knife.
+   stressed (`TREND_DOWN`), no new longs are opened — in a broad
+   sell-off every dip is a knife (shorts remain allowed). In `CAUTION`
+   (trend down *or* vol elevated) the position cap is halved.
 2. **RSI trigger** — Wilder RSI on 1-minute bars drops below the buy
    level (nightly-optimized).
 3. **Loser cooldown** — a symbol that just stopped out is benched for 30
@@ -67,6 +68,14 @@ active US equities, refreshed every 15 minutes):
 - Dashboard **EMERGENCY HARD STOP** talks directly to Alpaca,
   independent of the engine.
 - Bracket orders mean every position always has a stop and a target.
+- **End-of-day flatten** — bracket legs are DAY orders that expire at the
+  bell, so everything is closed `eod_flatten_minutes` (default 10) before
+  the close; no position is ever held overnight without a stop.
+- **Too-quiet gate** — symbols whose ATR-scaled stop would collapse onto
+  the percentage floor are skipped: a stop inside bar noise is a coin
+  flip that loses the spread.
+- **Universe hygiene** — leveraged/inverse ETPs are filtered out of the
+  dynamic watchlist; their decay fights mean reversion.
 
 ### Nightly self-optimization (out-of-sample validated)
 
@@ -147,9 +156,12 @@ the backend API.
 
 Operational environment (`position_size_usd`, `risk_per_trade_usd`,
 `max_positions`, `daily_stop_loss`, `min_price_usd`, `cooldown_minutes`,
-`poll_interval_seconds`, `bar_lookback_minutes`, `watchlist_size`) is now
-tunable from the dashboard's **Settings → Operational Environment** card —
-no longer env vars. Changes take effect on the next engine cycle.
+`poll_interval_seconds`, `bar_lookback_minutes`, `watchlist_size`,
+`eod_flatten_minutes`) is now tunable from the dashboard's
+**Settings → Operational Environment** card — no longer env vars.
+Changes take effect on the next engine cycle. Backtest friction is tunable
+via `OPTIMIZER_COST_PCT` (round-trip, default 0.10) and
+`OPTIMIZER_STOP_SLIP_PCT` (stop slippage, default 0.05).
 
 Strategy parameters (`rsi_period`, `rsi_buy_signal`, `rsi_exit_signal`,
 `atr_stop_mult`, `atr_target_mult`, `news_cutoff`) live in the shared

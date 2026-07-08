@@ -9,6 +9,50 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.12.0] - 2026-07-08
+
+### Fixed
+- **Short-side contract repaired** — the risk agent, portfolio manager,
+  watchlist curator and sentiment LLM prompts still described a *long-only*
+  strategy after v2.9.0 enabled shorts, so every valid SELL signal was
+  rejected as "overbought, contradicting mean-reversion entry criteria"
+  (~80 rejections on 2026-07-08 alone). All prompts now describe the
+  two-sided strategy, and the risk agent / portfolio manager receive each
+  signal's `side`.
+- **Symmetric short sentiment gate** — shorts now require sentiment below
+  `1 − news_cutoff` (the mirror of the long gate) instead of below
+  `news_cutoff`; a no-news 0.5 score no longer makes shorting effectively
+  impossible.
+- **Short exit reconciliation** — the trade recorder matched the first
+  closed SELL order as the exit fill; for a short position that is its own
+  entry order, so every covered short would have recorded ~zero PnL. Covers
+  now match the opposite side (BUY) of the entry.
+- Legacy trade records with side `LONG` are normalized to `BUY` at DB init.
+
+### Added
+- **Too-quiet gate** — signals whose stop would be set by the 0.35 %
+  percentage floor rather than ATR are skipped (engine and backtest via the
+  shared `indicators.stop_is_floored`). Floor-tight brackets inside ordinary
+  bar noise produced most of the 2026-07-08 losses.
+- **Leveraged/inverse ETP filter** — 2x/3x, bull/bear, Direxion and
+  ProShares Ultra/Short products are excluded from the dynamic watchlist and
+  the screener pool by asset name (cached bulk metadata, fail-open).
+- **Backtest trading costs** — the optimizer now charges 0.10 % round-trip
+  per trade plus 0.05 % adverse slippage on stop fills
+  (`OPTIMIZER_COST_PCT` / `OPTIMIZER_STOP_SLIP_PCT` env overrides), so
+  spread-bleeding parameter sets stop winning the grid search.
+- **End-of-day flatten** — all positions are closed `eod_flatten_minutes`
+  (default 10, editable in Settings → Operational Environment) before the
+  close. Bracket legs are DAY orders that expire at the bell; an overnight
+  hold sat completely unprotected.
+
+### Changed
+- **CAUTION regime halves the position cap** — previously CAUTION (trend
+  down *or* elevated vol) changed nothing and the bot bought dips at full
+  throttle into a falling tape all day.
+- Stale docs corrected: optimizer grid comment (576 → 5184 combinations),
+  sentiment docstring's retired "never trades on silence" claim.
+
 ## [v2.11.0] - 2026-07-08
 
 ### Changed

@@ -10,8 +10,11 @@ News API and scores them in [0, 1] (0 = very bearish, 1 = very bullish):
                     output. Falls back to the analyst's LLM config.
 2. Keyword scorer — no LLM endpoint: a transparent bull/bear keyword heuristic
                     over the same headlines. Free and deterministic.
-3. Neutral floor  — no news for the symbol: 0.5 (never trades on silence
-                    with the default news_cutoff of 0.55).
+3. Neutral floor  — no news for the symbol: 0.5. With the default
+                    news_cutoff of 0.45 a no-news symbol may still trade
+                    (long gate: score > news_cutoff; short gate:
+                    score < 1 - news_cutoff) — only actively contrary
+                    headlines block a trade.
 
 Efficiency: scores are cached per symbol for SENTIMENT_CACHE_MINUTES
 (default 15), and the engine only requests a score after the technical
@@ -57,11 +60,13 @@ BEARISH_WORDS = frozenset(
 )
 
 LLM_SYSTEM_PROMPT = (
-    "You are a financial news analyst for an intraday long-only trading "
-    "bot. Score the aggregate sentiment of the provided headlines for the "
-    "given stock on a scale from 0.0 (very bearish) to 1.0 (very bullish), "
-    "where 0.5 is neutral. Weigh concrete, market-moving facts (earnings, "
-    "guidance, regulatory actions, analyst moves) over vague commentary."
+    "You are a financial news analyst for an intraday trading bot that "
+    "trades mean reversion both long and short — bullish scores gate long "
+    "entries, bearish scores gate short entries. Score the aggregate "
+    "sentiment of the provided headlines for the given stock on a scale "
+    "from 0.0 (very bearish) to 1.0 (very bullish), where 0.5 is neutral. "
+    "Weigh concrete, market-moving facts (earnings, guidance, regulatory "
+    "actions, analyst moves) over vague commentary."
 )
 
 class SentimentProvider:

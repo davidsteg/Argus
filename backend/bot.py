@@ -19,6 +19,9 @@ Safety:
   credentials come exclusively from the environment.
 * A hard daily loss limit triggers the emergency kill-sequence: cancel all
   open orders, liquidate all positions, persist KILLED, shut down.
+* End-of-day flatten: bracket legs are DAY orders that die at the bell, so
+  everything is closed eod_flatten_minutes before the close — no position
+  is ever held overnight without a stop.
 * Every Alpaca API request is wrapped in try/except; a single API hiccup
   never crashes the engine.
 """
@@ -52,7 +55,13 @@ from dotenv import load_dotenv
 import regime
 import universe
 from analyst import get_analyst
-from indicators import bracket_distances, compute_atr, compute_rsi, compute_vwap
+from indicators import (
+    bracket_distances,
+    compute_atr,
+    compute_rsi,
+    compute_vwap,
+    stop_is_floored,
+)
 from sentiment import get_sentiment_provider
 from shared.database import STATUS_KILLED, STATUS_RUNNING, get_db
 from shared.version import __version__
@@ -204,6 +213,13 @@ class ArgusBot:
         if np.isnan(atr) or atr <= 0:
             return None
 
+        # Too-quiet gate: when the percentage floor, not ATR, would set the
+        # stop distance, the bracket is inside ordinary bar noise and the
+        # trade is a coin flip that loses the spread (this pattern produced
+        # most of the 2026-07-08 losers). Skip before any LLM cost is spent.
+        if stop_is_floored(latest_close, atr, self.config["atr_stop_mult"]):
+            return None
+
         cooldown_left = self.in_cooldown(symbol)
         if cooldown_left is not None:
             self.db.add_log(
@@ -258,13 +274,19 @@ class ArgusBot:
                 return None
 
             sentiment, source = await self.process_news_sentiment(symbol)
-            # Shorts need bearish sentiment: score below the cutoff
-            if sentiment >= self.config["news_cutoff"]:
+            # Shorts use the mirror of the long gate: longs need
+            # sentiment > news_cutoff, shorts need sentiment below
+            # 1 - news_cutoff. Both cutoffs sit the same distance from
+            # neutral, so a no-news 0.5 passes both sides — only actively
+            # bullish headlines block a short, exactly as only actively
+            # bearish headlines block a long.
+            short_cutoff = 1.0 - self.config["news_cutoff"]
+            if sentiment >= short_cutoff:
                 self.db.add_log(
                     "INFO",
                     f"{symbol}: RSI {latest_rsi:.1f} triggered SELL but sentiment "
-                    f"{sentiment:.2f} ({source}) >= cutoff "
-                    f"{self.config['news_cutoff']:.2f} — not bearish enough, skipped",
+                    f"{sentiment:.2f} ({source}) >= short cutoff "
+                    f"{short_cutoff:.2f} — too bullish to short, skipped",
                 )
                 return None
 
@@ -634,6 +656,11 @@ class ArgusBot:
 
     async def reconcile_closed_trade(self, symbol: str, entry: Dict[str, Any]) -> None:
         """A tracked position vanished — find its exit fill and log the trade."""
+        side = entry.get("side", "BUY")
+        # The exit order's side is the opposite of the entry: a long exits
+        # with a SELL, a short covers with a BUY. Matching on SELL for a
+        # short would find the short's own entry order and record ~zero PnL.
+        exit_side = OrderSide.BUY if side == "SELL" else OrderSide.SELL
         exit_price: Optional[float] = None
         try:
             closed_orders = await asyncio.to_thread(
@@ -643,7 +670,7 @@ class ArgusBot:
                 ),
             )
             for order in closed_orders:
-                if order.side == OrderSide.SELL and order.filled_avg_price:
+                if order.side == exit_side and order.filled_avg_price:
                     exit_price = float(order.filled_avg_price)
                     break
         except Exception as exc:
@@ -652,7 +679,6 @@ class ArgusBot:
 
         qty = float(entry["qty"])
         entry_price = float(entry["entry_price"])
-        side = entry.get("side", "BUY")
         if side == "SELL":
             realized = None if exit_price is None else (entry_price - exit_price) * qty
         else:
@@ -711,6 +737,24 @@ class ArgusBot:
             )
             return False
         return True
+
+    async def flatten_all(self, reason: str) -> None:
+        """Close every open position and cancel all resting orders.
+
+        Used ahead of the close, where the DAY bracket legs would expire
+        and leave positions unprotected overnight. Unlike kill_sequence
+        this is routine housekeeping: the bot stays RUNNING and the fills
+        are reconciled into trade records by the next cycle's
+        sync_portfolio — the same single trade-recording path as any exit.
+        """
+        self.db.add_log("TRADE", f"EOD FLATTEN — closing all positions ({reason})")
+        try:
+            await asyncio.to_thread(
+                self.trading.close_all_positions, cancel_orders=True
+            )
+        except Exception as exc:
+            logger.error("EOD flatten failed: %s", exc)
+            self.db.add_log("ERROR", f"EOD flatten failed: {exc}")
 
     async def kill_sequence(self, reason: str) -> None:
         """Emergency shutdown: flatten everything, persist KILLED, stop."""
@@ -890,6 +934,22 @@ class ArgusBot:
             cycle["next_open"] = str(clock.next_open)
             return
 
+        # End-of-day flatten: the bracket legs are DAY orders and expire at
+        # the close, which would leave any surviving position naked
+        # overnight — an intraday dip strategy must not become an
+        # unprotected overnight holder. Flatten with a margin before the
+        # bell; no new entries are evaluated inside the window.
+        flatten_minutes = self.config.get("eod_flatten_minutes", 10.0)
+        if flatten_minutes > 0 and clock.next_close is not None:
+            until_close = clock.next_close - datetime.now(timezone.utc)
+            if until_close <= timedelta(minutes=flatten_minutes):
+                if portfolio["positions"]:
+                    await self.flatten_all(
+                        f"{until_close.total_seconds() / 60:.0f}m to the close"
+                    )
+                cycle["stage"] = "eod-flatten"
+                return
+
         held_symbols = {p["symbol"] for p in portfolio["positions"]}
         cycle["held_symbols"] = sorted(held_symbols)
 
@@ -903,22 +963,30 @@ class ArgusBot:
             if signal_exits:
                 cycle["signal_exits"] = signal_exits
 
+        # Market regime shapes how much book we run this cycle: TREND_DOWN
+        # (index falling on stressed vol) blocks new longs outright — every
+        # dip is a knife — while shorts stay allowed since a falling market
+        # favours them. CAUTION (trend down OR vol elevated, like the losing
+        # 2026-07-08 session) halves the position cap instead of trading at
+        # full throttle. Existing positions keep their brackets; the daily
+        # stop still guards them.
+        regime_info = await asyncio.to_thread(regime.get_regime)
+        cycle["regime"] = regime_info
+        regime_blocks = regime.blocks_new_entries(regime_info)
+
+        max_positions = int(self.config.get("max_positions", 5))
+        if regime_info.get("regime") == regime.CAUTION:
+            max_positions = max(1, max_positions // 2)
+            cycle["caution_position_cap"] = max_positions
+
         # Open slots count still-held positions: a close submitted this cycle
         # only frees its slot once the sell fills (reconciled next cycle), so
         # we never over-allocate into a slot that is only theoretically free.
-        open_slots = int(self.config.get("max_positions", 5)) - len(held_symbols)
+        open_slots = max_positions - len(held_symbols)
         cycle["open_slots"] = open_slots
         if open_slots <= 0:
             cycle["stage"] = "max-positions"
             return
-
-        # Market regime gate: in TREND_DOWN (index falling on stressed vol)
-        # every dip is a knife — stop opening new long positions. Shorts are
-        # still allowed in TREND_DOWN since a falling market favours them.
-        # Existing positions keep their brackets; the daily stop still guards them.
-        regime_info = await asyncio.to_thread(regime.get_regime)
-        cycle["regime"] = regime_info
-        regime_blocks = regime.blocks_new_entries(regime_info)
         short_enabled = bool(self.config.get("short_enabled", 0.0))
         if regime_blocks:
             if not short_enabled:

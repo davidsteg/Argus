@@ -85,6 +85,18 @@ def compute_vwap(bars: pd.DataFrame) -> pd.Series:
     return vwap.fillna(typical)
 
 
+def stop_is_floored(price: float, atr: float, stop_mult: float) -> bool:
+    """True when the percentage floor, not ATR, would set the stop distance.
+
+    A symbol whose ATR-scaled stop falls below MIN_STOP_PCT is too quiet
+    for a volatility-scaled bracket to mean anything: the floor stop sits
+    inside ordinary bar-to-bar noise and the trade is a coin flip that
+    loses the spread. Both the live engine and the backtest skip these
+    entries so the optimizer cannot tune parameters on them.
+    """
+    return atr * stop_mult < price * MIN_STOP_PCT
+
+
 def bracket_distances(
     price: float, atr: float, stop_mult: float, target_mult: float
 ) -> tuple:

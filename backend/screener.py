@@ -29,6 +29,7 @@ from alpaca.data.timeframe import TimeFrame
 from indicators import compute_atr, compute_rsi, compute_vwap
 from sentiment import get_sentiment_provider
 from shared.database import get_db
+from universe import filter_untradable
 
 logger = logging.getLogger("argus.screener")
 
@@ -45,10 +46,11 @@ _HARD_SCREENER_CAP = 100
 
 
 def _fetch_pool(alpaca_key: str, alpaca_secret: str, top: int) -> List[str]:
-    """Fetch the top-N most active symbols as the screening pool."""
+    """Fetch the top-N most active symbols as the screening pool,
+    with the same leveraged/inverse-ETP filter as the trading universe."""
     client = ScreenerClient(alpaca_key, alpaca_secret)
     response = client.get_most_actives(MostActivesRequest(by="volume", top=min(top, _HARD_SCREENER_CAP)))
-    return [item.symbol.upper() for item in response.most_actives]
+    return filter_untradable([item.symbol.upper() for item in response.most_actives])
 
 
 def _fetch_bars(

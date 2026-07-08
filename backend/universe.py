@@ -22,10 +22,11 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from alpaca.data.historical.screener import ScreenerClient
 from alpaca.data.requests import MostActivesRequest
@@ -81,11 +82,93 @@ _lock = threading.Lock()
 _cached_symbols: List[str] = []
 _cached_at: float = 0.0
 
+# ---------------------------------------------------------------------- #
+# leveraged/inverse ETP filter
+# ---------------------------------------------------------------------- #
+# The most-actives-by-volume screener is dominated by geared ETPs (SOXS,
+# SQQQ, TSLL, single-stock 2x funds, …). Their daily reset and volatility
+# decay make an RSI "dip" a leveraged bet against the prevailing trend —
+# structurally the worst instruments for a mean-reversion strategy — so
+# they are excluded from the dynamic universe by asset name.
+_LEVERAGED_NAME_RE = re.compile(
+    r"(\b\d(?:\.\d)?x\b"                # "2X", "3X", "1.5X" leverage factors
+    r"|\binverse\b|\bleveraged\b"
+    r"|\bbull\b|\bbear\b"               # Direxion-style bull/bear pairs
+    r"|\bdirexion\b"                    # every Direxion Daily fund is geared
+    r"|proshares\s+(?:ultra|short)"     # ProShares Ultra*/Short* families
+    r")",
+    re.IGNORECASE,
+)
+
+_ASSET_CACHE_SECONDS = 24 * 3600.0
+_asset_names: Dict[str, str] = {}
+_asset_names_at: float = 0.0
+
+
+def _get_asset_names() -> Dict[str, str]:
+    """symbol → asset name for all active US equities, cached for a day.
+
+    One bulk request instead of per-symbol lookups; on failure the stale
+    cache (or an empty map) is returned and the filter degrades to a
+    no-op — the universe must never vanish because a metadata call failed.
+    """
+    global _asset_names, _asset_names_at
+    if _asset_names and time.monotonic() - _asset_names_at < _ASSET_CACHE_SECONDS:
+        return _asset_names
+    try:
+        from alpaca.trading.client import TradingClient
+        from alpaca.trading.enums import AssetClass, AssetStatus
+        from alpaca.trading.requests import GetAssetsRequest
+
+        client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
+        assets = client.get_all_assets(
+            GetAssetsRequest(
+                status=AssetStatus.ACTIVE, asset_class=AssetClass.US_EQUITY
+            )
+        )
+        _asset_names = {a.symbol.upper(): (a.name or "") for a in assets}
+        _asset_names_at = time.monotonic()
+        logger.info("Asset metadata refreshed: %d names", len(_asset_names))
+    except Exception as exc:
+        logger.error(
+            "Asset metadata fetch failed — leveraged-ETP filter degraded: %s",
+            exc,
+        )
+    return _asset_names
+
+
+def filter_untradable(symbols: List[str]) -> List[str]:
+    """Drop leveraged/inverse ETPs from a symbol list by asset name.
+
+    Symbols without metadata are kept (fail open) — a filter outage must
+    not empty the watchlist.
+    """
+    names = _get_asset_names()
+    if not names:
+        return list(symbols)
+    kept: List[str] = []
+    dropped: List[str] = []
+    for symbol in symbols:
+        name = names.get(symbol)
+        if name and _LEVERAGED_NAME_RE.search(name):
+            dropped.append(symbol)
+        else:
+            kept.append(symbol)
+    if dropped:
+        logger.info(
+            "Universe filter dropped %d leveraged/inverse ETPs: %s",
+            len(dropped),
+            ", ".join(dropped[:15]),
+        )
+    return kept
+
 
 def _fetch_most_actives(top: int) -> List[str]:
     client = ScreenerClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
     response = client.get_most_actives(MostActivesRequest(by="volume", top=top))
-    return [item.symbol.upper() for item in response.most_actives]
+    return filter_untradable(
+        [item.symbol.upper() for item in response.most_actives]
+    )
 
 
 def _read_override() -> Optional[List[str]]:

@@ -1,9 +1,8 @@
 """
 Argus — market regime filter.
 
-A long-only 1-minute mean-reversion strategy has one systematic blind
-spot: it buys dips, and during a broad market sell-off *everything* is a
-dip. This module classifies the market's current regime from SPY minute
+A dip-buying 1-minute mean-reversion strategy has one systematic blind
+spot: during a broad market sell-off *everything* is a dip. This module classifies the market's current regime from SPY minute
 bars so the engine can stop opening new positions while the tape is
 falling apart, instead of catching knives all the way down.
 
@@ -15,10 +14,15 @@ Classification (deliberately simple and explainable, no ML):
            a threshold. Elevated vol means moves are violent, spreads are
            wide and stops get run.
 
-    TREND_UP   trend up, volatility normal      → trade normally
-    CAUTION    trend down OR volatility elevated → trade normally (logged)
+    TREND_UP   trend up, volatility normal       → trade normally
+    CAUTION    trend down OR volatility elevated → position cap halved
     TREND_DOWN trend down AND volatility elevated → no new BUY entries
+                                                    (shorts still allowed)
     UNKNOWN    SPY data unavailable              → fail-open, trade normally
+
+The consequences are enforced by the engine (bot.py): CAUTION halves
+max_positions so a down-trending tape is traded at half throttle instead
+of full speed, and TREND_DOWN blocks longs outright.
 
 The regime never forces an exit — brackets and the daily kill-switch own
 that. It only gates new entries. Results are cached for a few minutes so

@@ -37,7 +37,13 @@ from alpaca.data.timeframe import TimeFrame
 from dotenv import load_dotenv
 
 import universe
-from indicators import bracket_distances, compute_atr, compute_rsi, compute_vwap
+from indicators import (
+    bracket_distances,
+    compute_atr,
+    compute_rsi,
+    compute_vwap,
+    stop_is_floored,
+)
 from shared.database import get_db
 
 load_dotenv()
@@ -64,9 +70,19 @@ TRAIN_FRACTION = float(os.getenv("OPTIMIZER_TRAIN_FRACTION", "0.75"))
 # Post-loss re-entry bench, mirrored from the live engine (1 bar ≈ 1 min).
 # Read from bot_config at runtime so it's tunable from the dashboard.
 
-# Grid searched nightly. Kept deliberately compact: 4*4*3*4*3 = 576
-# combinations replayed over train+validation finish in a couple of
-# minutes of CPU inside the container. Bracket distances are ATR multiples
+# Trading friction applied to every simulated trade. Without it the
+# optimizer reliably promotes floor-tight brackets that backtest
+# beautifully and bleed the spread live (see 2026-07-08: +103% "train
+# return" selecting parameters that lost money the same afternoon).
+# COST is a round-trip fraction of notional (half-spread in and out);
+# stops additionally slip against the trade because they trigger market
+# orders.
+COST_PER_TRADE_PCT = float(os.getenv("OPTIMIZER_COST_PCT", "0.10")) / 100.0
+STOP_SLIPPAGE_PCT = float(os.getenv("OPTIMIZER_STOP_SLIP_PCT", "0.05")) / 100.0
+
+# Grid searched nightly. Kept deliberately compact: 4*4*3*4*3*3*3 = 5184
+# combinations replayed over train+validation finish in a few minutes of
+# CPU inside the container. Bracket distances are ATR multiples
 # (see indicators.bracket_distances), so the same parameters adapt to each
 # symbol's own volatility.
 PARAMETER_GRID: Dict[str, List[float]] = {
@@ -148,6 +164,12 @@ def backtest(
     early exit is evaluated at the bar close (RSI >= rsi_exit_signal),
     mirroring the live engine, which only reads RSI on the completed bar.
 
+    Friction: every trade pays COST_PER_TRADE_PCT of notional round-trip,
+    and stop fills slip a further STOP_SLIPPAGE_PCT against the trade —
+    stops trigger market orders and never fill at the exact stop price.
+    Entries whose stop would be set by the percentage floor rather than
+    ATR are skipped, matching the live engine's stop_is_floored gate.
+
     Returns (total_return, max_drawdown, n_trades), both as fractions.
     """
     equity = 1.0
@@ -167,23 +189,23 @@ def backtest(
             exit_price: Optional[float] = None
             if position_side == "BUY":
                 if lows[i] <= stop_price:
-                    exit_price = stop_price
+                    exit_price = stop_price * (1.0 - STOP_SLIPPAGE_PCT)
                 elif highs[i] >= target_price:
                     exit_price = target_price
                 elif not np.isnan(rsi[i]) and rsi[i] >= rsi_exit_signal:
                     exit_price = closes[i]
             else:
                 if highs[i] >= stop_price:
-                    exit_price = stop_price
+                    exit_price = stop_price * (1.0 + STOP_SLIPPAGE_PCT)
                 elif lows[i] <= target_price:
                     exit_price = target_price
                 elif not np.isnan(rsi[i]) and rsi[i] <= rsi_short_exit:
                     exit_price = closes[i]
             if exit_price is not None:
                 if position_side == "BUY":
-                    equity *= exit_price / entry_price
+                    equity *= (exit_price / entry_price) * (1.0 - COST_PER_TRADE_PCT)
                 else:
-                    equity *= entry_price / exit_price
+                    equity *= (entry_price / exit_price) * (1.0 - COST_PER_TRADE_PCT)
                 in_position = False
                 n_trades += 1
                 peak = max(peak, equity)
@@ -196,6 +218,11 @@ def backtest(
         if np.isnan(rsi[i]) or np.isnan(rsi[i - 1]) or np.isnan(atr[i]):
             continue
         if i <= cooldown_until:
+            continue
+
+        # Too-quiet gate: skip symbols where the percentage floor, not
+        # ATR, would set the stop — mirrors the live engine.
+        if stop_is_floored(closes[i], atr[i], atr_stop_mult):
             continue
 
         # LONG entry: RSI crosses below buy_signal, price below VWAP
@@ -230,9 +257,9 @@ def backtest(
     # is reflected in the score.
     if in_position:
         if position_side == "BUY":
-            equity *= closes[-1] / entry_price
+            equity *= (closes[-1] / entry_price) * (1.0 - COST_PER_TRADE_PCT)
         else:
-            equity *= entry_price / closes[-1]
+            equity *= (entry_price / closes[-1]) * (1.0 - COST_PER_TRADE_PCT)
         n_trades += 1
         peak = max(peak, equity)
         max_drawdown = max(max_drawdown, (peak - equity) / peak)

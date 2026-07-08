@@ -278,6 +278,11 @@ OPERATIONAL_PARAM_META: Dict[str, Dict[str, Any]] = {
         "hint": "top N most-active symbols (whole-market mode, max 100)",
         "min": 5.0, "max": 100.0, "step": 5.0, "int": True,
     },
+    "eod_flatten_minutes": {
+        "label": "EOD Flatten (min)",
+        "hint": "close all positions this many minutes before the bell (0 = allow unprotected overnight holds)",
+        "min": 0.0, "max": 60.0, "step": 1.0, "int": True,
+    },
 }
 
 EQUITY_RANGES: Dict[str, Optional[timedelta]] = {

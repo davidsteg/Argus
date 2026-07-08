@@ -10,9 +10,48 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.11.0"
+__version__ = "2.12.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.12.0",
+        "date": "2026-07-08",
+        "title": "Post-mortem hardening: shorts unblocked, realistic backtests, no more noise trades",
+        "notes": [
+            "Short-side contract repaired: the risk agent, portfolio manager, "
+            "watchlist curator and sentiment prompts still described a long-only "
+            "strategy, so every valid SELL signal was rejected as 'overbought, "
+            "contradicting mean-reversion'. All prompts now describe the "
+            "two-sided strategy and receive the signal's side.",
+            "Symmetric short sentiment gate: shorts now need sentiment below "
+            "1 − news_cutoff (mirror of the long gate) instead of below "
+            "news_cutoff — a no-news 0.5 no longer makes shorting impossible.",
+            "Too-quiet gate: signals whose stop would be set by the 0.35% "
+            "percentage floor rather than ATR are skipped in the engine and the "
+            "backtest — floor-tight brackets inside bar noise produced most of "
+            "the 2026-07-08 losers.",
+            "Leveraged/inverse ETPs (2x/3x, bull/bear, Direxion, ProShares "
+            "Ultra/Short, …) are filtered out of the dynamic watchlist and the "
+            "screener pool by asset name — buying an RSI 'dip' in a geared "
+            "inverse fund is a leveraged bet against the trend.",
+            "Optimizer backtest now pays trading costs: 0.10% round-trip per "
+            "trade plus 0.05% adverse slippage on stop fills (OPTIMIZER_COST_PCT "
+            "/ OPTIMIZER_STOP_SLIP_PCT). Fantasy '+103% train return' parameter "
+            "sets no longer win the grid search.",
+            "CAUTION regime now halves the position cap instead of trading at "
+            "full throttle — a down-trending tape is traded at half book.",
+            "End-of-day flatten: all positions are closed eod_flatten_minutes "
+            "(default 10, Settings → Operational Environment) before the bell. "
+            "Bracket legs are DAY orders that expire at the close, so an "
+            "overnight hold sat completely unprotected.",
+            "Short exit reconciliation fixed: the trade recorder matched the "
+            "first closed SELL order as the exit fill, which for a short is "
+            "its own entry — covers now match the opposite side (BUY) so "
+            "short PnL is recorded correctly.",
+            "Legacy trade records with side 'LONG' are normalized to 'BUY' so "
+            "side-based analytics see one label per direction.",
+        ],
+    },
     {
         "version": "2.11.0",
         "date": "2026-07-08",
