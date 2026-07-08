@@ -356,14 +356,12 @@ class StrategyAnalyst:
         text = msg.content
         finish = choice.finish_reason
 
-        if text is None:
-            details = f"finish_reason={finish}"
-            if hasattr(msg, "refusal") and msg.refusal:
-                details += f" refusal={msg.refusal}"
-            raise RuntimeError(
-                f"LLM returned empty content ({details})"
-            )
-        if not text.strip():
+        # DeepSeek models on ollama.com put output in the non-standard
+        # "reasoning" field instead of "content". Fall back to it.
+        if not text:
+            text = getattr(msg, "reasoning", None) or ""
+
+        if not text:
             details = f"finish_reason={finish}"
             if hasattr(msg, "refusal") and msg.refusal:
                 details += f" refusal={msg.refusal}"

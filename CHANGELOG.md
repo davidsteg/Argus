@@ -9,6 +9,13 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.4.10] - 2026-07-08
+
+### Fixed
+- Ollama Cloud DeepSeek models put output in the non-standard `reasoning`
+  field instead of `content`. Fall back to `reasoning` when `content` is
+  empty — this was causing the "LLM returned blank content" error
+
 ## [v2.4.9] - 2026-07-08
 
 ### Fixed

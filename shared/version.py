@@ -10,9 +10,19 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.4.9"
+__version__ = "2.4.10"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.4.10",
+        "date": "2026-07-08",
+        "title": "Fix empty LLM response — DeepSeek uses reasoning field",
+        "notes": [
+            "Ollama Cloud DeepSeek models put output in the non-standard "
+            "\"reasoning\" field instead of \"content\". Fall back to "
+            "reasoning when content is empty.",
+        ],
+    },
     {
         "version": "2.4.9",
         "date": "2026-07-08",
