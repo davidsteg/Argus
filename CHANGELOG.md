@@ -9,6 +9,22 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.6.2] - 2026-07-08
+
+### Fixed
+- **Trade History grid never rendered**: `ui.aggrid(..., theme="balham-dark")`
+  crashed the grid's Vue `mounted()` hook — the bundled NiceGUI version's
+  aggrid wrapper only maps `quartz`/`balham`/`material`/`alpine` to a
+  theme object; looking up `"balham-dark"` returned `undefined`, and
+  calling `.withPart(...)` on it threw a `TypeError` before
+  `AgGrid.createGrid()` ever ran. Dark styling is already applied
+  automatically via a `MutationObserver` on the page's dark-mode class,
+  so the `-dark` suffix was both invalid and unnecessary. The stats
+  tiles (which read `trade_stats` independently) showed correct closed-
+  trade counts the whole time, masking that the grid itself was silently
+  dead — no rows, no column headers, no empty-state fallback text.
+  Changed to `theme="balham"`.
+
 ## [v2.6.1] - 2026-07-08
 
 ### Changed

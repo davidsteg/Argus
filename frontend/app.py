@@ -933,7 +933,7 @@ def dashboard() -> None:
                             "pagination": True,
                             "paginationPageSize": 15,
                         },
-                        theme="balham-dark",
+                        theme="balham",
                     ).classes("w-full")
                     trades_empty = ui.label("No trades recorded yet").classes(
                         f"text-sm {TEXT_MUTED}"

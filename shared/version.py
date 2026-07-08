@@ -10,9 +10,23 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.6.1"
+__version__ = "2.6.2"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.6.2",
+        "date": "2026-07-08",
+        "title": "Fix Trade History grid crashing on mount",
+        "notes": [
+            "The Trade History AG-Grid never rendered — a leftover "
+            "theme=\"balham-dark\" argument crashed the grid's mount hook "
+            "(the bundled NiceGUI version only recognizes quartz/balham/"
+            "material/alpine; dark styling is applied automatically). The "
+            "grid silently failed to initialize, so no rows, headers, or "
+            "empty-state text ever showed even though trades were being "
+            "recorded correctly. Changed to theme=\"balham\".",
+        ],
+    },
     {
         "version": "2.6.1",
         "date": "2026-07-08",
