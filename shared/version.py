@@ -10,9 +10,27 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.4.14"
+__version__ = "2.5.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.5.0",
+        "date": "2026-07-08",
+        "title": "Multi-agent trading: risk agent, portfolio manager, decision memory",
+        "notes": [
+            "Pre-trade Risk Agent: evaluates each BUY signal for sector "
+            "concentration, correlation, recent losses, and regime fit "
+            "before execution. Can block marginal trades.",
+            "Portfolio Manager Agent: reviews all pending signals and "
+            "decides which to execute and in what order, respecting "
+            "diversification and opportunity cost.",
+            "Decision Memory: stores every trade decision and its outcome, "
+            "extracts lessons that are fed back into future trade reviews.",
+            "Separate risk_model config field for a cheaper/faster model "
+            "on pre-trade checks.",
+            "New API endpoints: GET /analyst/memory, POST /analyst/extract-lessons",
+        ],
+    },
     {
         "version": "2.4.14",
         "date": "2026-07-08",

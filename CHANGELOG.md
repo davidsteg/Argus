@@ -9,6 +9,21 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.5.0] - 2026-07-08
+
+### Added
+- **Pre-trade Risk Agent**: evaluates each BUY signal for sector
+  concentration, correlation, recent losses, and regime fit before
+  execution. Can block marginal trades.
+- **Portfolio Manager Agent**: reviews all pending signals and decides
+  which to execute and in what order, respecting diversification and
+  opportunity cost.
+- **Decision Memory**: stores every trade decision and its outcome,
+  extracts lessons that are fed back into future trade reviews.
+- Separate `risk_model` config field for a cheaper/faster model on
+  pre-trade checks.
+- New API endpoints: `GET /analyst/memory`, `POST /analyst/extract-lessons`
+
 ## [v2.4.14] - 2026-07-08
 
 ### Added

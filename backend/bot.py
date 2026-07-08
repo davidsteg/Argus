@@ -650,19 +650,78 @@ class ArgusBot:
 
         frames = await self.fetch_minute_bars()
         cycle["symbols_with_bars"] = len(frames)
-        evaluated: Dict[str, str] = {}
+
+        # Phase 1: technical signal evaluation (fast, no LLM)
+        pending_signals: List[Dict[str, Any]] = []
         for symbol, bars in frames.items():
             if open_slots <= 0:
                 break
             if symbol in held_symbols:
-                evaluated[symbol] = "held"
                 continue
             signal_info = await self.evaluate_signal(symbol, bars)
             if signal_info is not None:
-                await self.place_bracket_buy(signal_info)
-                evaluated[symbol] = "buy"
-                open_slots -= 1
-            else:
+                pending_signals.append(signal_info)
+
+        # Phase 2: LLM risk agent evaluates each signal
+        analyst = get_analyst()
+        if analyst.enabled(self.db) and analyst.available and pending_signals:
+            risk_results = await asyncio.to_thread(
+                lambda: [
+                    analyst.evaluate_signal_risk(s, portfolio, regime_info, self.db)
+                    for s in pending_signals
+                ]
+            )
+            filtered_signals = []
+            for s, risk in zip(pending_signals, risk_results):
+                s["_risk_score"] = risk.get("risk_score", 0.5)
+                if risk.get("approved", True):
+                    filtered_signals.append(s)
+                else:
+                    self.db.add_log(
+                        "ANALYST",
+                        f"Risk agent rejected {s['symbol']}: {risk.get('reason', 'no reason')}",
+                    )
+            pending_signals = filtered_signals
+
+            # Phase 3: portfolio manager decides execution order
+            pm_result = await asyncio.to_thread(
+                analyst.portfolio_manager,
+                pending_signals, portfolio, regime_info, self.db,
+            )
+            approved = pm_result.get("approved_symbols", [])
+            rejected = pm_result.get("rejected_symbols", [])
+            for s in list(pending_signals):
+                if s["symbol"] in rejected:
+                    self.db.add_log(
+                        "ANALYST",
+                        f"Portfolio manager rejected {s['symbol']}: {pm_result.get('reason', 'no reason')}",
+                    )
+                    pending_signals = [p for p in pending_signals if p["symbol"] != s["symbol"]]
+            # Reorder by portfolio manager's preference
+            if approved:
+                pending_signals.sort(
+                    key=lambda s: approved.index(s["symbol"]) if s["symbol"] in approved else 999
+                )
+
+        # Phase 4: execute approved signals
+        evaluated: Dict[str, str] = {}
+        for signal_info in pending_signals:
+            if open_slots <= 0:
+                break
+            await self.place_bracket_buy(signal_info)
+            evaluated[signal_info["symbol"]] = "buy"
+            open_slots -= 1
+            # Record decision for memory
+            try:
+                analyst.update_decision_memory(
+                    signal_info["symbol"], "buy", None, self.db
+                )
+            except Exception:
+                pass
+
+        # Mark symbols that had no signal
+        for symbol in frames:
+            if symbol not in evaluated and symbol not in held_symbols:
                 evaluated[symbol] = "no-signal"
         cycle["evaluated"] = evaluated
         cycle["stage"] = "complete"

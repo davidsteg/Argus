@@ -409,8 +409,8 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
     ) -> Dict[str, Any]:
         from analyst import get_analyst
 
-        allowed = {"base_url", "api_key", "model", "trade_review_interval_hours",
-                    "trade_lookback"}
+        allowed = {"base_url", "api_key", "model", "watchlist_model", "risk_model",
+                     "trade_review_interval_hours", "trade_lookback"}
         filtered = {k: v for k, v in updates.items() if k in allowed}
         if not filtered:
             raise HTTPException(
@@ -428,5 +428,21 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
             "config": new_config,
             "available": analyst.available,
         }
+
+    @app.get("/analyst/memory")
+    async def analyst_memory() -> Dict[str, Any]:
+        from analyst import get_analyst
+        memory = db.get_state("decision_memory") or {}
+        return {
+            "decisions": memory.get("decisions", [])[-20:],
+            "lessons": memory.get("lessons", []),
+        }
+
+    @app.post("/analyst/extract-lessons")
+    async def analyst_extract_lessons() -> Dict[str, Any]:
+        from analyst import get_analyst
+        analyst = get_analyst()
+        await asyncio.to_thread(analyst.extract_lessons, db)
+        return {"extracted": True}
 
     return app
