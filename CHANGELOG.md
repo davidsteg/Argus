@@ -9,6 +9,54 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.6.0] - 2026-07-08
+
+### Fixed
+- **Lesson extraction cadence**: `_cycle_count` was never incremented, so
+  the "every 50 cycles" guard was always true and decision-memory lesson
+  extraction fired an LLM call every cycle (~every 60 s). Now it truly
+  runs every 50th cycle.
+- **Decision memory closed-loop**: trade exits now feed their realized
+  PnL back into decision memory, attaching the outcome to the original
+  buy decision. Previously every stored decision had a null outcome and
+  lesson extraction had nothing real to learn from.
+- **Watchlist override feedback loop**: an LLM watchlist override was
+  honored forever (persisted, no TTL) and the most-actives screener was
+  never consulted again, so the universe drifted on the LLM's own
+  previous output. Overrides now expire after 2× the refresh interval
+  (`WATCHLIST_OVERRIDE_TTL_MINUTES`), curation receives the live
+  screener pool as candidates, and suggested symbols are validated
+  against it — hallucinated tickers can no longer go live. Legacy
+  plain-list overrides in existing databases are ignored.
+- **Daily loss baseline persists across restarts**: the anchor date is
+  now stored in the database, so restarting the engine mid-drawdown no
+  longer resets `daily_start_balance` and re-arms a fresh daily loss
+  budget.
+- **Portfolio manager silence no longer trades**: signals the manager
+  neither approved nor rejected were still executed. They are now
+  skipped and logged; full fail-open remains only when the manager call
+  itself errors.
+- Missing `List` typing import in `bot.py`.
+
+### Changed
+- **Session-anchored VWAP**: `compute_vwap` resets its cumulative sums at
+  each US-Eastern trading date instead of cumulating over the fetched
+  window, so the fair-value anchor no longer blends across the overnight
+  gap or shifts with `BAR_LOOKBACK_MINUTES`. Shared by the live engine,
+  `GET /signals` and the optimizer.
+- **Optimizer backtest aligned with the live strategy**: the nightly grid
+  search now applies the VWAP dip-confirmation gate and the post-loss
+  cooldown (mirroring `COOLDOWN_MINUTES`), so parameters are tuned on
+  much closer to the system that actually trades. Sentiment and regime
+  gates cannot be replayed from bars alone and remain excluded.
+- **Faster cycles**: signal evaluation runs concurrently across symbols
+  (semaphore-bounded), risk-agent calls run in parallel and are capped to
+  the best `open_slots × 2` candidates, and the periodic trade review /
+  watchlist curation / lesson extraction moved to a background task so
+  they can never delay order placement.
+- `regime.py` reuses a single Alpaca data client instead of building one
+  per classification.
+
 ## [v2.5.2] - 2026-07-08
 
 ### Changed

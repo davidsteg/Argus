@@ -32,7 +32,7 @@ import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import numpy as np
 from alpaca.data.historical import StockHistoricalDataClient
@@ -67,10 +67,19 @@ UNKNOWN = "UNKNOWN"
 _lock = threading.Lock()
 _cached: Dict[str, Any] = {}
 _cached_at: float = 0.0
+_client: Optional[StockHistoricalDataClient] = None
+
+
+def _get_client() -> StockHistoricalDataClient:
+    # Lazily built once and reused; _classify only runs under _lock.
+    global _client
+    if _client is None:
+        _client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+    return _client
 
 
 def _classify() -> Dict[str, Any]:
-    client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+    client = _get_client()
     start = datetime.now(timezone.utc) - timedelta(minutes=REGIME_LOOKBACK_MINUTES)
     request = StockBarsRequest(
         symbol_or_symbols=REGIME_SYMBOL,

@@ -58,16 +58,29 @@ def compute_atr(bars: pd.DataFrame, period: int = ATR_PERIOD) -> pd.Series:
 
 
 def compute_vwap(bars: pd.DataFrame) -> pd.Series:
-    """Volume-weighted average price, cumulative over the fetched window.
+    """Session-anchored volume-weighted average price.
 
-    With the engine's default 3-hour bar lookback this behaves as a rolling
-    intraday VWAP: the fair-value anchor mean-reversion entries should sit
-    below. Zero-volume stretches fall back to the typical price itself.
+    Cumulative price×volume over volume, reset at each US-Eastern trading
+    date, so the fair-value anchor never spans the overnight gap and does
+    not shift with the length of the fetched window. Frames without a
+    datetime index fall back to window-cumulative. Zero-volume stretches
+    fall back to the typical price itself.
     """
     typical = (bars["high"] + bars["low"] + bars["close"]) / 3.0
     volume = bars["volume"].astype(float)
-    cum_volume = volume.cumsum()
-    cum_pv = (typical * volume).cumsum()
+    pv = typical * volume
+    index = bars.index
+    if isinstance(index, pd.DatetimeIndex):
+        session = (
+            index.tz_convert("America/New_York").date
+            if index.tz is not None
+            else index.date
+        )
+        cum_volume = volume.groupby(session).cumsum()
+        cum_pv = pv.groupby(session).cumsum()
+    else:
+        cum_volume = volume.cumsum()
+        cum_pv = pv.cumsum()
     vwap = cum_pv / cum_volume.replace(0.0, np.nan)
     return vwap.fillna(typical)
 

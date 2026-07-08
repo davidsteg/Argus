@@ -10,9 +10,39 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.5.2"
+__version__ = "2.6.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.6.0",
+        "date": "2026-07-08",
+        "title": "Logic audit: closed feedback loops, hardened risk controls",
+        "notes": [
+            "Cycle counter fix: decision-memory lesson extraction now truly "
+            "runs every 50 cycles — a missing increment made it fire every "
+            "cycle (one extra LLM call per minute).",
+            "Decision memory closed-loop: trade exits now attach their "
+            "realized PnL to the original buy decision, so lesson "
+            "extraction finally sees decision → outcome pairs.",
+            "Watchlist override TTL: LLM-curated watchlists expire after "
+            "2× the refresh interval instead of permanently replacing the "
+            "screener; curation now picks from the live most-actives pool "
+            "and hallucinated tickers are filtered out.",
+            "Daily loss baseline persists across restarts — a mid-day "
+            "engine restart no longer re-arms a fresh daily loss budget.",
+            "Portfolio manager silence no longer trades: signals neither "
+            "approved nor rejected are skipped, not executed.",
+            "Parallel signal evaluation and risk-agent calls; periodic LLM "
+            "reviews moved to a background task so they never delay order "
+            "placement; risk reviews capped to the best candidates.",
+            "Session-anchored VWAP: the fair-value anchor resets each "
+            "US-Eastern trading day instead of blending across the "
+            "overnight gap (live engine, /signals and optimizer alike).",
+            "Optimizer backtest now applies the VWAP dip gate and the "
+            "post-loss cooldown, so nightly parameters are tuned on the "
+            "strategy that actually trades.",
+        ],
+    },
     {
         "version": "2.5.2",
         "date": "2026-07-08",

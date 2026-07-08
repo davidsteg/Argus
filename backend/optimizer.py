@@ -37,7 +37,7 @@ from alpaca.data.timeframe import TimeFrame
 from dotenv import load_dotenv
 
 import universe
-from indicators import bracket_distances, compute_atr, compute_rsi
+from indicators import bracket_distances, compute_atr, compute_rsi, compute_vwap
 from shared.database import get_db
 
 load_dotenv()
@@ -61,6 +61,8 @@ OPTIMIZER_MAX_SYMBOLS = int(os.getenv("OPTIMIZER_MAX_SYMBOLS", "10"))
 # Chronological share of each symbol's bars used for parameter selection;
 # the remainder is the untouched validation window.
 TRAIN_FRACTION = float(os.getenv("OPTIMIZER_TRAIN_FRACTION", "0.75"))
+# Post-loss re-entry bench, mirrored from the live engine (1 bar ≈ 1 min).
+COOLDOWN_MINUTES = float(os.getenv("COOLDOWN_MINUTES", "30"))
 
 # Grid searched nightly. Kept deliberately compact: 4*4*3*4 = 192
 # combinations replayed over train+validation finish in well under a
@@ -114,16 +116,21 @@ def backtest(
     lows: np.ndarray,
     rsi: np.ndarray,
     atr: np.ndarray,
+    vwap: np.ndarray,
     rsi_buy_signal: float,
     atr_stop_mult: float,
     atr_target_mult: float,
+    cooldown_bars: int = 0,
 ) -> Tuple[float, float, int]:
     """Replay the live strategy over one symbol's bars.
 
     Entry: RSI crosses below the buy level (previous bar at/above, current
     below) — the crossing condition avoids re-entering on every bar of a
     sustained oversold stretch, matching the live engine which is blocked
-    from re-entry while it already holds the symbol.
+    from re-entry while it already holds the symbol. Price must also sit
+    at or below the session VWAP (the live dip-confirmation gate), and the
+    symbol must be past its post-loss cooldown. The live sentiment and
+    regime gates cannot be replayed from bars alone and stay out.
 
     Exit: intra-bar bracket simulation with the same ATR-multiple
     distances and floors the live engine uses (indicators.bracket_distances).
@@ -141,6 +148,7 @@ def backtest(
     stop_price = 0.0
     target_price = 0.0
     entry_price = 0.0
+    cooldown_until = -1
 
     for i in range(1, len(closes)):
         if in_position:
@@ -156,9 +164,15 @@ def backtest(
                 peak = max(peak, equity)
                 drawdown = (peak - equity) / peak
                 max_drawdown = max(max_drawdown, drawdown)
+                if exit_price < entry_price and cooldown_bars > 0:
+                    cooldown_until = i + cooldown_bars
             continue
 
         if np.isnan(rsi[i]) or np.isnan(rsi[i - 1]) or np.isnan(atr[i]):
+            continue
+        if i <= cooldown_until:
+            continue
+        if closes[i] > vwap[i]:
             continue
         if rsi[i - 1] >= rsi_buy_signal > rsi[i]:
             in_position = True
@@ -188,6 +202,7 @@ class _WindowData:
         self.highs: Dict[str, np.ndarray] = {}
         self.lows: Dict[str, np.ndarray] = {}
         self.atr: Dict[str, np.ndarray] = {}
+        self.vwap: Dict[str, np.ndarray] = {}
         self._close_series: Dict[str, pd.Series] = {}
         self._rsi_cache: Dict[Tuple[str, int], np.ndarray] = {}
         for symbol, bars in frames.items():
@@ -195,6 +210,7 @@ class _WindowData:
             self.highs[symbol] = bars["high"].to_numpy()
             self.lows[symbol] = bars["low"].to_numpy()
             self.atr[symbol] = compute_atr(bars).to_numpy()
+            self.vwap[symbol] = compute_vwap(bars).to_numpy()
             self._close_series[symbol] = bars["close"]
 
     def rsi(self, symbol: str, period: int) -> np.ndarray:
@@ -223,9 +239,11 @@ class _WindowData:
                 lows=self.lows[symbol],
                 rsi=self.rsi(symbol, rsi_period),
                 atr=self.atr[symbol],
+                vwap=self.vwap[symbol],
                 rsi_buy_signal=rsi_buy_signal,
                 atr_stop_mult=atr_stop_mult,
                 atr_target_mult=atr_target_mult,
+                cooldown_bars=int(COOLDOWN_MINUTES),
             )
             total_return += ret
             worst_drawdown = max(worst_drawdown, drawdown)

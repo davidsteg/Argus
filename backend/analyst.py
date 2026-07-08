@@ -326,24 +326,41 @@ class StrategyAnalyst:
         outcome: Optional[Dict[str, Any]],
         db,
     ) -> None:
-        """Store a trading decision and its outcome for future reference."""
+        """Store a trading decision and its outcome for future reference.
+
+        A "close" decision attaches its outcome to the most recent
+        outcome-less decision for the symbol, so lesson extraction sees
+        decision → result pairs instead of dangling entries."""
         memory = db.get_state("decision_memory") or {"decisions": [], "lessons": []}
         memory.setdefault("decisions", [])
         memory.setdefault("lessons", [])
 
-        entry = {
-            "symbol": symbol,
-            "decision": decision,
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        }
+        outcome_payload = None
         if outcome:
-            entry["outcome"] = {
+            outcome_payload = {
                 "pnl": outcome.get("realized_pnl"),
                 "exit_price": outcome.get("exit_price"),
                 "exit_time": outcome.get("exit_time"),
                 "hold_duration": outcome.get("hold_duration"),
             }
-        memory["decisions"].append(entry)
+
+        attached = False
+        if decision == "close" and outcome_payload is not None:
+            for entry in reversed(memory["decisions"]):
+                if entry.get("symbol") == symbol and "outcome" not in entry:
+                    entry["outcome"] = outcome_payload
+                    attached = True
+                    break
+
+        if not attached:
+            entry = {
+                "symbol": symbol,
+                "decision": decision,
+                "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            }
+            if outcome_payload is not None:
+                entry["outcome"] = outcome_payload
+            memory["decisions"].append(entry)
         # Keep last 200 decisions
         memory["decisions"] = memory["decisions"][-200:]
 
@@ -557,6 +574,18 @@ class StrategyAnalyst:
         if not self.available or not self.enabled(db):
             return None
 
+        # Curate from the live screener pool, not from the LLM's own
+        # previous output — otherwise the watchlist drifts on stale,
+        # possibly hallucinated symbols with no fresh liquidity data.
+        try:
+            import universe as universe_module
+            candidate_pool = universe_module.get_screener_watchlist()
+        except Exception as exc:
+            logger.warning("Screener pool unavailable for watchlist review: %s", exc)
+            candidate_pool = list(current_symbols)
+        if not candidate_pool:
+            candidate_pool = list(current_symbols)
+
         prompt_data = {
             "context": "Watchlist curation for a long-only mean-reversion bot.",
             "regime": {
@@ -566,9 +595,11 @@ class StrategyAnalyst:
                 "realized_vol_pct": regime.get("realized_vol_pct"),
             },
             "current_watchlist": current_symbols,
+            "candidate_pool": candidate_pool,
             "constraints": {
                 "min_price": 5.0,
                 "max_symbols": len(current_symbols),
+                "rule": "select symbols ONLY from candidate_pool — anything else is discarded",
                 "strategy": "long-only mean-reversion, RSI dip below threshold, price below VWAP, positive sentiment",
             },
         }
@@ -593,6 +624,10 @@ class StrategyAnalyst:
             return None
 
         new_symbols = [s.strip().upper() for s in new_symbols if isinstance(s, str) and s.strip()]
+        # Reject hallucinated tickers: only symbols from the real screener
+        # pool (or the current list) are allowed to go live.
+        allowed = set(candidate_pool) | set(current_symbols)
+        new_symbols = [s for s in new_symbols if s in allowed]
         if len(new_symbols) < 3:
             return None
 

@@ -29,7 +29,7 @@ import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -110,6 +110,7 @@ class ArgusBot:
         self._current_day: Optional[str] = None
         self._shutdown = asyncio.Event()
         self._cycle_count: int = 0
+        self._review_task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------ #
     # loser cooldown
@@ -430,6 +431,22 @@ class ArgusBot:
         pnl_text = "unknown PnL" if realized is None else f"PnL ${realized:+.2f}"
         self.db.add_log("TRADE", f"CLOSED {symbol} x{qty:g} — {pnl_text}")
 
+        # Feed the outcome back into the analyst's decision memory so
+        # lesson extraction sees decision → result pairs.
+        try:
+            get_analyst().update_decision_memory(
+                symbol,
+                "close",
+                {
+                    "realized_pnl": realized,
+                    "exit_price": exit_price,
+                    "exit_time": exit_time,
+                },
+                self.db,
+            )
+        except Exception as exc:
+            logger.error("Decision memory update failed for %s: %s", symbol, exc)
+
         # Bench losers: an unknown exit price is treated as a loss too —
         # the conservative assumption when reconciliation could not find
         # the fill.
@@ -480,11 +497,17 @@ class ArgusBot:
     # ------------------------------------------------------------------ #
 
     def roll_daily_anchor(self, equity: float) -> None:
-        """Reset the daily PnL baseline at Swiss midnight."""
+        """Reset the daily PnL baseline at Swiss midnight.
+
+        The anchor date is persisted: a mid-day engine restart keeps the
+        existing baseline instead of re-arming a fresh daily loss budget."""
         today = datetime.now(ZURICH).strftime("%Y-%m-%d")
         if self._current_day == today:
             return
         self._current_day = today
+        if self.db.get_state("daily_anchor_date") == today:
+            return
+        self.db.set_state("daily_anchor_date", today)
         self.db.set_status(daily_start_balance=equity)
         self.db.add_log(
             "INFO",
@@ -559,6 +582,7 @@ class ArgusBot:
         logger.info("Argus engine stopped")
 
     async def run_cycle(self) -> None:
+        self._cycle_count += 1
         cycle: Dict[str, Any] = {
             "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "stage": "start",
@@ -652,25 +676,47 @@ class ArgusBot:
         frames = await self.fetch_minute_bars()
         cycle["symbols_with_bars"] = len(frames)
 
-        # Phase 1: technical signal evaluation (fast, no LLM)
-        pending_signals: List[Dict[str, Any]] = []
-        for symbol, bars in frames.items():
-            if open_slots <= 0:
-                break
-            if symbol in held_symbols:
-                continue
-            signal_info = await self.evaluate_signal(symbol, bars)
-            if signal_info is not None:
-                pending_signals.append(signal_info)
+        # Phase 1: technical signal evaluation, concurrently across symbols.
+        # The RSI/VWAP gates are cheap in-process math; only symbols that
+        # pass them reach the sentiment scorer, whose news/LLM calls run in
+        # threads — the semaphore bounds how many run at once.
+        semaphore = asyncio.Semaphore(8)
 
-        # Phase 2: LLM risk agent evaluates each signal
+        async def evaluate_bounded(sym: str, sym_bars: pd.DataFrame):
+            async with semaphore:
+                return await self.evaluate_signal(sym, sym_bars)
+
+        results = await asyncio.gather(
+            *(
+                evaluate_bounded(symbol, bars)
+                for symbol, bars in frames.items()
+                if symbol not in held_symbols
+            ),
+            return_exceptions=True,
+        )
+        pending_signals: List[Dict[str, Any]] = [
+            s for s in results if isinstance(s, dict)
+        ]
+        # Deepest dips first — also the truncation order for the risk agent.
+        pending_signals.sort(key=lambda s: s["rsi"])
+
+        # Phase 2: LLM risk agent evaluates each signal (in parallel).
         analyst = get_analyst()
         if analyst.enabled(self.db) and analyst.available and pending_signals:
-            risk_results = await asyncio.to_thread(
-                lambda: [
-                    analyst.evaluate_signal_risk(s, portfolio, regime_info, self.db)
+            # Only the best candidates for the available slots are worth
+            # an LLM review; the rest could never be executed this cycle.
+            pending_signals = pending_signals[: max(open_slots * 2, 1)]
+            risk_results = await asyncio.gather(
+                *(
+                    asyncio.to_thread(
+                        analyst.evaluate_signal_risk,
+                        s,
+                        portfolio,
+                        regime_info,
+                        self.db,
+                    )
                     for s in pending_signals
-                ]
+                )
             )
             filtered_signals = []
             for s, risk in zip(pending_signals, risk_results):
@@ -684,25 +730,33 @@ class ArgusBot:
                     )
             pending_signals = filtered_signals
 
-            # Phase 3: portfolio manager decides execution order
+            # Phase 3: portfolio manager decides execution order. Silence is
+            # not consent: a signal the manager neither approved nor rejected
+            # is skipped, not traded. (On manager failure the analyst layer
+            # itself fails open by approving everything.)
             pm_result = await asyncio.to_thread(
                 analyst.portfolio_manager,
                 pending_signals, portfolio, regime_info, self.db,
             )
             approved = pm_result.get("approved_symbols", [])
             rejected = pm_result.get("rejected_symbols", [])
-            for s in list(pending_signals):
+            kept: List[Dict[str, Any]] = []
+            for s in pending_signals:
                 if s["symbol"] in rejected:
                     self.db.add_log(
                         "ANALYST",
                         f"Portfolio manager rejected {s['symbol']}: {pm_result.get('reason', 'no reason')}",
                     )
-                    pending_signals = [p for p in pending_signals if p["symbol"] != s["symbol"]]
+                elif s["symbol"] not in approved:
+                    self.db.add_log(
+                        "ANALYST",
+                        f"Portfolio manager did not approve {s['symbol']} — skipped",
+                    )
+                else:
+                    kept.append(s)
             # Reorder by portfolio manager's preference
-            if approved:
-                pending_signals.sort(
-                    key=lambda s: approved.index(s["symbol"]) if s["symbol"] in approved else 999
-                )
+            kept.sort(key=lambda s: approved.index(s["symbol"]))
+            pending_signals = kept
 
         # Phase 4: execute approved signals
         evaluated: Dict[str, str] = {}
@@ -727,10 +781,24 @@ class ArgusBot:
         cycle["evaluated"] = evaluated
         cycle["stage"] = "complete"
 
+        # Periodic LLM reviews run in the background so a slow review can
+        # never delay the next order-placing cycle. At most one review batch
+        # runs at a time.
+        if self._review_task is None or self._review_task.done():
+            self._review_task = asyncio.create_task(
+                self._run_periodic_reviews(regime_info, self._cycle_count)
+            )
+
+    async def _run_periodic_reviews(
+        self, regime_info: Dict[str, Any], cycle_count: int
+    ) -> None:
+        """Trade review, watchlist curation and lesson extraction — advisory
+        work that must never block order placement."""
+        analyst = get_analyst()
+
         # Periodic LLM trade review (if analyst is enabled and enough time
         # has passed since the last review).
         try:
-            analyst = get_analyst()
             if analyst.should_review_trades():
                 trades = self.db.get_trades(200)
                 stats = self.db.get_trade_stats()
@@ -745,9 +813,9 @@ class ArgusBot:
         except Exception as exc:
             logger.error("Trade review failed: %s", exc)
 
-        # Periodic LLM watchlist curation (if analyst is enabled).
+        # Periodic LLM watchlist curation (if analyst is enabled). The
+        # override carries a timestamp so universe.py can expire it.
         try:
-            analyst = get_analyst()
             if analyst.should_review_watchlist():
                 current_symbols = list(self.watchlist)
                 new_symbols = await asyncio.to_thread(
@@ -757,7 +825,15 @@ class ArgusBot:
                     self.db,
                 )
                 if new_symbols and new_symbols != current_symbols:
-                    self.db.set_state("watchlist_override", new_symbols)
+                    self.db.set_state(
+                        "watchlist_override",
+                        {
+                            "symbols": new_symbols,
+                            "written_at": datetime.now(timezone.utc).isoformat(
+                                timespec="seconds"
+                            ),
+                        },
+                    )
                     self.db.add_log(
                         "ANALYST",
                         f"Watchlist updated: {len(current_symbols)} → "
@@ -768,8 +844,7 @@ class ArgusBot:
 
         # Periodic decision memory lesson extraction (every 50 cycles).
         try:
-            analyst = get_analyst()
-            if analyst.enabled(self.db) and self._cycle_count % 50 == 0:
+            if analyst.enabled(self.db) and cycle_count % 50 == 0:
                 await asyncio.to_thread(analyst.extract_lessons, self.db)
         except Exception as exc:
             logger.error("Lesson extraction failed: %s", exc)

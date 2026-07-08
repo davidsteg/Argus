@@ -19,6 +19,7 @@ import logging
 import os
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from alpaca.data.historical.screener import ScreenerClient
@@ -40,6 +41,11 @@ STATIC_SYMBOLS: List[str] = (
 # Alpaca's most-actives screener caps at 100 symbols per request.
 WATCHLIST_SIZE = min(int(os.getenv("WATCHLIST_SIZE", "50")), 100)
 WATCHLIST_REFRESH_MINUTES = int(os.getenv("WATCHLIST_REFRESH_MINUTES", "15"))
+# Analyst watchlist overrides expire after this long, so a stale LLM
+# curation can never permanently replace fresh screener liquidity data.
+OVERRIDE_TTL_MINUTES = float(
+    os.getenv("WATCHLIST_OVERRIDE_TTL_MINUTES", str(WATCHLIST_REFRESH_MINUTES * 2))
+)
 
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
@@ -55,6 +61,33 @@ def _fetch_most_actives(top: int) -> List[str]:
     return [item.symbol.upper() for item in response.most_actives]
 
 
+def _read_override() -> Optional[List[str]]:
+    """Analyst override symbols, or None when absent, expired or malformed.
+
+    Only the {"symbols": [...], "written_at": iso} format carries a
+    timestamp; legacy plain-list overrides are ignored so a value written
+    before the TTL existed cannot pin the universe forever.
+    """
+    try:
+        from shared.database import get_db
+        override = get_db().get_state("watchlist_override")
+    except Exception:
+        return None
+    if not isinstance(override, dict):
+        return None
+    symbols = override.get("symbols")
+    written_at = override.get("written_at")
+    if not isinstance(symbols, list) or len(symbols) < 3 or not written_at:
+        return None
+    try:
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(str(written_at))
+    except (ValueError, TypeError):
+        return None
+    if age > timedelta(minutes=OVERRIDE_TTL_MINUTES):
+        return None
+    return [str(s).upper() for s in symbols]
+
+
 def get_watchlist(limit: Optional[int] = None) -> List[str]:
     """Return the current trading universe (thread-safe, cached).
 
@@ -63,35 +96,38 @@ def get_watchlist(limit: Optional[int] = None) -> List[str]:
     on screener failure the last good list is kept so the engine never
     loses its universe mid-session.
 
-    If the analyst has written a watchlist_override to runtime_state,
-    that takes precedence over the screener.
+    A fresh analyst watchlist_override takes precedence, but it expires
+    after OVERRIDE_TTL_MINUTES and never displaces the screener cache.
     """
     if not DYNAMIC_MODE:
         return STATIC_SYMBOLS[:limit] if limit else list(STATIC_SYMBOLS)
 
+    override = _read_override()
+    if override is not None:
+        return override[:limit] if limit else override
+
+    symbols = get_screener_watchlist()
+    return symbols[:limit] if limit else symbols
+
+
+def get_screener_watchlist() -> List[str]:
+    """Most-actives screener list, bypassing any analyst override
+    (thread-safe, cached for WATCHLIST_REFRESH_MINUTES)."""
+    if not DYNAMIC_MODE:
+        return list(STATIC_SYMBOLS)
+
     global _cached_symbols, _cached_at
     with _lock:
-        # Check for analyst override first
-        try:
-            from shared.database import get_db
-            override = get_db().get_state("watchlist_override")
-            if override and isinstance(override, list) and len(override) >= 3:
-                _cached_symbols = override
-                _cached_at = time.monotonic()
-                return _cached_symbols[:limit] if limit else list(_cached_symbols)
-        except Exception:
-            pass
-
         age = time.monotonic() - _cached_at
         if _cached_symbols and age < WATCHLIST_REFRESH_MINUTES * 60:
-            return _cached_symbols[:limit] if limit else list(_cached_symbols)
+            return list(_cached_symbols)
         try:
             symbols = _fetch_most_actives(WATCHLIST_SIZE)
         except Exception as exc:
             logger.error("Most-actives screener failed: %s", exc)
             if _cached_symbols:
-                return _cached_symbols[:limit] if limit else list(_cached_symbols)
-            return ["AAPL", "MSFT", "GOOGL", "NVDA", "TSLA"][:limit or 5]
+                return list(_cached_symbols)
+            return ["AAPL", "MSFT", "GOOGL", "NVDA", "TSLA"]
         if symbols:
             _cached_symbols = symbols
             _cached_at = time.monotonic()
@@ -100,7 +136,7 @@ def get_watchlist(limit: Optional[int] = None) -> List[str]:
                 len(symbols),
                 ", ".join(symbols[:10]),
             )
-        return _cached_symbols[:limit] if limit else list(_cached_symbols)
+        return list(_cached_symbols)
 
 
 def describe_mode() -> str:
