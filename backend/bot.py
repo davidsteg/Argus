@@ -685,6 +685,27 @@ class ArgusBot:
         except Exception as exc:
             logger.error("Trade review failed: %s", exc)
 
+        # Periodic LLM watchlist curation (if analyst is enabled).
+        try:
+            analyst = get_analyst()
+            if analyst.should_review_watchlist():
+                current_symbols = list(self.watchlist)
+                new_symbols = await asyncio.to_thread(
+                    analyst.review_watchlist,
+                    current_symbols,
+                    regime_info,
+                    self.db,
+                )
+                if new_symbols and new_symbols != current_symbols:
+                    self.db.set_state("watchlist_override", new_symbols)
+                    self.db.add_log(
+                        "ANALYST",
+                        f"Watchlist updated: {len(current_symbols)} → "
+                        f"{len(new_symbols)} symbols",
+                    )
+        except Exception as exc:
+            logger.error("Watchlist review failed: %s", exc)
+
 
 class EngineController:
     """Owns the engine task's lifecycle so the debug API can inspect it,

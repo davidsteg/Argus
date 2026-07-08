@@ -9,6 +9,17 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.4.14] - 2026-07-08
+
+### Added
+- Automatic LLM watchlist curation: analyst reviews the watchlist every
+  hour and can replace it with a curated list (sector diversification,
+  regime-adaptive filtering, prune dead symbols). Override is written to
+  `runtime_state` and picked up by `universe.py` on the next cycle.
+- Separate `watchlist_model` config field — use a cheaper/faster model
+  for watchlist curation while keeping the main model for trade and
+  optimization reviews. Falls back to the main model if not set.
+
 ## [v2.4.13] - 2026-07-08
 
 ### Added

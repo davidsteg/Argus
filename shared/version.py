@@ -10,9 +10,24 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.4.13"
+__version__ = "2.4.14"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.4.14",
+        "date": "2026-07-08",
+        "title": "Automatic LLM watchlist curation",
+        "notes": [
+            "Analyst now reviews the watchlist every hour and can replace "
+            "it with a curated list (sector diversification, regime-adaptive "
+            "filtering, prune dead symbols). Override is written to "
+            "runtime_state and picked up by universe.py on the next cycle.",
+            "Separate watchlist_model config field — use a cheaper/faster "
+            "model for watchlist curation while keeping the main model for "
+            "trade/optimization reviews. Falls back to the main model if "
+            "not set.",
+        ],
+    },
     {
         "version": "2.4.13",
         "date": "2026-07-08",

@@ -39,6 +39,7 @@ DEFAULT_ANALYST_CONFIG: Dict[str, Any] = {
     "base_url": os.getenv("ANALYST_OLLAMA_BASE_URL", ""),
     "api_key": os.getenv("ANALYST_OLLAMA_API_KEY", ""),
     "model": os.getenv("ANALYST_OLLAMA_MODEL", "deepseek-r1"),
+    "watchlist_model": os.getenv("ANALYST_WATCHLIST_MODEL", ""),
     "trade_review_interval_hours": float(
         os.getenv("ANALYST_TRADE_REVIEW_INTERVAL_HOURS", "4")
     ),
@@ -85,11 +86,14 @@ class StrategyAnalyst:
 
     def __init__(self) -> None:
         self._client = None
+        self._watchlist_client = None
         self._last_trade_review: float = 0.0
+        self._last_watchlist_review: float = 0.0
         self._lock = threading.Lock()
         self._config: Dict[str, Any] = dict(DEFAULT_ANALYST_CONFIG)
         self._load_config()
         self._build_client()
+        self._build_watchlist_client()
 
     # ------------------------------------------------------------------ #
     # public API
@@ -112,7 +116,7 @@ class StrategyAnalyst:
         persistence. Returns the full config after update."""
         with self._lock:
             changed = False
-            for key in ("base_url", "api_key", "model",
+            for key in ("base_url", "api_key", "model", "watchlist_model",
                          "trade_review_interval_hours", "trade_lookback"):
                 if key in updates and updates[key] != self._config.get(key):
                     self._config[key] = updates[key]
@@ -121,6 +125,8 @@ class StrategyAnalyst:
                 self._persist_config(db)
                 if "base_url" in updates or "api_key" in updates or "model" in updates:
                     self._build_client()
+                if "base_url" in updates or "api_key" in updates or "watchlist_model" in updates:
+                    self._build_watchlist_client()
         return self.get_config()
 
     def review_optimization(
@@ -318,6 +324,85 @@ class StrategyAnalyst:
             self._last_trade_review = time.monotonic()
             return True
 
+    def review_watchlist(
+        self,
+        current_symbols: List[str],
+        regime: Dict[str, Any],
+        db,
+    ) -> Optional[List[str]]:
+        """Analyze the current watchlist and suggest replacements.
+
+        Returns a new watchlist (list of symbols) or None to keep current.
+        Runs on a separate (cheaper) model if watchlist_model is configured.
+        """
+        if not self.available or not self.enabled(db):
+            return None
+
+        prompt_data = {
+            "context": "Watchlist curation for a long-only mean-reversion bot.",
+            "regime": {
+                "regime": regime.get("regime", "UNKNOWN"),
+                "symbol": regime.get("symbol", "SPY"),
+                "close": regime.get("close"),
+                "realized_vol_pct": regime.get("realized_vol_pct"),
+            },
+            "current_watchlist": current_symbols,
+            "constraints": {
+                "min_price": 5.0,
+                "max_symbols": len(current_symbols),
+                "strategy": "long-only mean-reversion, RSI dip below threshold, "
+                            "price below VWAP, positive sentiment",
+            },
+        }
+
+        try:
+            result = self._call_llm(
+                prompt_data, "watchlist",
+                client_override=self._watchlist_client,
+                model_override=self._config.get("watchlist_model") or None,
+            )
+        except Exception as exc:
+            logger.error("Watchlist review failed: %s", exc)
+            try:
+                db.add_log("ERROR", f"Watchlist review failed: {exc}")
+            except Exception:
+                pass
+            return None
+
+        new_symbols = result.get("watchlist", [])
+        if not new_symbols or not isinstance(new_symbols, list):
+            return None
+
+        # Validate: only uppercase, non-empty strings
+        new_symbols = [
+            s.strip().upper()
+            for s in new_symbols
+            if isinstance(s, str) and s.strip()
+        ]
+        if len(new_symbols) < 3:
+            return None
+
+        try:
+            db.set_state("analyst_watchlist", {
+                "previous": current_symbols,
+                "suggested": new_symbols,
+                "reviewed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "summary": result.get("summary", ""),
+            })
+        except Exception as exc:
+            logger.error("Failed to store watchlist review: %s", exc)
+
+        return new_symbols
+
+    def should_review_watchlist(self) -> bool:
+        """True when enough time has passed since the last watchlist review."""
+        with self._lock:
+            elapsed = time.monotonic() - self._last_watchlist_review
+            if elapsed < 3600:  # once per hour max
+                return False
+            self._last_watchlist_review = time.monotonic()
+            return True
+
     # ------------------------------------------------------------------ #
     # internals
     # ------------------------------------------------------------------ #
@@ -329,7 +414,7 @@ class StrategyAnalyst:
             db = get_db()
             stored = db.get_state("analyst_config")
             if stored and isinstance(stored, dict):
-                for key in ("base_url", "api_key", "model",
+                for key in ("base_url", "api_key", "model", "watchlist_model",
                              "trade_review_interval_hours", "trade_lookback"):
                     if key in stored:
                         self._config[key] = stored[key]
@@ -369,17 +454,43 @@ class StrategyAnalyst:
         except Exception as exc:
             logger.error("OpenAI client unavailable for analyst: %s", exc)
 
+    def _build_watchlist_client(self) -> None:
+        self._watchlist_client = None
+        wl_model = self._config.get("watchlist_model", "")
+        if not wl_model:
+            # No separate watchlist model configured — use the main client
+            self._watchlist_client = self._client
+            return
+        base_url = self._config.get("base_url", "")
+        api_key = self._config.get("api_key", "")
+        if not base_url:
+            return
+        try:
+            from openai import OpenAI
+
+            self._watchlist_client = OpenAI(
+                base_url=str(base_url),
+                api_key=str(api_key) if api_key else "ollama",
+            )
+            logger.info("Watchlist client ready — model %s @ %s", wl_model, base_url)
+        except Exception as exc:
+            logger.error("Watchlist client unavailable: %s", exc)
+            self._watchlist_client = self._client
+
     def _call_llm(
         self,
         data: Dict[str, Any],
         review_type: str,
+        client_override=None,
+        model_override: Optional[str] = None,
     ) -> Dict[str, Any]:
-        model = str(self._config.get("model", "deepseek-r1"))
+        client = client_override or self._client
+        model = model_override or str(self._config.get("model", "deepseek-r1"))
         payload = json.dumps(data, default=str, indent=2)
         logger.info("Analyst calling %s for %s review (%d chars)",
                      model, review_type, len(payload))
         try:
-            response = self._client.chat.completions.create(
+            response = client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},

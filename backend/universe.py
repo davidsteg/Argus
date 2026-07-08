@@ -62,12 +62,26 @@ def get_watchlist(limit: Optional[int] = None) -> List[str]:
     most active symbols, refreshed at most every WATCHLIST_REFRESH_MINUTES;
     on screener failure the last good list is kept so the engine never
     loses its universe mid-session.
+
+    If the analyst has written a watchlist_override to runtime_state,
+    that takes precedence over the screener.
     """
     if not DYNAMIC_MODE:
         return STATIC_SYMBOLS[:limit] if limit else list(STATIC_SYMBOLS)
 
     global _cached_symbols, _cached_at
     with _lock:
+        # Check for analyst override first
+        try:
+            from shared.database import get_db
+            override = get_db().get_state("watchlist_override")
+            if override and isinstance(override, list) and len(override) >= 3:
+                _cached_symbols = override
+                _cached_at = time.monotonic()
+                return _cached_symbols[:limit] if limit else list(_cached_symbols)
+        except Exception:
+            pass
+
         age = time.monotonic() - _cached_at
         if _cached_symbols and age < WATCHLIST_REFRESH_MINUTES * 60:
             return _cached_symbols[:limit] if limit else list(_cached_symbols)
@@ -77,8 +91,6 @@ def get_watchlist(limit: Optional[int] = None) -> List[str]:
             logger.error("Most-actives screener failed: %s", exc)
             if _cached_symbols:
                 return _cached_symbols[:limit] if limit else list(_cached_symbols)
-            # Never trade blind: a minimal liquid fallback until the
-            # screener recovers.
             return ["AAPL", "MSFT", "GOOGL", "NVDA", "TSLA"][:limit or 5]
         if symbols:
             _cached_symbols = symbols
