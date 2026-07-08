@@ -9,6 +9,13 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.4.7] - 2026-07-08
+
+### Fixed
+- Analyst toggle infinite loop in UI: added `_suppress_change` guard flag
+  to prevent `render_analyst` from triggering the toggle callback when
+  syncing the switch state from the database
+
 ## [v2.4.6] - 2026-07-08
 
 ### Fixed

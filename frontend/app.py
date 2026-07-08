@@ -898,6 +898,7 @@ def dashboard() -> None:
                         analyst_toggle = ui.switch(
                             "Enabled", value=False
                         ).props("color=emerald")
+                        analyst_toggle._suppress_change = False
                         analyst_toggle.on_value_change(
                             lambda e: on_analyst_toggle(e.value)
                         )
@@ -1800,7 +1801,9 @@ def dashboard() -> None:
         enabled = bool(config.get("analyst_enabled", 0.0))
         if render_state["analyst_enabled"] != enabled:
             render_state["analyst_enabled"] = enabled
+            analyst_toggle._suppress_change = True
             analyst_toggle.set_value(enabled)
+            analyst_toggle._suppress_change = False
 
         analyst_cfg = snapshot.get("analyst_config") or {}
         model = analyst_cfg.get("model", "deepseek-r1")
@@ -1862,6 +1865,8 @@ def dashboard() -> None:
         )
 
     async def on_analyst_toggle(value: bool) -> None:
+        if getattr(analyst_toggle, "_suppress_change", False):
+            return
         result = await run.io_bound(call_backend, "/analyst/toggle", 10.0)
         if result["ok"]:
             state = "enabled" if result["data"].get("analyst_enabled") else "disabled"

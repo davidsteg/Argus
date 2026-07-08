@@ -10,9 +10,19 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.4.6"
+__version__ = "2.4.7"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.4.7",
+        "date": "2026-07-08",
+        "title": "Fix analyst toggle infinite loop in UI",
+        "notes": [
+            "Added _suppress_change guard flag to prevent render_analyst "
+            "from triggering the toggle callback when syncing the switch "
+            "state from the database",
+        ],
+    },
     {
         "version": "2.4.6",
         "date": "2026-07-08",
