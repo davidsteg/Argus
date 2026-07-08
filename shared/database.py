@@ -50,6 +50,9 @@ DEFAULT_CONFIG: Dict[str, float] = {
     "rsi_period": 14.0,        # RSI lookback in 1-minute bars
     "rsi_buy_signal": 30.0,    # enter long when RSI drops below this level
     "rsi_exit_signal": 70.0,   # close a long early when RSI recovers above this
+    "rsi_short_signal": 70.0,  # enter short when RSI rises above this level
+    "rsi_short_exit": 30.0,    # cover short early when RSI drops below this
+    "short_enabled": 0.0,      # 0 = off, 1 = on — short selling toggle
     "news_cutoff": 0.55,       # minimum sentiment score required to trade
     "atr_stop_mult": 1.5,      # bracket stop-loss distance, ATR multiples
     "atr_target_mult": 2.5,    # bracket take-profit distance, ATR multiples

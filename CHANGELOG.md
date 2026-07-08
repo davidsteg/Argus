@@ -9,6 +9,25 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.9.0] - 2026-07-08
+
+### Added
+- **Short selling mode** — when `short_enabled` is ON (toggle in Settings), the
+  engine generates **SELL** signals on RSI-overbought + price-above-VWAP +
+  bearish-sentiment setups, the mirror image of the existing BUY logic.
+- `place_bracket_short()` submits bracket SELL orders with buy-to-cover
+  take-profit below entry and stop-loss above entry, using the same ATR-scaled
+  distances and risk-based sizing as BUY orders.
+- **Signal-driven covers**: a held short closes early when RSI drops below
+  `rsi_short_exit` (default 30), symmetric to the long-side RSI exit.
+- **Regime-aware gating**: SELL signals pass through `RISK_OFF` (falling market
+  favours shorts) while BUY signals are blocked.
+- New strategy parameters: `rsi_short_signal`, `rsi_short_exit`, `short_enabled`
+  — all editable from Settings, tuned nightly by the optimizer (added to
+  `PARAMETER_GRID` and modelled in `backtest()`).
+- Dashboard **Side column** (BUY/SELL) on the Active Positions table and Trade
+  History grid, with green/red color coding.
+
 ## [v2.8.0] - 2026-07-08
 
 ### Added

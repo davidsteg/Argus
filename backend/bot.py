@@ -91,7 +91,7 @@ COOLDOWN_MINUTES = float(os.getenv("COOLDOWN_MINUTES", "30"))
 
 class ArgusBot:
     """Asynchronous 1-minute execution engine with bracket-order and
-    RSI-signal exits."""
+    RSI-signal exits. Supports both long (BUY) and short (SELL) entries."""
 
     def __init__(self) -> None:
         if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
@@ -201,7 +201,7 @@ class ArgusBot:
     async def evaluate_signal(
         self, symbol: str, bars: pd.DataFrame
     ) -> Optional[Dict[str, Any]]:
-        """Layered BUY decision: RSI trigger → cooldown → VWAP dip
+        """Layered BUY/SELL decision: RSI trigger → cooldown → VWAP
         confirmation → news sentiment. Cheap technical gates run first so
         the LLM is only consulted for genuine candidates."""
         period = max(int(self.config["rsi_period"]), 2)
@@ -214,7 +214,9 @@ class ArgusBot:
         if np.isnan(latest_rsi) or latest_close < MIN_PRICE_USD:
             return None
 
-        if latest_rsi >= self.config["rsi_buy_signal"]:
+        vwap = float(compute_vwap(bars).iloc[-1])
+        atr = float(compute_atr(bars).iloc[-1])
+        if np.isnan(atr) or atr <= 0:
             return None
 
         cooldown_left = self.in_cooldown(symbol)
@@ -226,55 +228,98 @@ class ArgusBot:
             )
             return None
 
-        # Mean reversion needs a genuine dip: price stretched below the
-        # session's volume-weighted fair value, not an RSI artifact.
-        vwap = float(compute_vwap(bars).iloc[-1])
-        if latest_close > vwap:
-            self.db.add_log(
-                "INFO",
-                f"{symbol}: RSI {latest_rsi:.1f} triggered but price "
-                f"${latest_close:.2f} is above VWAP ${vwap:.2f} — not a real "
-                f"dip, skipped",
-            )
-            return None
+        # --- LONG signal: RSI oversold + price below VWAP (dip) ---
+        if latest_rsi < self.config["rsi_buy_signal"]:
+            if latest_close > vwap:
+                self.db.add_log(
+                    "INFO",
+                    f"{symbol}: RSI {latest_rsi:.1f} triggered BUY but price "
+                    f"${latest_close:.2f} is above VWAP ${vwap:.2f} — not a real "
+                    f"dip, skipped",
+                )
+                return None
 
-        atr = float(compute_atr(bars).iloc[-1])
-        if np.isnan(atr) or atr <= 0:
-            return None
+            sentiment, source = await self.process_news_sentiment(symbol)
+            if sentiment <= self.config["news_cutoff"]:
+                self.db.add_log(
+                    "INFO",
+                    f"{symbol}: RSI {latest_rsi:.1f} triggered BUY but sentiment "
+                    f"{sentiment:.2f} ({source}) <= cutoff "
+                    f"{self.config['news_cutoff']:.2f} — skipped",
+                )
+                return None
 
-        sentiment, source = await self.process_news_sentiment(symbol)
-        if sentiment <= self.config["news_cutoff"]:
-            self.db.add_log(
-                "INFO",
-                f"{symbol}: RSI {latest_rsi:.1f} triggered but sentiment "
-                f"{sentiment:.2f} ({source}) <= cutoff "
-                f"{self.config['news_cutoff']:.2f} — skipped",
-            )
-            return None
+            return {
+                "symbol": symbol,
+                "side": "BUY",
+                "price": latest_close,
+                "rsi": latest_rsi,
+                "vwap": vwap,
+                "atr": atr,
+                "sentiment": sentiment,
+                "sentiment_source": source,
+            }
 
-        return {
-            "symbol": symbol,
-            "price": latest_close,
-            "rsi": latest_rsi,
-            "vwap": vwap,
-            "atr": atr,
-            "sentiment": sentiment,
-            "sentiment_source": source,
-        }
+        # --- SHORT signal: RSI overbought + price above VWAP (overextended) ---
+        short_enabled = bool(self.config.get("short_enabled", 0.0))
+        if short_enabled and latest_rsi > self.config["rsi_short_signal"]:
+            if latest_close < vwap:
+                self.db.add_log(
+                    "INFO",
+                    f"{symbol}: RSI {latest_rsi:.1f} triggered SELL but price "
+                    f"${latest_close:.2f} is below VWAP ${vwap:.2f} — not a real "
+                    f"overextension, skipped",
+                )
+                return None
 
-    def evaluate_exit(self, bars: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        """Early-exit decision for a held long: the mean reversion has run
-        its course once RSI recovers to the overbought exit level. Returns
-        exit context, or None to keep holding. Purely the symmetric mirror
-        of the RSI entry trigger — the bracket's stop/target still guard the
-        position independently; this only banks the bounce sooner."""
+            sentiment, source = await self.process_news_sentiment(symbol)
+            # Shorts need bearish sentiment: score below the cutoff
+            if sentiment >= self.config["news_cutoff"]:
+                self.db.add_log(
+                    "INFO",
+                    f"{symbol}: RSI {latest_rsi:.1f} triggered SELL but sentiment "
+                    f"{sentiment:.2f} ({source}) >= cutoff "
+                    f"{self.config['news_cutoff']:.2f} — not bearish enough, skipped",
+                )
+                return None
+
+            return {
+                "symbol": symbol,
+                "side": "SELL",
+                "price": latest_close,
+                "rsi": latest_rsi,
+                "vwap": vwap,
+                "atr": atr,
+                "sentiment": sentiment,
+                "sentiment_source": source,
+            }
+
+        return None
+
+    def evaluate_exit(
+        self, bars: pd.DataFrame, side: str
+    ) -> Optional[Dict[str, Any]]:
+        """Early-exit decision for a held position.
+
+        Long: the mean reversion has run its course once RSI recovers to the
+        overbought exit level. Short: the overextension has corrected once
+        RSI drops to the oversold exit level. Returns exit context, or None
+        to keep holding. The bracket's stop/target still guard the position
+        independently; this only banks the reversion sooner."""
         period = max(int(self.config["rsi_period"]), 2)
         if len(bars) < period * 2:
             return None
         latest_rsi = float(compute_rsi(bars["close"], period).iloc[-1])
-        if np.isnan(latest_rsi) or latest_rsi < self.config["rsi_exit_signal"]:
+        if np.isnan(latest_rsi):
             return None
-        return {"rsi": latest_rsi, "close": float(bars["close"].iloc[-1])}
+        if side == "BUY":
+            if latest_rsi < self.config["rsi_exit_signal"]:
+                return None
+            return {"rsi": latest_rsi, "close": float(bars["close"].iloc[-1])}
+        else:
+            if latest_rsi > self.config["rsi_short_exit"]:
+                return None
+            return {"rsi": latest_rsi, "close": float(bars["close"].iloc[-1])}
 
     # ------------------------------------------------------------------ #
     # order placement
@@ -368,6 +413,83 @@ class ArgusBot:
         )
         logger.info("Submitted bracket BUY for %s x%d @ ~%.2f", symbol, qty, price)
 
+    async def place_bracket_short(self, signal: Dict[str, Any]) -> None:
+        """Submit a bracket SELL (short) order: sell short with a buy-to-cover
+        bracket (take-profit below entry, stop-loss above entry)."""
+        symbol = signal["symbol"]
+        price = signal["price"]
+
+        try:
+            latest_trade = await asyncio.to_thread(
+                self.data.get_stock_latest_trade,
+                StockLatestTradeRequest(symbol_or_symbols=symbol),
+            )
+            price = float(latest_trade[symbol].price)
+        except Exception as exc:
+            logger.warning(
+                "Latest-trade fetch failed for %s, using bar price: %s",
+                symbol,
+                exc,
+            )
+
+        stop_distance, target_distance = bracket_distances(
+            price,
+            signal["atr"],
+            self.config["atr_stop_mult"],
+            self.config["atr_target_mult"],
+        )
+
+        qty = int(POSITION_SIZE_USD // price)
+        if RISK_PER_TRADE_USD > 0:
+            qty = min(qty, int(RISK_PER_TRADE_USD // stop_distance))
+        if qty < 1:
+            self.db.add_log(
+                "WARNING",
+                f"{symbol}: cannot size a whole share within notional "
+                f"${POSITION_SIZE_USD:.0f} and risk ${RISK_PER_TRADE_USD:.0f} "
+                f"(price ${price:.2f}, stop distance ${stop_distance:.2f})",
+            )
+            return
+
+        # Short bracket: take-profit is BELOW entry, stop-loss is ABOVE entry
+        take_profit = round(price - target_distance, 2)
+        stop_loss = round(price + stop_distance, 2)
+        take_profit = min(take_profit, round(price - 0.02, 2))
+        stop_loss = max(stop_loss, round(price + 0.02, 2))
+
+        order_request = MarketOrderRequest(
+            symbol=symbol,
+            qty=qty,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+            order_class=OrderClass.BRACKET,
+            take_profit=TakeProfitRequest(limit_price=take_profit),
+            stop_loss=StopLossRequest(stop_price=stop_loss),
+        )
+        try:
+            order = await asyncio.to_thread(self.trading.submit_order, order_request)
+        except Exception as exc:
+            logger.error("Short order submission failed for %s: %s", symbol, exc)
+            self.db.add_log("ERROR", f"{symbol}: short order submission failed: {exc}")
+            return
+
+        self._open_entries[symbol] = {
+            "qty": float(qty),
+            "entry_price": price,
+            "side": "SELL",
+            "entry_time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        self.db.add_log(
+            "TRADE",
+            f"SELL {qty} {symbol} @ ~${price:.2f} | RSI {signal['rsi']:.1f} | "
+            f"VWAP ${signal['vwap']:.2f} | ATR ${signal['atr']:.3f} | "
+            f"sentiment {signal['sentiment']:.2f} "
+            f"({signal.get('sentiment_source', '?')}) | TP ${take_profit:.2f} | "
+            f"SL ${stop_loss:.2f} | risk ~${qty * stop_distance:.0f} | "
+            f"order {getattr(order, 'id', '?')}",
+        )
+        logger.info("Submitted bracket SELL for %s x%d @ ~%.2f", symbol, qty, price)
+
     # ------------------------------------------------------------------ #
     # signal-driven exits
     # ------------------------------------------------------------------ #
@@ -375,7 +497,7 @@ class ArgusBot:
     async def evaluate_and_close_exits(
         self, portfolio: Dict[str, Any], frames: Dict[str, pd.DataFrame]
     ) -> Dict[str, str]:
-        """Check each held long for an early-exit signal and close the ones
+        """Check each held position for an early-exit signal and close the ones
         that fire. Deliberately runs before the entry gates so a full book
         or a RISK_OFF tape can still take profit — exits are never blocked
         by the conditions that only govern new entries."""
@@ -383,17 +505,19 @@ class ArgusBot:
         for position in portfolio["positions"]:
             symbol = position["symbol"]
             if symbol in self._closing:
-                continue  # a close is already submitted, awaiting the fill
-            if float(position.get("qty", 0.0)) <= 0:
-                continue  # long-only engine; never signal-exit a short
+                continue
+            qty = float(position.get("qty", 0.0))
+            if qty == 0:
+                continue
+            side = "BUY" if qty > 0 else "SELL"
             bars = frames.get(symbol)
             if bars is None or bars.empty:
                 continue
-            exit_signal = self.evaluate_exit(bars)
+            exit_signal = self.evaluate_exit(bars, side)
             if exit_signal is None:
                 continue
             await self.close_position_now(symbol, position, exit_signal)
-            exits[symbol] = "signal-exit"
+            exits[symbol] = f"signal-exit-{side}"
         return exits
 
     async def _cancel_symbol_orders(self, symbol: str) -> None:
@@ -425,18 +549,15 @@ class ArgusBot:
         position: Dict[str, Any],
         exit_signal: Dict[str, Any],
     ) -> None:
-        """Cancel the bracket legs and market-close a held long early. The
-        resulting SELL fill is turned into a trade record on the next cycle
+        """Cancel the bracket legs and market-close a held position early. The
+        resulting fill is turned into a trade record on the next cycle
         by sync_portfolio/reconcile_closed_trade — exactly like a bracket
         TP/SL exit — so there is a single trade-recording path."""
-        # Guard against re-submitting the close while it is still in flight.
         self._closing.add(symbol)
         await self._cancel_symbol_orders(symbol)
         try:
             order = await asyncio.to_thread(self.trading.close_position, symbol)
         except Exception as exc:
-            # Let the next cycle retry: the legs are already cancelled, so a
-            # repeat cancel is a harmless no-op.
             self._closing.discard(symbol)
             logger.error("Signal-exit close failed for %s: %s", symbol, exc)
             self.db.add_log("ERROR", f"{symbol}: signal-exit close failed: {exc}")
@@ -447,14 +568,15 @@ class ArgusBot:
             entry.get("entry_price", position.get("avg_entry_price", 0.0))
         )
         qty = abs(float(position.get("qty", 0.0)))
+        side = entry.get("side", "BUY")
+        exit_label = "COVER" if side == "SELL" else "SIGNAL EXIT"
         self.db.add_log(
             "TRADE",
-            f"SIGNAL EXIT {symbol} x{qty:g} @ ~${exit_signal['close']:.2f} | "
-            f"RSI {exit_signal['rsi']:.1f} >= exit level "
-            f"{self.config['rsi_exit_signal']:.0f} | entry ~${entry_price:.2f} | "
+            f"{exit_label} {symbol} x{qty:g} @ ~${exit_signal['close']:.2f} | "
+            f"RSI {exit_signal['rsi']:.1f} | entry ~${entry_price:.2f} | "
             f"order {getattr(order, 'id', '?')}",
         )
-        logger.info("Signal-exit close for %s x%g", symbol, qty)
+        logger.info("Signal-exit close for %s x%g (%s)", symbol, qty, side)
 
     # ------------------------------------------------------------------ #
     # portfolio sync & trade reconciliation
@@ -503,11 +625,13 @@ class ArgusBot:
         # Adopt positions opened outside this process (e.g. before a restart)
         # so their eventual close still produces a trade record.
         for pos in snapshot:
+            qty = pos["qty"]
             self._open_entries.setdefault(
                 pos["symbol"],
                 {
-                    "qty": pos["qty"],
+                    "qty": abs(qty),
                     "entry_price": pos["avg_entry_price"],
+                    "side": "BUY" if qty > 0 else "SELL",
                     "entry_time": datetime.now(timezone.utc).isoformat(
                         timespec="seconds"
                     ),
@@ -539,11 +663,15 @@ class ArgusBot:
 
         qty = float(entry["qty"])
         entry_price = float(entry["entry_price"])
-        realized = None if exit_price is None else (exit_price - entry_price) * qty
+        side = entry.get("side", "BUY")
+        if side == "SELL":
+            realized = None if exit_price is None else (entry_price - exit_price) * qty
+        else:
+            realized = None if exit_price is None else (exit_price - entry_price) * qty
         exit_time = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self.db.record_trade(
             symbol=symbol,
-            side="LONG",
+            side=side,
             qty=qty,
             entry_price=entry_price,
             exit_price=exit_price,
@@ -552,7 +680,7 @@ class ArgusBot:
             realized_pnl=realized,
         )
         pnl_text = "unknown PnL" if realized is None else f"PnL ${realized:+.2f}"
-        self.db.add_log("TRADE", f"CLOSED {symbol} x{qty:g} — {pnl_text}")
+        self.db.add_log("TRADE", f"CLOSED {symbol} x{qty:g} ({side}) — {pnl_text}")
 
         # Feed the outcome back into the analyst's decision memory so
         # lesson extraction sees decision → result pairs.
@@ -794,21 +922,29 @@ class ArgusBot:
             return
 
         # Market regime gate: in RISK_OFF (index falling on stressed vol)
-        # every dip is a knife — stop opening new positions. Existing
-        # positions keep their brackets; the daily stop still guards them.
+        # every dip is a knife — stop opening new long positions. Shorts are
+        # still allowed in RISK_OFF since a falling market favours them.
+        # Existing positions keep their brackets; the daily stop still guards them.
         regime_info = await asyncio.to_thread(regime.get_regime)
         cycle["regime"] = regime_info
-        if regime.blocks_new_entries(regime_info):
+        regime_blocks = regime.blocks_new_entries(regime_info)
+        short_enabled = bool(self.config.get("short_enabled", 0.0))
+        if regime_blocks:
+            if not short_enabled:
+                self.db.add_log(
+                    "INFO",
+                    f"Regime RISK_OFF ({regime_info['symbol']} "
+                    f"${regime_info.get('close', 0):.2f} < EMA "
+                    f"${regime_info.get('ema', 0):.2f}, realized vol "
+                    f"{regime_info.get('realized_vol_pct', 0):.0f}%) — "
+                    f"no new entries this cycle (shorts disabled)",
+                )
+                cycle["stage"] = "risk-off"
+                return
             self.db.add_log(
                 "INFO",
-                f"Regime RISK_OFF ({regime_info['symbol']} "
-                f"${regime_info.get('close', 0):.2f} < EMA "
-                f"${regime_info.get('ema', 0):.2f}, realized vol "
-                f"{regime_info.get('realized_vol_pct', 0):.0f}%) — "
-                f"no new entries this cycle",
+                f"Regime RISK_OFF — BUY entries blocked, SELL entries allowed",
             )
-            cycle["stage"] = "risk-off"
-            return
 
         frames = await self.fetch_minute_bars()
         cycle["symbols_with_bars"] = len(frames)
@@ -834,8 +970,19 @@ class ArgusBot:
         pending_signals: List[Dict[str, Any]] = [
             s for s in results if isinstance(s, dict)
         ]
-        # Deepest dips first — also the truncation order for the risk agent.
+        # Deepest dips first for BUY, highest overextension first for SELL
         pending_signals.sort(key=lambda s: s["rsi"])
+
+        # Filter BUY signals in RISK_OFF regime
+        if regime_blocks:
+            pending_signals = [s for s in pending_signals if s["side"] != "BUY"]
+            if not pending_signals:
+                self.db.add_log(
+                    "INFO",
+                    "Regime RISK_OFF — no SELL signals this cycle",
+                )
+                cycle["stage"] = "risk-off"
+                return
 
         # Phase 2: LLM risk agent evaluates each signal (in parallel).
         analyst = get_analyst()
@@ -900,13 +1047,16 @@ class ArgusBot:
         for signal_info in pending_signals:
             if open_slots <= 0:
                 break
-            await self.place_bracket_buy(signal_info)
-            evaluated[signal_info["symbol"]] = "buy"
+            if signal_info["side"] == "BUY":
+                await self.place_bracket_buy(signal_info)
+            else:
+                await self.place_bracket_short(signal_info)
+            evaluated[signal_info["symbol"]] = signal_info["side"]
             open_slots -= 1
             # Record decision for memory
             try:
                 analyst.update_decision_memory(
-                    signal_info["symbol"], "buy", None, self.db
+                    signal_info["symbol"], signal_info["side"], None, self.db
                 )
             except Exception:
                 pass

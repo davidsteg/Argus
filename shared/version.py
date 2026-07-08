@@ -10,9 +10,33 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.8.0"
+__version__ = "2.9.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.9.0",
+        "date": "2026-07-08",
+        "title": "Short selling: symmetric SELL signals on RSI-overbought + VWAP-overextension",
+        "notes": [
+            "New short selling mode: when short_enabled is ON, the engine "
+            "generates SELL signals on RSI-overbought + price-above-VWAP + "
+            "bearish-sentiment setups — the mirror image of the existing "
+            "BUY logic.",
+            "Bracket SELL orders with buy-to-cover take-profit below entry "
+            "and stop-loss above entry, same ATR-scaled distances and "
+            "risk-based sizing as BUY orders.",
+            "Signal-driven covers: a held short closes early when RSI drops "
+            "below rsi_short_exit (default 30), symmetric to the long-side "
+            "RSI exit.",
+            "Regime-aware: SELL signals pass through RISK_OFF (falling "
+            "market favours shorts) while BUY signals are blocked.",
+            "New strategy parameters rsi_short_signal, rsi_short_exit, "
+            "short_enabled — all editable from Settings, tuned nightly by "
+            "the optimizer (added to the grid and modelled in the backtest).",
+            "Dashboard shows Side column (BUY/SELL) on positions and trade "
+            "history with green/red color coding.",
+        ],
+    },
     {
         "version": "2.8.0",
         "date": "2026-07-08",

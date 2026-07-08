@@ -75,6 +75,8 @@ PARAMETER_GRID: Dict[str, List[float]] = {
     "atr_stop_mult": [1.0, 1.5, 2.0],
     "atr_target_mult": [1.5, 2.0, 3.0, 4.0],
     "rsi_exit_signal": [60.0, 70.0, 80.0],
+    "rsi_short_signal": [60.0, 70.0, 80.0],
+    "rsi_short_exit": [20.0, 30.0, 40.0],
 }
 
 
@@ -122,6 +124,8 @@ def backtest(
     atr_stop_mult: float,
     atr_target_mult: float,
     rsi_exit_signal: float,
+    rsi_short_signal: float = 999.0,
+    rsi_short_exit: float = 0.0,
     cooldown_bars: int = 0,
 ) -> Tuple[float, float, int]:
     """Replay the live strategy over one symbol's bars.
@@ -133,6 +137,9 @@ def backtest(
     at or below the session VWAP (the live dip-confirmation gate), and the
     symbol must be past its post-loss cooldown. The live sentiment and
     regime gates cannot be replayed from bars alone and stay out.
+
+    Short entry: RSI crosses above the short signal level (previous bar
+    at/below, current above) with price above VWAP (overextended).
 
     Exit: intra-bar bracket simulation with the same ATR-multiple
     distances and floors the live engine uses (indicators.bracket_distances).
@@ -149,6 +156,7 @@ def backtest(
     n_trades = 0
 
     in_position = False
+    position_side = "BUY"
     stop_price = 0.0
     target_price = 0.0
     entry_price = 0.0
@@ -157,16 +165,25 @@ def backtest(
     for i in range(1, len(closes)):
         if in_position:
             exit_price: Optional[float] = None
-            if lows[i] <= stop_price:
-                exit_price = stop_price
-            elif highs[i] >= target_price:
-                exit_price = target_price
-            elif not np.isnan(rsi[i]) and rsi[i] >= rsi_exit_signal:
-                # Bounce exhausted: the live engine closes at market on the
-                # bar close, modelled here as a fill at that close.
-                exit_price = closes[i]
+            if position_side == "BUY":
+                if lows[i] <= stop_price:
+                    exit_price = stop_price
+                elif highs[i] >= target_price:
+                    exit_price = target_price
+                elif not np.isnan(rsi[i]) and rsi[i] >= rsi_exit_signal:
+                    exit_price = closes[i]
+            else:
+                if highs[i] >= stop_price:
+                    exit_price = stop_price
+                elif lows[i] <= target_price:
+                    exit_price = target_price
+                elif not np.isnan(rsi[i]) and rsi[i] <= rsi_short_exit:
+                    exit_price = closes[i]
             if exit_price is not None:
-                equity *= exit_price / entry_price
+                if position_side == "BUY":
+                    equity *= exit_price / entry_price
+                else:
+                    equity *= entry_price / exit_price
                 in_position = False
                 n_trades += 1
                 peak = max(peak, equity)
@@ -180,21 +197,42 @@ def backtest(
             continue
         if i <= cooldown_until:
             continue
-        if closes[i] > vwap[i]:
-            continue
-        if rsi[i - 1] >= rsi_buy_signal > rsi[i]:
+
+        # LONG entry: RSI crosses below buy_signal, price below VWAP
+        if rsi[i - 1] >= rsi_buy_signal > rsi[i] and closes[i] <= vwap[i]:
             in_position = True
+            position_side = "BUY"
             entry_price = closes[i]
             stop_distance, target_distance = bracket_distances(
                 entry_price, atr[i], atr_stop_mult, atr_target_mult
             )
             stop_price = entry_price - stop_distance
             target_price = entry_price + target_distance
+            continue
+
+        # SHORT entry: RSI crosses above short_signal, price above VWAP
+        if (
+            rsi_short_signal < 999.0
+            and rsi[i - 1] <= rsi_short_signal < rsi[i]
+            and closes[i] >= vwap[i]
+        ):
+            in_position = True
+            position_side = "SELL"
+            entry_price = closes[i]
+            stop_distance, target_distance = bracket_distances(
+                entry_price, atr[i], atr_stop_mult, atr_target_mult
+            )
+            stop_price = entry_price + stop_distance
+            target_price = entry_price - target_distance
+            continue
 
     # Force-close a dangling position at the final bar so the last trade
     # is reflected in the score.
     if in_position:
-        equity *= closes[-1] / entry_price
+        if position_side == "BUY":
+            equity *= closes[-1] / entry_price
+        else:
+            equity *= entry_price / closes[-1]
         n_trades += 1
         peak = max(peak, equity)
         max_drawdown = max(max_drawdown, (peak - equity) / peak)
@@ -236,6 +274,8 @@ class _WindowData:
         atr_stop_mult: float,
         atr_target_mult: float,
         rsi_exit_signal: float,
+        rsi_short_signal: float = 999.0,
+        rsi_short_exit: float = 0.0,
     ) -> Tuple[float, float, float, int]:
         """Aggregate (score, return, worst drawdown, trades) across symbols."""
         total_return = 0.0
@@ -253,6 +293,8 @@ class _WindowData:
                 atr_stop_mult=atr_stop_mult,
                 atr_target_mult=atr_target_mult,
                 rsi_exit_signal=rsi_exit_signal,
+                rsi_short_signal=rsi_short_signal,
+                rsi_short_exit=rsi_short_exit,
                 cooldown_bars=int(COOLDOWN_MINUTES),
             )
             total_return += ret
@@ -318,12 +360,14 @@ def run_optimization() -> Optional[Dict[str, float]]:
 
     # Score every combination on the train window, rank best-first.
     ranked: List[Tuple[float, Dict[str, float], Tuple[float, float, int]]] = []
-    for rsi_period, rsi_buy, stop_mult, target_mult, exit_signal in itertools.product(
+    for rsi_period, rsi_buy, stop_mult, target_mult, exit_signal, short_signal, short_exit in itertools.product(
         PARAMETER_GRID["rsi_period"],
         PARAMETER_GRID["rsi_buy_signal"],
         PARAMETER_GRID["atr_stop_mult"],
         PARAMETER_GRID["atr_target_mult"],
         PARAMETER_GRID["rsi_exit_signal"],
+        PARAMETER_GRID["rsi_short_signal"],
+        PARAMETER_GRID["rsi_short_exit"],
     ):
         score, total_return, drawdown, trades = train.score(
             rsi_period=int(rsi_period),
@@ -331,6 +375,8 @@ def run_optimization() -> Optional[Dict[str, float]]:
             atr_stop_mult=stop_mult,
             atr_target_mult=target_mult,
             rsi_exit_signal=exit_signal,
+            rsi_short_signal=short_signal,
+            rsi_short_exit=short_exit,
         )
         if trades == 0:
             continue
@@ -340,6 +386,8 @@ def run_optimization() -> Optional[Dict[str, float]]:
             "atr_stop_mult": stop_mult,
             "atr_target_mult": target_mult,
             "rsi_exit_signal": exit_signal,
+            "rsi_short_signal": short_signal,
+            "rsi_short_exit": short_exit,
         }
         ranked.append((score, params, (total_return, drawdown, trades)))
     ranked.sort(key=lambda item: item[0], reverse=True)
@@ -368,6 +416,8 @@ def run_optimization() -> Optional[Dict[str, float]]:
             atr_stop_mult=params["atr_stop_mult"],
             atr_target_mult=params["atr_target_mult"],
             rsi_exit_signal=params["rsi_exit_signal"],
+            rsi_short_signal=params.get("rsi_short_signal", 999.0),
+            rsi_short_exit=params.get("rsi_short_exit", 0.0),
         )
         if val_return > 0.0:
             best_params, best_train_score, train_stats = params, score, stats
@@ -383,12 +433,13 @@ def run_optimization() -> Optional[Dict[str, float]]:
         )
         return None
 
-    # news_cutoff and analyst_enabled are not part of the technical grid;
-    # carry the live values forward so a config read after this write stays
-    # complete.
+    # news_cutoff, analyst_enabled and short_enabled are not part of the
+    # technical grid; carry the live values forward so a config read after
+    # this write stays complete.
     current = db.get_config()
     best_params["news_cutoff"] = current["news_cutoff"]
     best_params["analyst_enabled"] = current.get("analyst_enabled", 0.0)
+    best_params["short_enabled"] = current.get("short_enabled", 0.0)
 
     # Post-optimization LLM review (if analyst is enabled).
     # The analyst can accept, override (pick a different rank), or reject
@@ -436,6 +487,8 @@ def run_optimization() -> Optional[Dict[str, float]]:
         f"New parameters live: RSI({int(best_params['rsi_period'])}) "
         f"buy<{best_params['rsi_buy_signal']:.0f}, "
         f"exit>{best_params['rsi_exit_signal']:.0f}, "
+        f"short>{best_params.get('rsi_short_signal', 70):.0f}, "
+        f"cover<{best_params.get('rsi_short_exit', 30):.0f}, "
         f"stop {best_params['atr_stop_mult']:.1f}×ATR, "
         f"target {best_params['atr_target_mult']:.1f}×ATR | "
         f"train: {total_return * 100:+.2f}% return, "

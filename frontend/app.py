@@ -157,6 +157,21 @@ PARAM_META: Dict[str, Dict[str, Any]] = {
         "hint": "close a long early when RSI recovers above this level",
         "min": 50.0, "max": 95.0, "step": 0.5, "int": False,
     },
+    "rsi_short_signal": {
+        "label": "RSI Short Signal",
+        "hint": "enter short when RSI rises above this level",
+        "min": 50.0, "max": 95.0, "step": 0.5, "int": False,
+    },
+    "rsi_short_exit": {
+        "label": "RSI Short Exit",
+        "hint": "cover a short early when RSI drops below this level",
+        "min": 5.0, "max": 50.0, "step": 0.5, "int": False,
+    },
+    "short_enabled": {
+        "label": "Short Selling",
+        "hint": "enable short selling (SELL) signals alongside BUY signals",
+        "min": 0.0, "max": 1.0, "step": 1.0, "int": True, "toggle": True,
+    },
     "news_cutoff": {
         "label": "News Cutoff",
         "hint": "minimum sentiment score to trade (0.50 = neutral/no news)",
@@ -564,7 +579,7 @@ def dashboard() -> None:
         ".pnl-pos { color: #34d399 !important; }"
         ".pnl-neg { color: #f87171 !important; }"
         ".pos-grid { display: grid;"
-        " grid-template-columns: 1.1fr 0.7fr 1fr 1fr 1.1fr 1.5fr 2.75rem;"
+        " grid-template-columns: 1.1fr 0.5fr 0.7fr 1fr 1fr 1.1fr 1.5fr 2.75rem;"
         " column-gap: 0.5rem; align-items: center; width: 100%; }"
         "</style>"
     )
@@ -824,7 +839,7 @@ def dashboard() -> None:
                             f"{TEXT_MUTED} border-b border-[#222938] pb-1"
                         ):
                             for header in (
-                                "Symbol", "Qty", "Entry", "Now",
+                                "Symbol", "Side", "Qty", "Entry", "Now",
                                 "Value", "Unrealized PnL", "",
                             ):
                                 ui.label(header)
@@ -919,6 +934,11 @@ def dashboard() -> None:
                             "columnDefs": [
                                 {"headerName": "Closed", "field": "closed", "flex": 1.2},
                                 {"headerName": "Symbol", "field": "symbol", "flex": 0.9},
+                                {"headerName": "Side", "field": "side", "flex": 0.5,
+                                 "cellClassRules": {
+                                     "pnl-pos": "x === 'BUY'",
+                                     "pnl-neg": "x === 'SELL'",
+                                 }},
                                 {"headerName": "Qty", "field": "qty", "flex": 0.6},
                                 {
                                     "headerName": "Entry",
@@ -1234,7 +1254,7 @@ def dashboard() -> None:
                             "walk-forward optimizer (midnight Europe/Zurich) "
                             "re-tunes and overwrites these values."
                         ).classes(f"text-xs {TEXT_MUTED}")
-                        param_inputs: Dict[str, ui.number] = {}
+                        param_inputs: Dict[str, Any] = {}
                         for key, meta in PARAM_META.items():
                             with ui.row().classes(
                                 "w-full items-center justify-between gap-4 "
@@ -1247,16 +1267,22 @@ def dashboard() -> None:
                                     ui.label(meta["hint"]).classes(
                                         f"text-xs {TEXT_MUTED}"
                                     )
-                                param_inputs[key] = ui.number(
-                                    value=(
-                                        int(initial_config[key])
-                                        if meta["int"]
-                                        else round(float(initial_config[key]), 2)
-                                    ),
-                                    min=meta["min"],
-                                    max=meta["max"],
-                                    step=meta["step"],
-                                ).props("dense outlined").classes("w-32 shrink-0")
+                                if meta.get("toggle"):
+                                    sw = ui.switch(
+                                        value=bool(int(initial_config.get(key, 0.0)))
+                                    ).props("dense")
+                                    param_inputs[key] = sw
+                                else:
+                                    param_inputs[key] = ui.number(
+                                        value=(
+                                            int(initial_config[key])
+                                            if meta["int"]
+                                            else round(float(initial_config[key]), 2)
+                                        ),
+                                        min=meta["min"],
+                                        max=meta["max"],
+                                        step=meta["step"],
+                                    ).props("dense outlined").classes("w-32 shrink-0")
 
                         async def apply_parameters() -> None:
                             updates: Dict[str, float] = {}
@@ -1268,13 +1294,16 @@ def dashboard() -> None:
                                         type="warning",
                                     )
                                     return
-                                value = max(
-                                    float(meta["min"]),
-                                    min(float(meta["max"]), float(raw)),
-                                )
-                                if meta["int"]:
-                                    value = float(int(value))
-                                updates[key] = value
+                                if meta.get("toggle"):
+                                    updates[key] = 1.0 if raw else 0.0
+                                else:
+                                    value = max(
+                                        float(meta["min"]),
+                                        min(float(meta["max"]), float(raw)),
+                                    )
+                                    if meta["int"]:
+                                        value = float(int(value))
+                                    updates[key] = value
                             if updates["atr_target_mult"] <= updates["atr_stop_mult"]:
                                 ui.notify(
                                     "Take profit ≤ stop loss (× ATR): negative "
@@ -1308,21 +1337,27 @@ def dashboard() -> None:
                             ):
                                 return
                             for key, meta in PARAM_META.items():
-                                param_inputs[key].value = (
-                                    int(DEFAULT_CONFIG[key])
-                                    if meta["int"]
-                                    else DEFAULT_CONFIG[key]
-                                )
+                                if meta.get("toggle"):
+                                    param_inputs[key].value = bool(int(DEFAULT_CONFIG[key]))
+                                else:
+                                    param_inputs[key].value = (
+                                        int(DEFAULT_CONFIG[key])
+                                        if meta["int"]
+                                        else DEFAULT_CONFIG[key]
+                                    )
                             await apply_parameters()
 
                         def reload_from_db() -> None:
                             live = db.get_config()
                             for key, meta in PARAM_META.items():
-                                param_inputs[key].value = (
-                                    int(live[key])
-                                    if meta["int"]
-                                    else round(float(live[key]), 2)
-                                )
+                                if meta.get("toggle"):
+                                    param_inputs[key].value = bool(int(live.get(key, 0.0)))
+                                else:
+                                    param_inputs[key].value = (
+                                        int(live[key])
+                                        if meta["int"]
+                                        else round(float(live[key]), 2)
+                                    )
                             ui.notify("Reloaded live values from the database")
 
                         with ui.row().classes("w-full gap-2 mt-2"):
@@ -1746,8 +1781,10 @@ def dashboard() -> None:
         positions_container.clear()
         with positions_container:
             for pos in positions:
+                qty = pos["qty"]
+                side = "BUY" if qty > 0 else "SELL"
                 pnl = pos["unrealized_pnl"]
-                cost_basis = pos["avg_entry_price"] * pos["qty"]
+                cost_basis = pos["avg_entry_price"] * abs(qty)
                 pnl_pct = (
                     pnl / cost_basis * 100.0
                     if pnl is not None and cost_basis
@@ -1757,7 +1794,9 @@ def dashboard() -> None:
                     "pos-grid py-1.5 border-b border-[#222938] text-sm"
                 ):
                     ui.label(pos["symbol"]).classes("font-bold text-white")
-                    ui.label(f"{pos['qty']:g}").classes("font-mono text-gray-300")
+                    side_color = "text-green-400" if side == "BUY" else "text-red-400"
+                    ui.label(side).classes(f"font-mono font-semibold {side_color}")
+                    ui.label(f"{abs(qty):g}").classes("font-mono text-gray-300")
                     ui.label(f"${pos['avg_entry_price']:,.2f}").classes(
                         "font-mono text-gray-300"
                     )
@@ -1996,11 +2035,13 @@ def dashboard() -> None:
         rows = []
         for trade in trades:
             pnl = trade["realized_pnl"]
+            side = trade.get("side", "BUY")
             cost_basis = trade["entry_price"] * trade["qty"]
             rows.append(
                 {
                     "closed": fmt_short(trade["exit_time"]),
                     "symbol": trade["symbol"],
+                    "side": side,
                     "qty": trade["qty"],
                     "entry_price": trade["entry_price"],
                     "exit_price": trade["exit_price"],
