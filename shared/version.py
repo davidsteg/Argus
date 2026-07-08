@@ -10,9 +10,19 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.4.5"
+__version__ = "2.4.6"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.4.6",
+        "date": "2026-07-08",
+        "title": "Log trade review errors to DB for visibility",
+        "notes": [
+            "Trade review and optimization review errors are now logged to "
+            "the DB logs table so they're visible via GET /logs — no need "
+            "for docker exec to see the failure reason",
+        ],
+    },
     {
         "version": "2.4.5",
         "date": "2026-07-07",

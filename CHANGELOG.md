@@ -9,6 +9,13 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.4.6] - 2026-07-08
+
+### Fixed
+- Trade review and optimization review errors are now logged to the DB
+  logs table so they're visible via `GET /logs` — no need for `docker exec`
+  to see the failure reason
+
 ## [v2.4.5] - 2026-07-07
 
 ### Fixed
