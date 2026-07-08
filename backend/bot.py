@@ -119,6 +119,7 @@ class ArgusBot:
         self._shutdown = asyncio.Event()
         self._cycle_count: int = 0
         self._review_task: Optional[asyncio.Task] = None
+        self._screener_task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------ #
     # loser cooldown
@@ -925,6 +926,12 @@ class ArgusBot:
                 self._run_periodic_reviews(regime_info, self._cycle_count)
             )
 
+        # Periodic opportunity screener runs in the background.
+        if self._screener_task is None or self._screener_task.done():
+            self._screener_task = asyncio.create_task(
+                self._run_screener()
+            )
+
     async def _run_periodic_reviews(
         self, regime_info: Dict[str, Any], cycle_count: int
     ) -> None:
@@ -984,6 +991,44 @@ class ArgusBot:
                 await asyncio.to_thread(analyst.extract_lessons, self.db)
         except Exception as exc:
             logger.error("Lesson extraction failed: %s", exc)
+
+    async def _run_screener(self) -> None:
+        """Periodic opportunity screener: scan a wide pool for RSI-oversold
+        + VWAP-dip setups and publish the top candidates for the dashboard
+        and the engine to consume. Runs at most once per 5 minutes."""
+        from screener import run_screener
+
+        while not self._shutdown.is_set():
+            try:
+                enabled = bool(self.config.get("screener_enabled", 0.0))
+                if not enabled:
+                    await asyncio.sleep(60)
+                    continue
+                pool_size = int(self.config.get("screener_pool_size", 200.0))
+                candidates = await asyncio.to_thread(
+                    run_screener, ALPACA_API_KEY, ALPACA_SECRET_KEY, pool_size
+                )
+                max_candidates = int(
+                    self.config.get("screener_max_candidates", 5.0)
+                )
+                top = candidates[:max_candidates] if candidates else []
+                self.db.set_state("screener_candidates", top)
+                self.db.add_log(
+                    "INFO",
+                    f"Screener: {len(candidates)} candidates found "
+                    f"(top: {', '.join(c['symbol'] for c in top[:5])})"
+                    if top
+                    else "Screener: no candidates this pass",
+                )
+            except Exception as exc:
+                logger.error("Screener pass failed: %s", exc)
+            # Run at most once per 5 minutes.
+            try:
+                await asyncio.wait_for(
+                    self._shutdown.wait(), timeout=300
+                )
+            except asyncio.TimeoutError:
+                pass
 
 
 class EngineController:

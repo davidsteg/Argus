@@ -56,6 +56,9 @@ DEFAULT_CONFIG: Dict[str, float] = {
     "analyst_enabled": 0.0,    # 0 = off, 1 = on — LLM strategy analyst toggle
     "watchlist_refresh_minutes": 15.0,      # dynamic-mode screener refresh cadence
     "watchlist_override_ttl_minutes": 30.0,  # analyst watchlist override expiry
+    "screener_enabled": 0.0,       # 0 = off, 1 = on — opportunity screener
+    "screener_pool_size": 200.0,   # how many most-active symbols to scan
+    "screener_max_candidates": 5.0,  # top N candidates to surface
 }
 
 STATUS_RUNNING = "RUNNING"

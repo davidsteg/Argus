@@ -189,6 +189,24 @@ WATCHLIST_PARAM_META: Dict[str, Dict[str, Any]] = {
     },
 }
 
+SCREENER_PARAM_META: Dict[str, Dict[str, Any]] = {
+    "screener_enabled": {
+        "label": "Opportunity Screener",
+        "hint": "scan a wide pool for RSI-oversold + VWAP-dip setups",
+        "min": 0.0, "max": 1.0, "step": 1.0, "int": True,
+    },
+    "screener_pool_size": {
+        "label": "Pool Size",
+        "hint": "how many most-active symbols to scan each pass",
+        "min": 50.0, "max": 500.0, "step": 10.0, "int": True,
+    },
+    "screener_max_candidates": {
+        "label": "Max Candidates",
+        "hint": "top N candidates to surface to the dashboard",
+        "min": 1.0, "max": 50.0, "step": 1.0, "int": True,
+    },
+}
+
 ENVIRONMENT_LABELS: Dict[str, str] = {
     "universe_mode": "Universe",
     "watchlist_size": "Watchlist size",
@@ -244,6 +262,7 @@ def fetch_snapshot(log_limit: int, equity_since: Optional[str]) -> Dict[str, Any
         "analyst_optimization": db.get_state("analyst_optimization"),
         "analyst_trades": db.get_state("analyst_trades"),
         "analyst_config": db.get_state("analyst_config") or {},
+        "screener_candidates": db.get_state("screener_candidates") or [],
     }
 
 
@@ -851,6 +870,13 @@ def dashboard() -> None:
                         ).classes(f"text-xs {TEXT_MUTED} mt-2")
 
                     with card():
+                        card_title("🔍 Screener Candidates", "RSI-oversold + VWAP-dip setups")
+                        screener_container = ui.column().classes("w-full gap-0")
+                        screener_empty = ui.label(
+                            "Screener disabled or no candidates yet — enable it in Settings"
+                        ).classes(f"text-sm {TEXT_MUTED}")
+
+                    with card():
                         card_title("🕑 Recent Activity", "full log in Logs tab")
                         activity_container = ui.column().classes(
                             "w-full gap-0 font-mono"
@@ -1374,6 +1400,81 @@ def dashboard() -> None:
                             ).props("no-caps flat")
 
                     with card():
+                        card_title("🔍 Opportunity Screener")
+                        ui.label(
+                            "Scans a wide pool of most-active symbols for "
+                            "RSI-oversold + VWAP-dip + bullish-sentiment "
+                            "setups — the same pattern the engine trades. "
+                            "Results appear on the Overview tab and at "
+                            "GET /screener. Runs every 5 minutes in the "
+                            "background."
+                        ).classes(f"text-xs {TEXT_MUTED}")
+                        screener_param_inputs: Dict[str, ui.number] = {}
+                        for key, meta in SCREENER_PARAM_META.items():
+                            with ui.row().classes(
+                                "w-full items-center justify-between gap-4 "
+                                "flex-nowrap"
+                            ):
+                                with ui.column().classes("gap-0 min-w-0"):
+                                    ui.label(meta["label"]).classes(
+                                        "text-sm text-white"
+                                    )
+                                    ui.label(meta["hint"]).classes(
+                                        f"text-xs {TEXT_MUTED}"
+                                    )
+                                if key == "screener_enabled":
+                                    screener_param_inputs[key] = ui.number(
+                                        value=int(initial_config.get(key, 0.0)),
+                                        min=meta["min"],
+                                        max=meta["max"],
+                                        step=meta["step"],
+                                    ).props("dense outlined").classes("w-32 shrink-0")
+                                else:
+                                    screener_param_inputs[key] = ui.number(
+                                        value=int(initial_config.get(key, 200.0)),
+                                        min=meta["min"],
+                                        max=meta["max"],
+                                        step=meta["step"],
+                                    ).props("dense outlined").classes("w-32 shrink-0")
+
+                        async def apply_screener_parameters() -> None:
+                            updates: Dict[str, float] = {}
+                            for key, meta in SCREENER_PARAM_META.items():
+                                raw = screener_param_inputs[key].value
+                                if raw is None:
+                                    ui.notify(
+                                        f"{meta['label']} is empty",
+                                        type="warning",
+                                    )
+                                    return
+                                value = max(
+                                    float(meta["min"]),
+                                    min(float(meta["max"]), float(raw)),
+                                )
+                                updates[key] = float(int(value))
+                            await run.io_bound(db.set_config, updates)
+                            ui.notify(
+                                "Screener settings applied",
+                                type="positive",
+                            )
+
+                        def reload_screener_from_db() -> None:
+                            live = db.get_config()
+                            for key in SCREENER_PARAM_META:
+                                screener_param_inputs[key].value = int(
+                                    live.get(key, 0.0 if key == "screener_enabled" else 200.0)
+                                )
+                            ui.notify("Reloaded live values from the database")
+
+                        with ui.row().classes("w-full gap-2 mt-2"):
+                            ui.button(
+                                "Apply", on_click=apply_screener_parameters
+                            ).props("no-caps unelevated color=primary")
+                            ui.button(
+                                "Reload from DB", on_click=reload_screener_from_db
+                            ).props("no-caps flat")
+
+                    with card():
                         card_title("🖥️ Dashboard")
                         with ui.row().classes(
                             "w-full items-center justify-between"
@@ -1771,6 +1872,37 @@ def dashboard() -> None:
             else "Last optimization: —"
         )
 
+    def render_screener(snapshot: Dict[str, Any]) -> None:
+        candidates = snapshot.get("screener_candidates") or []
+        screener_empty.set_visibility(not candidates)
+        screener_container.clear()
+        with screener_container:
+            for c in candidates:
+                with ui.row().classes(
+                    "w-full items-center justify-between py-1 "
+                    "border-b border-[#222938] text-sm"
+                ):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.label(c["symbol"]).classes(
+                            "font-bold text-white"
+                        )
+                        ui.label(f"RSI {c['rsi']}").classes(
+                            "font-mono text-amber-400"
+                        )
+                        ui.label(f"${c['price']}").classes(
+                            "font-mono text-gray-300"
+                        )
+                    with ui.row().classes("items-center gap-3"):
+                        ui.label(f"VWAP ${c['vwap']}").classes(
+                            f"text-xs {TEXT_MUTED}"
+                        )
+                        ui.label(f"depth {c['rsi_depth']}").classes(
+                            "text-xs text-emerald-400"
+                        )
+                        ui.label(c["sentiment_source"]).classes(
+                            "text-xs text-sky-300"
+                        )
+
     def render_trades(snapshot: Dict[str, Any]) -> None:
         trades = snapshot["trades"]
         stats = snapshot["trade_stats"]
@@ -2097,6 +2229,7 @@ def dashboard() -> None:
         render_positions(snapshot)
         render_regime_and_engine(snapshot)
         render_parameters(snapshot)
+        render_screener(snapshot)
         render_trades(snapshot)
         render_analyst(snapshot)
         render_environment(snapshot)

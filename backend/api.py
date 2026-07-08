@@ -307,6 +307,19 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
     async def logs(limit: int = Query(20, ge=1, le=500)) -> Dict[str, Any]:
         return {"logs": db.get_logs(limit)}
 
+    @app.get("/screener")
+    async def screener() -> Dict[str, Any]:
+        """Latest opportunity screener results — RSI-oversold + VWAP-dip
+        candidates found by the periodic background scan."""
+        candidates = db.get_state("screener_candidates", [])
+        config = db.get_config()
+        return {
+            "enabled": bool(config.get("screener_enabled", 0.0)),
+            "candidates": candidates,
+            "pool_size": int(config.get("screener_pool_size", 200.0)),
+            "max_candidates": int(config.get("screener_max_candidates", 5.0)),
+        }
+
     # ------------------------------------------------------------------ #
     # action endpoints
     # ------------------------------------------------------------------ #

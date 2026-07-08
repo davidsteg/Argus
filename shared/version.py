@@ -10,9 +10,26 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.7.0"
+__version__ = "2.8.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.8.0",
+        "date": "2026-07-08",
+        "title": "Opportunity screener: find CRINX-like setups across a wide universe",
+        "notes": [
+            "New backend/screener.py module scans the top 200 most-active "
+            "symbols for the same RSI-oversold + VWAP-dip + bullish-sentiment "
+            "pattern the engine trades, ranks by dip depth, and publishes "
+            "candidates to the dashboard and GET /screener.",
+            "Reuses the exact same indicators.py and sentiment.py code so "
+            "screener and live signals never drift.",
+            "Runs every 5 minutes as a background task in the engine; "
+            "configurable from Settings (toggle, pool size, max candidates).",
+            "Candidates shown on the Overview tab with RSI, price, VWAP, "
+            "dip depth, and sentiment source.",
+        ],
+    },
     {
         "version": "2.7.0",
         "date": "2026-07-08",

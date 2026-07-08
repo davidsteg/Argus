@@ -9,6 +9,22 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.8.0] - 2026-07-08
+
+### Added
+- **Opportunity screener** (`backend/screener.py`) — scans the top 200
+  most-active symbols for RSI-oversold + VWAP-dip + bullish-sentiment
+  setups, the same pattern the engine trades. Ranks by dip depth and
+  publishes candidates to the dashboard and `GET /screener`. Reuses the
+  exact same `indicators.py` and `sentiment.py` code so screener and live
+  signals never drift.
+- Runs every 5 minutes as a background task in the engine; configurable
+  from Settings (toggle, pool size, max candidates).
+- Candidates shown on the Overview tab with RSI, price, VWAP, dip depth,
+  and sentiment source.
+- New config params: `screener_enabled`, `screener_pool_size`,
+  `screener_max_candidates` in `DEFAULT_CONFIG`.
+
 ## [v2.7.0] - 2026-07-08
 
 ### Added
