@@ -293,7 +293,7 @@ class StrategyAnalyst:
                 system_prompt=RISK_AGENT_PROMPT,
                 client_override=self._risk_client,
                 model_override=self._config.get("risk_model") or None,
-                max_tokens=1024,
+                max_tokens=2048,
             )
         except Exception as exc:
             logger.warning("Risk agent failed for %s: %s", signal.get("symbol"), exc)
@@ -370,7 +370,7 @@ class StrategyAnalyst:
             result = self._call_llm(
                 prompt_data, "portfolio",
                 system_prompt=PORTFOLIO_MANAGER_PROMPT,
-                max_tokens=1024,
+                max_tokens=2048,
             )
         except Exception as exc:
             logger.warning("Portfolio manager failed: %s", exc)

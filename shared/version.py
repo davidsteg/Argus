@@ -10,9 +10,26 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.13.2"
+__version__ = "2.13.3"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.13.3",
+        "date": "2026-07-09",
+        "title": "Risk agent and portfolio manager get enough token budget to stop truncating",
+        "notes": [
+            "The risk agent and portfolio manager — the two agents in the "
+            "live order-placing path, and the two that fail OPEN (auto-"
+            "approve) on any error — were capped at max_tokens=1024, tighter "
+            "than every other agent's 2048+ default. deepseek-v4-flash's "
+            "response was observed getting hard-cut mid-JSON ('...\"warnings\": "
+            "[\"RSI not deeply oversold\", \"Caution' — then nothing), which the "
+            "parser correctly rejected as invalid JSON, silently letting the "
+            "signal through the risk agent instead of the reject it was "
+            "actually generating.",
+            "Both bumped to max_tokens=2048 to match the module default.",
+        ],
+    },
     {
         "version": "2.13.2",
         "date": "2026-07-09",

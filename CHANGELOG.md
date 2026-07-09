@@ -9,6 +9,19 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.13.3] - 2026-07-09
+
+### Fixed
+- **Risk agent and portfolio manager get enough token budget to stop
+  truncating.** These two agents run in the live order-placing path and both
+  fail *open* (auto-approve) on any error — yet they were capped at
+  `max_tokens=1024`, tighter than every other agent's 2048+ default.
+  `deepseek-v4-flash`'s response was observed getting hard-cut mid-JSON
+  (`..."warnings": ["RSI not deeply oversold", "Caution` — then nothing),
+  which the parser correctly rejected as invalid JSON — silently letting the
+  signal through the risk agent instead of the reject it was actually
+  generating. Both bumped to `max_tokens=2048` to match the module default.
+
 ## [v2.13.2] - 2026-07-09
 
 ### Fixed
