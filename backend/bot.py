@@ -440,7 +440,25 @@ class ArgusBot:
         self._open_entries[symbol] = {
             "qty": float(qty),
             "entry_price": price,
+            "side": "BUY",
             "entry_time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "entry_rsi": signal["rsi"],
+            "entry_vwap": signal["vwap"],
+            "entry_atr": signal["atr"],
+            "entry_sentiment": signal["sentiment"],
+            "sentiment_source": signal.get("sentiment_source"),
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "entry_reason": (
+                f"RSI {signal['rsi']:.1f} was oversold (below the "
+                f"{self.config['rsi_buy_signal']:.0f} buy level) while price "
+                f"${price:.2f} sat below VWAP ${signal['vwap']:.2f} — a genuine "
+                f"mean-reversion dip, not a falling knife. News sentiment "
+                f"{signal['sentiment']:.2f} ({signal.get('sentiment_source', '?')}) "
+                f"cleared the {self.config['news_cutoff']:.2f} cutoff, so a long "
+                f"was opened with a {self.config['atr_stop_mult']:.1f}×ATR stop "
+                f"and {self.config['atr_target_mult']:.1f}×ATR target."
+            ),
         }
         self.db.add_log(
             "TRADE",
@@ -520,6 +538,24 @@ class ArgusBot:
             "entry_price": price,
             "side": "SELL",
             "entry_time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "entry_rsi": signal["rsi"],
+            "entry_vwap": signal["vwap"],
+            "entry_atr": signal["atr"],
+            "entry_sentiment": signal["sentiment"],
+            "sentiment_source": signal.get("sentiment_source"),
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "entry_reason": (
+                f"RSI {signal['rsi']:.1f} was overbought (above the "
+                f"{self.config['rsi_short_signal']:.0f} short level) while price "
+                f"${price:.2f} sat above VWAP ${signal['vwap']:.2f} — an orderly "
+                f"overextension, not a parabolic squeeze. News sentiment "
+                f"{signal['sentiment']:.2f} ({signal.get('sentiment_source', '?')}) "
+                f"stayed below the {1.0 - self.config['news_cutoff']:.2f} short "
+                f"cutoff (not too bullish to fade), so a short was opened with a "
+                f"{self.config['atr_stop_mult']:.1f}×ATR stop and "
+                f"{self.config['atr_target_mult']:.1f}×ATR target."
+            ),
         }
         self.db.add_log(
             "TRADE",
@@ -611,6 +647,13 @@ class ArgusBot:
         )
         qty = abs(float(position.get("qty", 0.0)))
         side = entry.get("side", "BUY")
+        if symbol in self._open_entries:
+            verb = "RSI dropped back to" if side == "SELL" else "RSI recovered to"
+            self._open_entries[symbol]["exit_reason"] = (
+                f"Signal exit: {verb} {exit_signal['rsi']:.1f}, so the "
+                f"reversion was banked early at ~${exit_signal['close']:.2f} "
+                "rather than waiting for the bracket."
+            )
         exit_label = "COVER" if side == "SELL" else "SIGNAL EXIT"
         self.db.add_log(
             "TRADE",
@@ -685,6 +728,36 @@ class ArgusBot:
         self.db.record_equity(equity)
         return {"equity": equity, "positions": snapshot}
 
+    @staticmethod
+    def _infer_exit_reason(
+        side: str,
+        exit_price: Optional[float],
+        take_profit: Optional[float],
+        stop_loss: Optional[float],
+    ) -> str:
+        """Label a bracket exit (no signal-exit reason was recorded) by seeing
+        whether the fill landed nearer the take-profit or the stop-loss leg."""
+        if exit_price is None:
+            return (
+                "Position closed but the exit fill could not be reconciled — "
+                "treated conservatively as a loss for cooldown purposes."
+            )
+        if take_profit is None or stop_loss is None:
+            return (
+                "Position closed via its bracket, an end-of-day flatten, or "
+                "outside this engine (bracket levels were not on record)."
+            )
+        nearer_target = abs(exit_price - take_profit) <= abs(exit_price - stop_loss)
+        if nearer_target:
+            return (
+                f"Take-profit leg filled: exit ~${exit_price:.2f} reached the "
+                f"${take_profit:.2f} target."
+            )
+        return (
+            f"Stop-loss leg filled: exit ~${exit_price:.2f} hit the "
+            f"${stop_loss:.2f} stop."
+        )
+
     async def reconcile_closed_trade(self, symbol: str, entry: Dict[str, Any]) -> None:
         """A tracked position vanished — find its exit fill and log the trade."""
         side = entry.get("side", "BUY")
@@ -715,6 +788,20 @@ class ArgusBot:
         else:
             realized = None if exit_price is None else (exit_price - entry_price) * qty
         exit_time = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        # Preserve the entry rationale + bracket levels captured at open time,
+        # and — if the position left via its bracket rather than a signal exit
+        # (no exit_reason recorded) — infer whether the take-profit or stop-loss
+        # leg filled from where the exit landed relative to those levels.
+        context = {
+            key: entry.get(key)
+            for key in (
+                "entry_rsi", "entry_vwap", "entry_atr", "entry_sentiment",
+                "sentiment_source", "stop_loss", "take_profit", "entry_reason",
+            )
+        }
+        context["exit_reason"] = entry.get("exit_reason") or self._infer_exit_reason(
+            side, exit_price, entry.get("take_profit"), entry.get("stop_loss")
+        )
         self.db.record_trade(
             symbol=symbol,
             side=side,
@@ -724,6 +811,7 @@ class ArgusBot:
             entry_time=entry["entry_time"],
             exit_time=exit_time,
             realized_pnl=realized,
+            context=context,
         )
         pnl_text = "unknown PnL" if realized is None else f"PnL ${realized:+.2f}"
         self.db.add_log("TRADE", f"CLOSED {symbol} x{qty:g} ({side}) — {pnl_text}")

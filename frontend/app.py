@@ -441,6 +441,46 @@ def call_backend_json(
         return {"ok": False, "error": str(exc)}
 
 
+def fetch_trade_bars(
+    symbol: str, entry_iso: str, exit_iso: Optional[str]
+) -> List[List[float]]:
+    """Blocking fetch of 1-minute bars spanning a closed trade's hold window
+    (run via io_bound). Returns ``[[epoch_ms, close], …]`` for the per-trade
+    info chart, padded a few minutes either side so the entry and exit sit
+    inside the frame. Any failure (no data, feed hiccup) returns an empty list
+    and the dialog falls back to a 'chart unavailable' note."""
+    from alpaca.data.historical import StockHistoricalDataClient
+    from alpaca.data.requests import StockBarsRequest
+    from alpaca.data.timeframe import TimeFrame
+
+    start = to_local(entry_iso)
+    end = to_local(exit_iso) if exit_iso else None
+    if start is None:
+        return []
+    end = end or (start + timedelta(hours=1))
+    pad = timedelta(minutes=10)
+    try:
+        client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+        request = StockBarsRequest(
+            symbol_or_symbols=symbol,
+            timeframe=TimeFrame.Minute,
+            start=(start - pad).astimezone(timezone.utc),
+            end=(end + pad).astimezone(timezone.utc),
+        )
+        bars = client.get_stock_bars(request)
+    except Exception as exc:  # noqa: BLE001 — best-effort, chart is optional
+        logger.warning("Trade-bar fetch failed for %s: %s", symbol, exc)
+        return []
+
+    series: List[List[float]] = []
+    for bar in bars.data.get(symbol, []):
+        ts = bar.timestamp
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        series.append([ts.timestamp() * 1000.0, round(float(bar.close), 4)])
+    return series
+
+
 # ---------------------------------------------------------------------- #
 # formatting helpers
 # ---------------------------------------------------------------------- #
@@ -684,6 +724,32 @@ def equity_chart_options() -> Dict[str, Any]:
     return _base_time_chart(SERIES_BLUE, area=True)
 
 
+def trade_hold_chart_options() -> Dict[str, Any]:
+    """Price chart for a single trade's hold window (per-trade info popup).
+
+    Reuses the dark time-axis base but formats both the axis and the tooltip
+    as share prices rather than account dollars; entry/exit markers and the
+    stop/target lines are layered on at populate time in show_trade_info."""
+    options = _base_time_chart(SERIES_BLUE, area=True)
+    price_fmt = (
+        "(v) => '$' + Number(v).toLocaleString(undefined,"
+        " {minimumFractionDigits: 2, maximumFractionDigits: 2})"
+    )
+    options["yAxis"]["axisLabel"][":formatter"] = price_fmt
+    options["tooltip"][":formatter"] = (
+        "(p) => {"
+        " const d = Array.isArray(p) ? p[0] : p;"
+        " const t = new Date(d.value[0]);"
+        " const v = d.value[1];"
+        " return t.toLocaleString([], {month: 'short', day: 'numeric',"
+        "   hour: '2-digit', minute: '2-digit'})"
+        "   + '<br/><b>$' + Number(v).toLocaleString(undefined,"
+        "     {minimumFractionDigits: 2, maximumFractionDigits: 2}) + '</b>';"
+        "}"
+    )
+    return options
+
+
 def cumulative_pnl_chart_options() -> Dict[str, Any]:
     options = _base_time_chart(PNL_GREEN, area=False)
     # Zero baseline: cumulative PnL is read against it (above = net profit).
@@ -709,20 +775,25 @@ def dashboard() -> None:
     ui.add_head_html(
         "<style>"
         ".nicegui-content { padding: 0 !important; }"
-        ".ag-theme-balham-dark { --ag-background-color: #161b26;"
-        " --ag-header-background-color: #1d2432;"
-        " --ag-odd-row-background-color: #19202c;"
-        " --ag-border-color: #2a3140; }"
         ".pnl-pos { color: #34d399 !important; }"
         ".pnl-neg { color: #f87171 !important; }"
         ".pos-grid { display: grid;"
         " grid-template-columns: 1.1fr 0.5fr 0.7fr 1fr 1fr 1.1fr 1.5fr 2.75rem;"
         " column-gap: 0.5rem; align-items: center; width: 100%; }"
-        # On narrow screens the 8-column position/screener grids can't shrink
-        # to fit — give them a floor width and let the wrapper scroll sideways
-        # instead of squashing every column into unreadable slivers.
+        # Trade-history grid: a hand-built grid (not aggrid) so it lives inside
+        # the card cleanly and carries a per-row info button. A trailing fixed
+        # slot holds the ℹ action; the body scrolls vertically past ~32rem.
+        ".trades-grid { display: grid;"
+        " grid-template-columns:"
+        " 1.3fr 0.9fr 0.55fr 0.55fr 0.85fr 0.85fr 1.1fr 0.85fr 0.8fr 2.5rem;"
+        " column-gap: 0.5rem; align-items: center; width: 100%; }"
+        ".trades-scroll { max-height: 32rem; overflow-y: auto; }"
+        # On narrow screens the multi-column grids can't shrink to fit — give
+        # them a floor width and let the wrapper scroll sideways instead of
+        # squashing every column into unreadable slivers.
         " @media (max-width: 640px) {"
         " .pos-grid { min-width: 34rem; }"
+        " .trades-grid { min-width: 46rem; }"
         " .scroll-x-mobile { overflow-x: auto; -webkit-overflow-scrolling: touch; } }"
         "</style>"
     )
@@ -805,6 +876,33 @@ def dashboard() -> None:
                         )
                     for note in release["notes"]:
                         ui.label(f"• {note}").classes("text-xs text-gray-300")
+
+    # ------------------------------------------------------------------ #
+    # trade info dialog (opened from the ℹ button on any trade-history row)
+    # ------------------------------------------------------------------ #
+    # One reusable dialog, refilled per trade — cheaper and cleaner than
+    # minting 200 dialogs up front. show_trade_info() populates the header,
+    # the hold-window price chart and the details body, then fetches bars.
+    with ui.dialog() as trade_info_dialog, ui.card().classes(
+        f"{BG_CARD} {BORDER_CARD} rounded-xl w-full max-w-2xl"
+    ):
+        with ui.row().classes("w-full items-center justify-between"):
+            trade_info_title = ui.row().classes("items-center gap-3 min-w-0")
+            ui.button(icon="close", on_click=trade_info_dialog.close).props(
+                "flat round dense"
+            )
+        with ui.column().classes("w-full gap-3 max-h-[80vh] overflow-y-auto"):
+            with ui.element("div").classes("w-full"):
+                ui.label("Price during the hold").classes(
+                    f"text-xs font-semibold uppercase {TEXT_MUTED}"
+                )
+                trade_info_chart = ui.echart(
+                    trade_hold_chart_options()
+                ).classes("w-full h-56")
+                trade_info_chart_empty = ui.label("").classes(
+                    f"text-sm {TEXT_MUTED}"
+                )
+            trade_info_body = ui.column().classes("w-full gap-3")
 
     # ------------------------------------------------------------------ #
     # header banner
@@ -1073,66 +1171,22 @@ def dashboard() -> None:
 
                 with card():
                     card_title(
-                        "📜 Trade History", f"latest {TRADES_LIMIT} trades"
+                        "📜 Trade History",
+                        f"latest {TRADES_LIMIT} — tap ℹ for the full story",
                     )
-                    trades_grid = ui.aggrid(
-                        {
-                            "defaultColDef": {"resizable": True, "sortable": True},
-                            "columnDefs": [
-                                {"headerName": "Closed", "field": "closed", "flex": 1.2},
-                                {"headerName": "Symbol", "field": "symbol", "flex": 0.9},
-                                {"headerName": "Side", "field": "side", "flex": 0.5,
-                                 "cellClassRules": {
-                                     "pnl-pos": "x === 'BUY'",
-                                     "pnl-neg": "x === 'SELL'",
-                                 }},
-                                {"headerName": "Qty", "field": "qty", "flex": 0.6},
-                                {
-                                    "headerName": "Entry",
-                                    "field": "entry_price",
-                                    "flex": 0.8,
-                                    "valueFormatter": "'$' + value.toFixed(2)",
-                                },
-                                {
-                                    "headerName": "Exit",
-                                    "field": "exit_price",
-                                    "flex": 0.8,
-                                    "valueFormatter":
-                                        "value == null ? '—' : '$' + value.toFixed(2)",
-                                },
-                                {
-                                    "headerName": "PnL",
-                                    "field": "realized_pnl",
-                                    "flex": 0.9,
-                                    "valueFormatter":
-                                        "value == null ? '—' : (value >= 0 ? '+$' : "
-                                        "'-$') + Math.abs(value).toFixed(2)",
-                                    "cellClassRules": {
-                                        "pnl-pos": "x > 0",
-                                        "pnl-neg": "x < 0",
-                                    },
-                                },
-                                {
-                                    "headerName": "PnL %",
-                                    "field": "pnl_pct",
-                                    "flex": 0.8,
-                                    "valueFormatter":
-                                        "value == null ? '—' : (value >= 0 ? '+' : "
-                                        "'') + value.toFixed(2) + '%'",
-                                    "cellClassRules": {
-                                        "pnl-pos": "x > 0",
-                                        "pnl-neg": "x < 0",
-                                    },
-                                },
-                                {"headerName": "Held", "field": "duration", "flex": 0.7},
-                            ],
-                            "rowData": [],
-                            "domLayout": "autoHeight",
-                            "pagination": True,
-                            "paginationPageSize": 15,
-                        },
-                        theme="balham",
-                    ).classes("w-full")
+                    with ui.element("div").classes("w-full scroll-x-mobile"):
+                        with ui.element("div").classes(
+                            "trades-grid text-xs font-semibold uppercase "
+                            f"{TEXT_MUTED} border-b border-[#222938] pb-1"
+                        ):
+                            for header in (
+                                "Closed", "Symbol", "Side", "Qty", "Entry",
+                                "Exit", "PnL", "PnL %", "Held", "",
+                            ):
+                                ui.label(header)
+                        trades_container = ui.column().classes(
+                            "w-full gap-0 trades-scroll"
+                        )
                     trades_empty = ui.label("No trades recorded yet").classes(
                         f"text-sm {TEXT_MUTED}"
                     )
@@ -1928,6 +1982,9 @@ def dashboard() -> None:
         "trades_key": None,
         "closing": set(),
         "analyst_enabled": None,
+        # Bumped each time a trade info popup opens; the async bar fetch checks
+        # it before drawing so a slow fetch can't paint onto a later trade.
+        "trade_info_token": 0,
     }
 
     def render_header(snapshot: Dict[str, Any]) -> None:
@@ -2318,33 +2375,246 @@ def dashboard() -> None:
         pnl_chart.update()
         pnl_chart_empty.set_visibility(not curve)
 
-        rows = []
-        for trade in trades:
-            pnl = trade["realized_pnl"]
-            side = trade.get("side", "BUY")
-            cost_basis = trade["entry_price"] * trade["qty"]
-            rows.append(
-                {
-                    "closed": fmt_short(trade["exit_time"]),
-                    "symbol": trade["symbol"],
-                    "side": side,
-                    "qty": trade["qty"],
-                    "entry_price": trade["entry_price"],
-                    "exit_price": trade["exit_price"],
-                    "realized_pnl": pnl,
-                    "pnl_pct": (
-                        pnl / cost_basis * 100.0
-                        if pnl is not None and cost_basis
-                        else None
-                    ),
-                    "duration": humanize_duration(
-                        trade["entry_time"], trade["exit_time"]
-                    ),
-                }
+        trades_empty.set_visibility(not trades)
+        trades_container.clear()
+        with trades_container:
+            for trade in trades:
+                pnl = trade["realized_pnl"]
+                side = trade.get("side", "BUY")
+                cost_basis = trade["entry_price"] * trade["qty"]
+                pnl_pct = (
+                    pnl / cost_basis * 100.0
+                    if pnl is not None and cost_basis
+                    else None
+                )
+                with ui.element("div").classes(
+                    "trades-grid py-1.5 border-b border-[#222938] text-sm"
+                ):
+                    ui.label(fmt_short(trade["exit_time"])).classes(
+                        "font-mono text-gray-300"
+                    )
+                    ui.label(trade["symbol"]).classes("font-bold text-white")
+                    side_color = (
+                        "text-green-400" if side == "BUY" else "text-red-400"
+                    )
+                    ui.label(side).classes(
+                        f"font-mono font-semibold {side_color}"
+                    )
+                    ui.label(f"{trade['qty']:g}").classes(
+                        "font-mono text-gray-300"
+                    )
+                    ui.label(f"${trade['entry_price']:,.2f}").classes(
+                        "font-mono text-gray-300"
+                    )
+                    ui.label(
+                        "—" if trade["exit_price"] is None
+                        else f"${trade['exit_price']:,.2f}"
+                    ).classes("font-mono text-gray-300")
+                    ui.label(
+                        "—" if pnl is None else money(pnl, signed=True)
+                    ).classes(f"font-mono font-semibold {pnl_text_class(pnl)}")
+                    ui.label(
+                        "—" if pnl_pct is None else f"{pnl_pct:+.2f}%"
+                    ).classes(f"font-mono {pnl_text_class(pnl)}")
+                    ui.label(
+                        humanize_duration(trade["entry_time"], trade["exit_time"])
+                    ).classes("font-mono text-gray-300")
+                    ui.button(
+                        icon="info",
+                        on_click=lambda _, t=dict(trade): show_trade_info(t),
+                    ).props("flat round dense color=blue-4").tooltip(
+                        "Why this trade?"
+                    )
+
+    async def show_trade_info(trade: Dict[str, Any]) -> None:
+        """Open the per-trade info popup: the decision rationale, the numbers,
+        and a price chart of the window the position was held."""
+        render_state["trade_info_token"] += 1
+        token = render_state["trade_info_token"]
+
+        symbol = trade["symbol"]
+        side = trade.get("side", "BUY")
+        pnl = trade["realized_pnl"]
+        cost_basis = trade["entry_price"] * trade["qty"]
+        pnl_pct = (
+            pnl / cost_basis * 100.0 if pnl is not None and cost_basis else None
+        )
+
+        # --- header: symbol, side chip, PnL ---
+        trade_info_title.clear()
+        with trade_info_title:
+            ui.label(symbol).classes("text-xl font-bold text-white")
+            side_color = "text-green-400" if side == "BUY" else "text-red-400"
+            ui.label(("▲ LONG" if side == "BUY" else "▼ SHORT")).classes(
+                f"text-xs font-mono font-semibold {side_color} "
+                "bg-[#1d2432] px-2 py-0.5 rounded border border-[#2a3140]"
             )
-        trades_grid.options["rowData"] = rows
-        trades_grid.update()
-        trades_empty.set_visibility(not rows)
+            if pnl is not None:
+                ui.label(
+                    money(pnl, signed=True)
+                    + (f" ({pnl_pct:+.2f}%)" if pnl_pct is not None else "")
+                ).classes(f"text-sm font-mono font-semibold {pnl_text_class(pnl)}")
+
+        # --- reset the chart to a clean slate for this trade ---
+        trade_info_chart.options.clear()
+        trade_info_chart.options.update(trade_hold_chart_options())
+        trade_info_chart.update()
+        trade_info_chart.set_visibility(True)
+        trade_info_chart_empty.set_text("Loading price history…")
+
+        # --- details body ---
+        def info_row(label: str, value: str, value_class: str = "text-white") -> None:
+            with ui.row().classes(
+                "w-full justify-between py-1 border-b border-[#222938] "
+                "flex-nowrap gap-3"
+            ):
+                ui.label(label).classes(f"text-sm {TEXT_MUTED} shrink-0")
+                ui.label(value).classes(
+                    f"text-sm font-mono {value_class} text-right"
+                )
+
+        held = humanize_duration(trade["entry_time"], trade["exit_time"])
+        trade_info_body.clear()
+        with trade_info_body:
+            # Why the bot entered — the headline of the whole popup.
+            with ui.column().classes(
+                f"w-full gap-1 {BG_APP} rounded-lg p-3 border border-[#222938]"
+            ):
+                ui.label("🧠 Why the bot took this trade").classes(
+                    "text-sm font-semibold text-white"
+                )
+                ui.label(
+                    trade.get("entry_reason")
+                    or "No rationale on record — this trade predates decision "
+                    "capture (v2.15.0) or was adopted from an external fill."
+                ).classes("text-sm text-gray-300 leading-relaxed")
+
+            if trade.get("exit_reason"):
+                with ui.column().classes(
+                    f"w-full gap-1 {BG_APP} rounded-lg p-3 border border-[#222938]"
+                ):
+                    ui.label("🏁 How it closed").classes(
+                        "text-sm font-semibold text-white"
+                    )
+                    ui.label(str(trade["exit_reason"])).classes(
+                        "text-sm text-gray-300 leading-relaxed"
+                    )
+
+            with ui.element("div").classes(
+                "w-full grid grid-cols-1 sm:grid-cols-2 gap-x-6"
+            ):
+                with ui.column().classes("gap-0"):
+                    ui.label("Entry signal").classes(
+                        f"text-xs font-semibold uppercase {TEXT_MUTED} mt-1 mb-1"
+                    )
+                    rsi = trade.get("entry_rsi")
+                    info_row("RSI at entry", f"{rsi:.1f}" if rsi is not None else "—")
+                    vwap = trade.get("entry_vwap")
+                    info_row("VWAP", f"${vwap:,.2f}" if vwap is not None else "—")
+                    atr = trade.get("entry_atr")
+                    info_row("ATR", f"${atr:,.3f}" if atr is not None else "—")
+                    sent = trade.get("entry_sentiment")
+                    src = trade.get("sentiment_source")
+                    info_row(
+                        "News sentiment",
+                        f"{sent:.2f} ({src})" if sent is not None else "—",
+                    )
+                with ui.column().classes("gap-0"):
+                    ui.label("Execution").classes(
+                        f"text-xs font-semibold uppercase {TEXT_MUTED} mt-1 mb-1"
+                    )
+                    info_row("Qty", f"{trade['qty']:g} sh")
+                    info_row("Entry price", f"${trade['entry_price']:,.2f}")
+                    info_row(
+                        "Exit price",
+                        "—" if trade["exit_price"] is None
+                        else f"${trade['exit_price']:,.2f}",
+                    )
+                    tp = trade.get("take_profit")
+                    sl = trade.get("stop_loss")
+                    info_row(
+                        "Target / Stop",
+                        (f"${tp:,.2f}" if tp is not None else "—")
+                        + " / "
+                        + (f"${sl:,.2f}" if sl is not None else "—"),
+                    )
+
+            with ui.element("div").classes(
+                "w-full grid grid-cols-1 sm:grid-cols-3 gap-x-6"
+            ):
+                info_row("Opened", fmt_short(trade["entry_time"]))
+                info_row("Closed", fmt_short(trade["exit_time"]))
+                info_row("Held", held)
+
+        trade_info_dialog.open()
+
+        # --- price chart of the hold window (best-effort, async) ---
+        bars = await run.io_bound(
+            fetch_trade_bars, symbol, trade["entry_time"], trade["exit_time"]
+        )
+        # A newer popup opened while we were fetching — its draw wins, drop ours.
+        if token != render_state["trade_info_token"]:
+            return
+        if not bars:
+            trade_info_chart.set_visibility(False)
+            trade_info_chart_empty.set_text(
+                "Price history unavailable for this window."
+            )
+            return
+
+        trade_info_chart_empty.set_text("")
+        series = trade_info_chart.options["series"][0]
+        series["data"] = bars
+
+        mark_points = []
+        entry_ms = epoch_ms(trade["entry_time"])
+        if entry_ms is not None:
+            mark_points.append({
+                "name": "Entry",
+                "coord": [entry_ms, trade["entry_price"]],
+                "value": "IN",
+                "itemStyle": {"color": SERIES_BLUE},
+            })
+        exit_ms = epoch_ms(trade["exit_time"]) if trade["exit_time"] else None
+        if exit_ms is not None and trade["exit_price"] is not None:
+            mark_points.append({
+                "name": "Exit",
+                "coord": [exit_ms, trade["exit_price"]],
+                "value": "OUT",
+                "itemStyle": {
+                    "color": PNL_GREEN if (pnl or 0) >= 0 else PNL_RED
+                },
+            })
+        if mark_points:
+            series["markPoint"] = {
+                "symbol": "pin",
+                "symbolSize": 46,
+                "label": {"color": "#0e1117", "fontSize": 10, "fontWeight": "bold"},
+                "data": mark_points,
+            }
+
+        mark_lines = []
+        tp = trade.get("take_profit")
+        sl = trade.get("stop_loss")
+        if tp is not None:
+            mark_lines.append({
+                "yAxis": tp,
+                "lineStyle": {"color": PNL_GREEN, "type": "dashed", "width": 1},
+                "label": {"formatter": "TP", "color": PNL_GREEN, "position": "insideEndTop"},
+            })
+        if sl is not None:
+            mark_lines.append({
+                "yAxis": sl,
+                "lineStyle": {"color": PNL_RED, "type": "dashed", "width": 1},
+                "label": {"formatter": "SL", "color": PNL_RED, "position": "insideEndBottom"},
+            })
+        if mark_lines:
+            series["markLine"] = {
+                "silent": True,
+                "symbol": "none",
+                "data": mark_lines,
+            }
+        trade_info_chart.update()
 
     def render_environment(snapshot: Dict[str, Any]) -> None:
         environment = snapshot["environment"]

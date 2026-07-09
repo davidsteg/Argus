@@ -10,9 +10,35 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.14.0"
+__version__ = "2.15.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.15.0",
+        "date": "2026-07-10",
+        "title": "Per-trade info popup: see exactly why the bot took each trade",
+        "notes": [
+            "Every row in the Trade History now has an ℹ button that opens a "
+            "popup explaining the trade end-to-end: a plain-English rationale "
+            "('RSI 27.4 was oversold below the 30 buy level while price sat "
+            "below VWAP — a genuine dip; sentiment 0.61 cleared the cutoff'), "
+            "the entry signal numbers (RSI, VWAP, ATR, news sentiment), the "
+            "execution (qty, entry/exit, target/stop), and how it closed "
+            "(signal exit, take-profit, or stop-loss).",
+            "The popup draws a 1-minute price chart of the exact window the "
+            "position was held — fetched live from Alpaca — with pinned entry "
+            "and exit markers and dashed take-profit / stop-loss lines, so the "
+            "decision can be read against what price actually did.",
+            "The decision snapshot is captured at order time and persisted on "
+            "the trade (nine new nullable columns on the trades table, added by "
+            "migration). Trades closed before this release show the numbers "
+            "they have and note that the rationale predates decision capture.",
+            "Trade History was rebuilt as a native card grid instead of the "
+            "embedded data-grid that overflowed the card — it now fits the "
+            "layout, scrolls sideways cleanly on mobile, and matches the "
+            "Active Positions styling.",
+        ],
+    },
     {
         "version": "2.14.0",
         "date": "2026-07-10",

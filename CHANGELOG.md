@@ -9,6 +9,28 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.15.0] - 2026-07-10
+
+### Added
+- **Per-trade info popup — see exactly why the bot took each trade.** Every row
+  in the Trade History carries an ℹ button that opens a dialog explaining the
+  trade end-to-end: a plain-English rationale, the entry signal numbers (RSI,
+  VWAP, ATR, news sentiment), the execution (qty, entry/exit price, target and
+  stop), and how it closed (signal exit, take-profit leg, or stop-loss leg).
+- The popup draws a **1-minute price chart of the exact hold window**, fetched
+  live from Alpaca, with pinned entry/exit markers and dashed take-profit /
+  stop-loss lines so the decision can be read against what price actually did.
+- The decision snapshot is captured at order time and persisted on the trade:
+  nine new nullable columns on the `trades` table (`entry_rsi`, `entry_vwap`,
+  `entry_atr`, `entry_sentiment`, `sentiment_source`, `stop_loss`,
+  `take_profit`, `entry_reason`, `exit_reason`), added by migration. Trades
+  recorded before this release simply carry `NULL`s and the popup says so.
+
+### Changed
+- **Trade History rebuilt as a native card grid** instead of the embedded
+  data-grid that overflowed the card. It now fits the layout, scrolls sideways
+  cleanly on mobile, and matches the Active Positions styling.
+
 ## [v2.14.0] - 2026-07-10
 
 ### Added

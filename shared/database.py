@@ -154,6 +154,20 @@ _MIGRATIONS: Dict[str, Dict[str, str]] = {
         "unrealized_pnl": "REAL",
         "market_value": "REAL",
     },
+    # Decision context captured at entry (and the reason for the exit) so the
+    # dashboard can explain, per trade, *why* the bot took it. All nullable —
+    # trades recorded before v2.15.0 simply carry NULLs here.
+    "trades": {
+        "entry_rsi": "REAL",
+        "entry_vwap": "REAL",
+        "entry_atr": "REAL",
+        "entry_sentiment": "REAL",
+        "sentiment_source": "TEXT",
+        "stop_loss": "REAL",
+        "take_profit": "REAL",
+        "entry_reason": "TEXT",
+        "exit_reason": "TEXT",
+    },
 }
 
 # Keep roughly six weeks of 1-minute equity snapshots before trimming.
@@ -366,12 +380,21 @@ class Database:
         entry_time: str,
         exit_time: Optional[str],
         realized_pnl: Optional[float],
+        context: Optional[Dict[str, Any]] = None,
     ) -> int:
+        """Persist a closed trade. ``context`` carries the decision snapshot the
+        dashboard's per-trade info popup renders — RSI/VWAP/ATR/sentiment at
+        entry, the bracket stop/target, and a human reason for entry and exit.
+        Any missing key is stored as NULL, so callers may pass a partial dict
+        (or None) without breaking older code paths."""
+        context = context or {}
         cursor = self._execute(
             "INSERT INTO trades "
             "(symbol, side, qty, entry_price, exit_price, entry_time, "
-            " exit_time, realized_pnl) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            " exit_time, realized_pnl, entry_rsi, entry_vwap, entry_atr, "
+            " entry_sentiment, sentiment_source, stop_loss, take_profit, "
+            " entry_reason, exit_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 symbol,
                 side,
@@ -381,6 +404,15 @@ class Database:
                 entry_time,
                 exit_time,
                 None if realized_pnl is None else float(realized_pnl),
+                _optional_float(context.get("entry_rsi")),
+                _optional_float(context.get("entry_vwap")),
+                _optional_float(context.get("entry_atr")),
+                _optional_float(context.get("entry_sentiment")),
+                context.get("sentiment_source"),
+                _optional_float(context.get("stop_loss")),
+                _optional_float(context.get("take_profit")),
+                context.get("entry_reason"),
+                context.get("exit_reason"),
             ),
         )
         return int(cursor.lastrowid)
