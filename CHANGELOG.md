@@ -9,6 +9,38 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.13.1] - 2026-07-09
+
+### Fixed
+- **Optimizer backtest sizes trades like the live engine — no more fantasy
+  returns.** The nightly grid search kept promoting the most hyperactive
+  parameter set on absurd backtest numbers (the 2026-07-09 run reported
+  **+2459% train / +117% validation** and put `RSI(7) buy<35` live). Root
+  cause: `backtest()` compounded *full notional* on every trade
+  (`equity *= exit_price / entry_price`), so a ~0.2 % average per-trade edge
+  over ~1500 trades compounded into +2459 % — a figure the v2.12.0 trading
+  costs were far too small to offset, and the grid therefore always favoured
+  whatever configuration simply traded the most (shortest RSI period, loosest
+  thresholds).
+- `backtest()` now sizes each trade in **whole shares exactly as the live
+  engine** (new `optimizer.position_qty` mirrors `bot.py`'s
+  `place_bracket` sizing: a roughly constant `risk_per_trade_usd /
+  stop_distance`, capped at `position_size_usd` notional, and **skipped when
+  not even one share fits**) and accrues P&L in dollars against a fixed
+  account-equity base. Because position size is driven by the constant
+  `risk_per_trade_usd` and never scales with accumulated equity, returns are
+  additive and realistic instead of exponential. Verified: the same 199
+  winning trades that reported ~9.8×10¹¹ under full-notional compounding now
+  report ~5.9 % (≈ 199 × $29.80 on a $100k base).
+- Position sizing (`position_size_usd`, `risk_per_trade_usd`) and the account
+  equity base are read from live config/status inside `run_optimization`, so
+  the backtest and the engine can never diverge on how a trade is sized.
+- The backtest's post-loss cooldown now benches after a genuine loss on
+  **either** side (exit below entry for a long, above entry for a short),
+  matching the live engine (`bot.py` benches whenever `realized_pnl < 0`).
+  The old side-agnostic `exit_price < entry_price` check benched winning
+  shorts and let losing shorts re-enter immediately.
+
 ## [v2.13.0] - 2026-07-09
 
 ### Added

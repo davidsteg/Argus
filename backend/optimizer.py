@@ -129,6 +129,28 @@ def fetch_history(symbols: List[str], days: int) -> Dict[str, pd.DataFrame]:
     return frames
 
 
+def position_qty(
+    price: float,
+    stop_distance: float,
+    position_size_usd: float,
+    risk_per_trade_usd: float,
+) -> int:
+    """Whole-share quantity the live engine would trade for this entry.
+
+    Mirrors bot.py's `place_bracket` sizing exactly: risk a roughly constant
+    dollar amount (risk_per_trade_usd / stop_distance), capped by the notional
+    position size (position_size_usd / price), floored to whole shares.
+    Returns 0 when not even one share fits within both caps — the live engine
+    skips such a signal, and so must the backtest.
+    """
+    if price <= 0:
+        return 0
+    qty = int(position_size_usd // price)
+    if risk_per_trade_usd > 0 and stop_distance > 0:
+        qty = min(qty, int(risk_per_trade_usd // stop_distance))
+    return max(qty, 0)
+
+
 def backtest(
     closes: np.ndarray,
     highs: np.ndarray,
@@ -143,6 +165,9 @@ def backtest(
     rsi_short_signal: float = 999.0,
     rsi_short_exit: float = 0.0,
     cooldown_bars: int = 0,
+    position_size_usd: float = 500.0,
+    risk_per_trade_usd: float = 20.0,
+    account_equity: float = 100000.0,
 ) -> Tuple[float, float, int]:
     """Replay the live strategy over one symbol's bars.
 
@@ -164,16 +189,29 @@ def backtest(
     early exit is evaluated at the bar close (RSI >= rsi_exit_signal),
     mirroring the live engine, which only reads RSI on the completed bar.
 
-    Friction: every trade pays COST_PER_TRADE_PCT of notional round-trip,
-    and stop fills slip a further STOP_SLIPPAGE_PCT against the trade —
-    stops trigger market orders and never fill at the exact stop price.
-    Entries whose stop would be set by the percentage floor rather than
-    ATR are skipped, matching the live engine's stop_is_floored gate.
+    Sizing: each trade is sized in whole shares exactly as the live engine
+    would (see position_qty) — a roughly constant dollar risk per trade,
+    capped at position_size_usd notional. P&L accrues in dollars against a
+    fixed account_equity base; position size does NOT scale with accumulated
+    equity, because the live engine sizes off the constant risk_per_trade_usd,
+    not off the current balance. This is the whole point of the fix: full-
+    notional compounding (`equity *= exit/entry`) turned a ~0.2% average edge
+    over ~1500 trades into a +2459% fantasy that no trading cost could offset;
+    fixed-dollar sizing keeps the return additive and realistic. A signal that
+    cannot fund even one share (position_qty == 0) is skipped, as it is live.
 
-    Returns (total_return, max_drawdown, n_trades), both as fractions.
+    Friction: every trade pays COST_PER_TRADE_PCT of the entry notional
+    round-trip, and stop fills slip a further STOP_SLIPPAGE_PCT against the
+    trade — stops trigger market orders and never fill at the exact stop
+    price. Entries whose stop would be set by the percentage floor rather
+    than ATR are skipped, matching the live engine's stop_is_floored gate.
+
+    Returns (total_return, max_drawdown, n_trades) — return and drawdown as
+    fractions of account_equity.
     """
-    equity = 1.0
-    peak = 1.0
+    account_equity = max(account_equity, 1.0)
+    cash_pnl = 0.0
+    peak_pnl = 0.0
     max_drawdown = 0.0
     n_trades = 0
 
@@ -182,7 +220,32 @@ def backtest(
     stop_price = 0.0
     target_price = 0.0
     entry_price = 0.0
+    qty = 0
     cooldown_until = -1
+
+    def book(exit_price: float, bar: int) -> None:
+        """Realize the open position at exit_price: dollar P&L on the sized
+        share count, less round-trip cost, folded into the equity curve."""
+        nonlocal cash_pnl, peak_pnl, max_drawdown, n_trades, in_position
+        nonlocal cooldown_until
+        if position_side == "BUY":
+            gross = qty * (exit_price - entry_price)
+        else:
+            gross = qty * (entry_price - exit_price)
+        cost = COST_PER_TRADE_PCT * qty * entry_price
+        cash_pnl += gross - cost
+        n_trades += 1
+        peak_pnl = max(peak_pnl, cash_pnl)
+        max_drawdown = max(max_drawdown, (peak_pnl - cash_pnl) / account_equity)
+        in_position = False
+        # Post-loss bench, mirrored from the live engine. A loss is exit
+        # below entry for a long, above entry for a short.
+        loss = (
+            exit_price < entry_price if position_side == "BUY"
+            else exit_price > entry_price
+        )
+        if loss and cooldown_bars > 0:
+            cooldown_until = bar + cooldown_bars
 
     for i in range(1, len(closes)):
         if in_position:
@@ -202,17 +265,7 @@ def backtest(
                 elif not np.isnan(rsi[i]) and rsi[i] <= rsi_short_exit:
                     exit_price = closes[i]
             if exit_price is not None:
-                if position_side == "BUY":
-                    equity *= (exit_price / entry_price) * (1.0 - COST_PER_TRADE_PCT)
-                else:
-                    equity *= (entry_price / exit_price) * (1.0 - COST_PER_TRADE_PCT)
-                in_position = False
-                n_trades += 1
-                peak = max(peak, equity)
-                drawdown = (peak - equity) / peak
-                max_drawdown = max(max_drawdown, drawdown)
-                if exit_price < entry_price and cooldown_bars > 0:
-                    cooldown_until = i + cooldown_bars
+                book(exit_price, i)
             continue
 
         if np.isnan(rsi[i]) or np.isnan(rsi[i - 1]) or np.isnan(atr[i]):
@@ -227,12 +280,17 @@ def backtest(
 
         # LONG entry: RSI crosses below buy_signal, price below VWAP
         if rsi[i - 1] >= rsi_buy_signal > rsi[i] and closes[i] <= vwap[i]:
-            in_position = True
-            position_side = "BUY"
             entry_price = closes[i]
             stop_distance, target_distance = bracket_distances(
                 entry_price, atr[i], atr_stop_mult, atr_target_mult
             )
+            qty = position_qty(
+                entry_price, stop_distance, position_size_usd, risk_per_trade_usd
+            )
+            if qty < 1:
+                continue
+            in_position = True
+            position_side = "BUY"
             stop_price = entry_price - stop_distance
             target_price = entry_price + target_distance
             continue
@@ -243,12 +301,17 @@ def backtest(
             and rsi[i - 1] <= rsi_short_signal < rsi[i]
             and closes[i] >= vwap[i]
         ):
-            in_position = True
-            position_side = "SELL"
             entry_price = closes[i]
             stop_distance, target_distance = bracket_distances(
                 entry_price, atr[i], atr_stop_mult, atr_target_mult
             )
+            qty = position_qty(
+                entry_price, stop_distance, position_size_usd, risk_per_trade_usd
+            )
+            if qty < 1:
+                continue
+            in_position = True
+            position_side = "SELL"
             stop_price = entry_price + stop_distance
             target_price = entry_price - target_distance
             continue
@@ -256,15 +319,9 @@ def backtest(
     # Force-close a dangling position at the final bar so the last trade
     # is reflected in the score.
     if in_position:
-        if position_side == "BUY":
-            equity *= (closes[-1] / entry_price) * (1.0 - COST_PER_TRADE_PCT)
-        else:
-            equity *= (entry_price / closes[-1]) * (1.0 - COST_PER_TRADE_PCT)
-        n_trades += 1
-        peak = max(peak, equity)
-        max_drawdown = max(max_drawdown, (peak - equity) / peak)
+        book(closes[-1], len(closes) - 1)
 
-    return equity - 1.0, max_drawdown, n_trades
+    return cash_pnl / account_equity, max_drawdown, n_trades
 
 
 class _WindowData:
@@ -304,8 +361,16 @@ class _WindowData:
         rsi_short_signal: float = 999.0,
         rsi_short_exit: float = 0.0,
         cooldown_bars: int = 30,
+        position_size_usd: float = 500.0,
+        risk_per_trade_usd: float = 20.0,
+        account_equity: float = 100000.0,
     ) -> Tuple[float, float, float, int]:
-        """Aggregate (score, return, worst drawdown, trades) across symbols."""
+        """Aggregate (score, return, worst drawdown, trades) across symbols.
+
+        Each symbol contributes its dollar P&L against the shared
+        account_equity, so summing the per-symbol returns is the portfolio
+        return of running the fixed-dollar-sized strategy on all of them.
+        """
         total_return = 0.0
         worst_drawdown = 0.0
         total_trades = 0
@@ -324,6 +389,9 @@ class _WindowData:
                 rsi_short_signal=rsi_short_signal,
                 rsi_short_exit=rsi_short_exit,
                 cooldown_bars=cooldown_bars,
+                position_size_usd=position_size_usd,
+                risk_per_trade_usd=risk_per_trade_usd,
+                account_equity=account_equity,
             )
             total_return += ret
             worst_drawdown = max(worst_drawdown, drawdown)
@@ -386,8 +454,20 @@ def run_optimization() -> Optional[Dict[str, float]]:
     train = _WindowData(train_frames)
     validation = _WindowData(validation_frames) if validation_frames else None
 
-    # Read cooldown from live config so the backtest matches the engine.
-    cooldown_bars = int(db.get_config().get("cooldown_minutes", 30.0))
+    # Read cooldown and position sizing from live config/status so the
+    # backtest sizes and benches exactly like the engine. account_equity is
+    # the base the dollar P&L is expressed against; a fresh/empty status
+    # falls back to a nominal $100k so returns stay well-scaled.
+    live_config = db.get_config()
+    cooldown_bars = int(live_config.get("cooldown_minutes", 30.0))
+    position_size_usd = float(live_config.get("position_size_usd", 500.0))
+    risk_per_trade_usd = float(live_config.get("risk_per_trade_usd", 20.0))
+    account_equity = float(db.get_status().get("equity", 0.0)) or 100000.0
+    sizing = {
+        "position_size_usd": position_size_usd,
+        "risk_per_trade_usd": risk_per_trade_usd,
+        "account_equity": account_equity,
+    }
 
     # Score every combination on the train window, rank best-first.
     ranked: List[Tuple[float, Dict[str, float], Tuple[float, float, int]]] = []
@@ -409,6 +489,7 @@ def run_optimization() -> Optional[Dict[str, float]]:
             rsi_short_signal=short_signal,
             rsi_short_exit=short_exit,
             cooldown_bars=cooldown_bars,
+            **sizing,
         )
         if trades == 0:
             continue
@@ -451,6 +532,7 @@ def run_optimization() -> Optional[Dict[str, float]]:
             rsi_short_signal=params.get("rsi_short_signal", 999.0),
             rsi_short_exit=params.get("rsi_short_exit", 0.0),
             cooldown_bars=cooldown_bars,
+            **sizing,
         )
         if val_return > 0.0:
             best_params, best_train_score, train_stats = params, score, stats

@@ -10,9 +10,37 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.13.0"
+__version__ = "2.13.1"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.13.1",
+        "date": "2026-07-09",
+        "title": "Optimizer backtest sizes trades like the live engine — no more fantasy returns",
+        "notes": [
+            "Root-cause fix for the optimizer promoting hyperactive parameter "
+            "sets on fantasy returns (the 2026-07-09 run reported +2459% train "
+            "and put RSI(7) buy<35 live). The backtest compounded full notional "
+            "every trade (equity *= exit/entry), so a ~0.2% average edge over "
+            "~1500 trades ballooned to +2459% — a number no trading cost could "
+            "offset, and the grid therefore always rewarded whatever config "
+            "traded the most.",
+            "backtest() now sizes every trade in whole shares exactly as the "
+            "live engine does (new position_qty mirrors bot.py: constant "
+            "risk_per_trade_usd / stop_distance, capped at position_size_usd "
+            "notional, skipped when not even one share fits) and accrues P&L in "
+            "dollars against a fixed account-equity base. Position size no "
+            "longer scales with accumulated equity, so returns are additive and "
+            "realistic instead of exponential.",
+            "Sizing (position_size_usd, risk_per_trade_usd) and the account "
+            "equity base are read from live config/status, so backtest and "
+            "engine can never diverge on position sizing.",
+            "Incidental correctness fix: the backtest post-loss cooldown now "
+            "benches after a genuine loss on either side (exit below entry for "
+            "a long, above entry for a short), matching the live engine — the "
+            "old side-agnostic check benched winning shorts.",
+        ],
+    },
     {
         "version": "2.13.0",
         "date": "2026-07-09",
