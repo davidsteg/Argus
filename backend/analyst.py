@@ -258,7 +258,7 @@ class StrategyAnalyst:
         recent_trades = db.get_trades(50)
         recent_losses = [
             t["symbol"] for t in recent_trades
-            if t.get("realized_pnl", 0) < 0
+            if (t.get("realized_pnl") or 0) < 0
         ]
 
         prompt_data = {

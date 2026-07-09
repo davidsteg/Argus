@@ -9,6 +9,22 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.13.2] - 2026-07-09
+
+### Fixed
+- **Hotfix — the risk agent crashed the whole trading cycle whenever an open
+  position was in the recent-trades window.** Every cycle that produced a
+  signal died with `'<' not supported between instances of 'NoneType' and
+  'int'`; the engine stayed `RUNNING` but placed **zero orders** (equity flat)
+  until restarted. The risk agent's recent-loss lookup used
+  `t.get("realized_pnl", 0) < 0`, but `.get(..., 0)` only substitutes the
+  default when the *key is absent* — for an open position the key exists with
+  value `None`, so it returned `None` and `None < 0` threw. The bug has been
+  latent since v2.5.0; it fired now because the 2026-07-09 hyperactive
+  `RSI(7)` optimizer episode left an open, `None`-P&L position in the last 50
+  trades. Fixed with `(t.get("realized_pnl") or 0) < 0`, which handles both a
+  missing key and an explicit `None`; closed trades are unaffected.
+
 ## [v2.13.1] - 2026-07-09
 
 ### Fixed

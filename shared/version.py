@@ -10,9 +10,28 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.13.1"
+__version__ = "2.13.2"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.13.2",
+        "date": "2026-07-09",
+        "title": "Hotfix: risk agent no longer crashes the trading cycle on an open position",
+        "notes": [
+            "Live outage fix. Every trading cycle that produced a signal was "
+            "dying with \"'<' not supported between instances of 'NoneType' and "
+            "'int'\" — the engine stayed RUNNING but placed zero orders. The "
+            "risk agent's recent-loss lookup used t.get('realized_pnl', 0) < 0, "
+            "but for an open position the key exists with value None, so the "
+            "default 0 never applied and None < 0 threw. This morning's "
+            "hyperactive RSI(7) churn left an open, None-P&L position in the "
+            "recent-trades window, so the latent bug (present since v2.5.0) "
+            "fired on every cycle.",
+            "Now guarded with (t.get('realized_pnl') or 0) < 0, which handles "
+            "both a missing key and an explicit None; closed trades are "
+            "unaffected.",
+        ],
+    },
     {
         "version": "2.13.1",
         "date": "2026-07-09",
