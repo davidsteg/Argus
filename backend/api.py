@@ -436,6 +436,25 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
             "available": analyst.available,
         }
 
+    @app.get("/analyst/activity")
+    async def analyst_activity(limit: int = 100) -> Dict[str, Any]:
+        """Rolling log of every LLM call plus per-agent 24h aggregates —
+        the fastest way to answer 'is the analyst actually working?'."""
+        import llm_log
+
+        return {
+            "stats": llm_log.get_agent_stats(db),
+            "calls": llm_log.get_call_log(db, limit=max(1, min(limit, 400))),
+        }
+
+    @app.get("/analyst/reviews")
+    async def analyst_reviews() -> Dict[str, Any]:
+        """History of past trade/optimization/watchlist reviews, newest first."""
+        from analyst import StrategyAnalyst
+
+        history = db.get_state(StrategyAnalyst.REVIEW_HISTORY_KEY) or []
+        return {"reviews": list(reversed(history))}
+
     @app.get("/analyst/memory")
     async def analyst_memory() -> Dict[str, Any]:
         from analyst import get_analyst

@@ -324,6 +324,8 @@ def fetch_snapshot(log_limit: int, equity_since: Optional[str]) -> Dict[str, Any
         "analyst_optimization": db.get_state("analyst_optimization"),
         "analyst_trades": db.get_state("analyst_trades"),
         "analyst_config": db.get_state("analyst_config") or {},
+        "analyst_call_log": db.get_state("analyst_call_log") or [],
+        "analyst_review_history": db.get_state("analyst_review_history") or [],
         "screener_candidates": db.get_state("screener_candidates") or [],
     }
 
@@ -491,6 +493,89 @@ def humanize_age(seconds: Optional[float]) -> str:
     return f"{seconds / 3600:.1f}h ago"
 
 
+# The seven LLM call types, keyed by the `agent` field written to the
+# analyst_call_log by the backend. `model_field` names the analyst-config
+# override that selects the model (empty override → main `model`).
+ANALYST_AGENTS: List[Dict[str, str]] = [
+    {
+        "key": "risk", "icon": "🛡️", "name": "Risk Agent",
+        "what": "Evaluates every signal before execution — can block the trade",
+        "when": "per signal, each cycle",
+        "model_field": "risk_model",
+    },
+    {
+        "key": "portfolio", "icon": "🧭", "name": "Portfolio Manager",
+        "what": "Ranks approved signals and decides which get a position slot",
+        "when": "each cycle with signals",
+        "model_field": "model",
+    },
+    {
+        "key": "sentiment", "icon": "📰", "name": "Sentiment Scorer",
+        "what": "Scores news headlines 0–1 bearish→bullish, gates entries",
+        "when": "per symbol, cached 15m",
+        "model_field": "sentiment_model",
+    },
+    {
+        "key": "watchlist", "icon": "📋", "name": "Watchlist Curator",
+        "what": "Curates the trading watchlist from the live screener pool",
+        "when": "hourly",
+        "model_field": "watchlist_model",
+    },
+    {
+        "key": "trades", "icon": "📊", "name": "Trade Reviewer",
+        "what": "Reviews recent closed trades for failure patterns",
+        "when": "every few hours (market)",
+        "model_field": "model",
+    },
+    {
+        "key": "optimization", "icon": "🔬", "name": "Optimization Reviewer",
+        "what": "Accepts, overrides or rejects the nightly optimizer winner",
+        "when": "after the nightly grid search",
+        "model_field": "model",
+    },
+    {
+        "key": "memory", "icon": "🧠", "name": "Decision Memory",
+        "what": "Extracts lessons from past decision → outcome pairs",
+        "when": "every 50 cycles",
+        "model_field": "model",
+    },
+]
+
+
+def agent_call_stats(call_log: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Per-agent aggregates from the raw analyst_call_log blob: 24h call and
+    error counts, average latency, and the most recent call's outcome."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    stats: Dict[str, Dict[str, Any]] = {}
+    for entry in call_log:
+        agent = entry.get("agent", "unknown")
+        agg = stats.setdefault(agent, {
+            "calls": 0, "errors": 0, "latency_sum": 0.0,
+            "last_ts": None, "last_ok": None, "last_error": None,
+        })
+        agg["last_ts"] = entry.get("ts")
+        agg["last_ok"] = entry.get("ok", False)
+        agg["last_error"] = entry.get("error") if not entry.get("ok", False) else None
+        local = to_local(entry.get("ts"))
+        if local is None or local < cutoff.astimezone():
+            continue
+        agg["calls"] += 1
+        if not entry.get("ok", False):
+            agg["errors"] += 1
+        agg["latency_sum"] += float(entry.get("latency_ms", 0))
+    for agg in stats.values():
+        agg["avg_latency_ms"] = (
+            agg.pop("latency_sum") / agg["calls"] if agg["calls"] else None
+        )
+    return stats
+
+
+def fmt_latency(ms: Optional[float]) -> str:
+    if ms is None:
+        return "—"
+    return f"{ms / 1000:.1f}s" if ms >= 1000 else f"{ms:.0f}ms"
+
+
 def humanize_duration(entry_iso: Optional[str], exit_iso: Optional[str]) -> str:
     start, end = to_local(entry_iso), to_local(exit_iso)
     if start is None or end is None:
@@ -628,6 +713,12 @@ def dashboard() -> None:
         ".pos-grid { display: grid;"
         " grid-template-columns: 1.1fr 0.5fr 0.7fr 1fr 1fr 1.1fr 1.5fr 2.75rem;"
         " column-gap: 0.5rem; align-items: center; width: 100%; }"
+        # On narrow screens the 8-column position/screener grids can't shrink
+        # to fit — give them a floor width and let the wrapper scroll sideways
+        # instead of squashing every column into unreadable slivers.
+        " @media (max-width: 640px) {"
+        " .pos-grid { min-width: 34rem; }"
+        " .scroll-x-mobile { overflow-x: auto; -webkit-overflow-scrolling: touch; } }"
         "</style>"
     )
 
@@ -714,7 +805,8 @@ def dashboard() -> None:
     # header banner
     # ------------------------------------------------------------------ #
     with ui.row().classes(
-        "w-full items-center justify-between px-6 py-4 "
+        "w-full items-center justify-between gap-y-3 flex-wrap "
+        "px-4 sm:px-6 py-4 "
         "bg-gradient-to-r from-[#131722] to-[#1a2030] "
         "border-b border-[#2a3140] sticky top-0 z-50"
     ):
@@ -736,7 +828,7 @@ def dashboard() -> None:
                 )
 
         # live condition chips: regime, market session, engine heartbeat
-        with ui.row().classes("items-center gap-2"):
+        with ui.row().classes("items-center gap-2 flex-wrap"):
             def chip() -> Dict[str, Any]:
                 holder = ui.row().classes(
                     f"items-center gap-2 {BG_CARD} {BORDER_CARD} "
@@ -762,7 +854,7 @@ def dashboard() -> None:
                 "traces keep arriving within 3× the poll interval"
             )
 
-        with ui.row().classes("items-center gap-8"):
+        with ui.row().classes("items-center gap-4 sm:gap-8 flex-wrap"):
             with ui.column().classes("gap-0 items-end"):
                 ui.label("TOTAL BALANCE").classes(f"text-xs {TEXT_MUTED}")
                 balance_label = ui.label("$0.00").classes(
@@ -846,7 +938,7 @@ def dashboard() -> None:
     # tabs
     # ------------------------------------------------------------------ #
     with ui.tabs().classes(
-        "w-full px-6 bg-[#131722] border-b border-[#2a3140] text-gray-300"
+        "w-full px-2 sm:px-6 bg-[#131722] border-b border-[#2a3140] text-gray-300"
     ) as tabs:
         overview_tab = ui.tab("Overview", icon="dashboard")
         trades_tab = ui.tab("Trades", icon="receipt_long")
@@ -858,8 +950,10 @@ def dashboard() -> None:
         "w-full bg-transparent"
     ):
         # ============================ OVERVIEW ========================= #
-        with ui.tab_panel(overview_tab).classes("p-6"):
-            with ui.row().classes("w-full gap-4 items-stretch flex-nowrap"):
+        with ui.tab_panel(overview_tab).classes("p-3 sm:p-6"):
+            with ui.row().classes(
+                "w-full gap-4 items-stretch flex-col md:flex-row"
+            ):
                 with ui.column().classes("gap-4 grow-[3] basis-0 min-w-0"):
                     with card():
                         with ui.row().classes(
@@ -881,16 +975,17 @@ def dashboard() -> None:
 
                     with card():
                         card_title("📊 Active Positions", "live from Alpaca sync")
-                        with ui.element("div").classes(
-                            "pos-grid text-xs font-semibold uppercase "
-                            f"{TEXT_MUTED} border-b border-[#222938] pb-1"
-                        ):
-                            for header in (
-                                "Symbol", "Side", "Qty", "Entry", "Now",
-                                "Value", "Unrealized PnL", "",
+                        with ui.element("div").classes("w-full scroll-x-mobile"):
+                            with ui.element("div").classes(
+                                "pos-grid text-xs font-semibold uppercase "
+                                f"{TEXT_MUTED} border-b border-[#222938] pb-1"
                             ):
-                                ui.label(header)
-                        positions_container = ui.column().classes("w-full gap-0")
+                                for header in (
+                                    "Symbol", "Side", "Qty", "Entry", "Now",
+                                    "Value", "Unrealized PnL", "",
+                                ):
+                                    ui.label(header)
+                            positions_container = ui.column().classes("w-full gap-0")
                         positions_empty = ui.label("No open positions").classes(
                             f"text-sm {TEXT_MUTED}"
                         )
@@ -945,7 +1040,7 @@ def dashboard() -> None:
                         )
 
         # ============================= TRADES ========================== #
-        with ui.tab_panel(trades_tab).classes("p-6"):
+        with ui.tab_panel(trades_tab).classes("p-3 sm:p-6"):
             with ui.column().classes("w-full gap-4"):
                 with ui.row().classes("w-full gap-3 flex-wrap"):
                     tiles = {
@@ -1038,7 +1133,7 @@ def dashboard() -> None:
                     )
 
         # ============================ ANALYST ========================== #
-        with ui.tab_panel(analyst_tab).classes("p-6"):
+        with ui.tab_panel(analyst_tab).classes("p-3 sm:p-6"):
             with ui.column().classes("w-full gap-4"):
                 # Toggle bar
                 with card():
@@ -1058,6 +1153,23 @@ def dashboard() -> None:
                             lambda e: on_analyst_toggle(e.value)
                         )
 
+                # Agent roster — what each LLM call does + live health
+                with card():
+                    card_title(
+                        "🤖 LLM Agents — who does what",
+                        "call counts and errors over the last 24h",
+                    )
+                    ui.label(
+                        "Every LLM call the system makes belongs to one of "
+                        "these seven agents. Green dot: last call succeeded. "
+                        "Red: last call failed (hover for the error). Gray: "
+                        "no calls recorded yet."
+                    ).classes(f"text-xs {TEXT_MUTED}")
+                    agents_grid = ui.element("div").classes(
+                        "w-full grid grid-cols-1 lg:grid-cols-2 "
+                        "2xl:grid-cols-3 gap-3 mt-2"
+                    )
+
                 # Connection & schedule config
                 with card():
                     card_title("🔌 Connection & Schedule")
@@ -1067,7 +1179,7 @@ def dashboard() -> None:
                         "(e.g. cloud Ollama endpoint)."
                     ).classes(f"text-xs {TEXT_MUTED}")
                     with ui.row().classes(
-                        "w-full items-center justify-between gap-4 flex-nowrap"
+                        "w-full items-center justify-between gap-4 flex-wrap"
                     ):
                         with ui.column().classes("gap-0 min-w-0"):
                             ui.label("Base URL").classes("text-sm text-white")
@@ -1076,9 +1188,9 @@ def dashboard() -> None:
                             ).classes(f"text-xs {TEXT_MUTED}")
                         analyst_base_url_input = ui.input(
                             value="", placeholder="https://..."
-                        ).props("dense outlined").classes("w-80 shrink-0")
+                        ).props("dense outlined").classes("w-full sm:w-80 sm:shrink-0")
                     with ui.row().classes(
-                        "w-full items-center justify-between gap-4 flex-nowrap"
+                        "w-full items-center justify-between gap-4 flex-wrap"
                     ):
                         with ui.column().classes("gap-0 min-w-0"):
                             ui.label("Model").classes("text-sm text-white")
@@ -1087,9 +1199,9 @@ def dashboard() -> None:
                             ).classes(f"text-xs {TEXT_MUTED}")
                         analyst_model_input = ui.input(
                             value="deepseek-r1", placeholder="deepseek-r1"
-                        ).props("dense outlined").classes("w-56 shrink-0")
+                        ).props("dense outlined").classes("w-full sm:w-56 sm:shrink-0")
                     with ui.row().classes(
-                        "w-full items-center justify-between gap-4 flex-nowrap"
+                        "w-full items-center justify-between gap-4 flex-wrap"
                     ):
                         with ui.column().classes("gap-0 min-w-0"):
                             ui.label("Sentiment Model").classes(
@@ -1101,9 +1213,9 @@ def dashboard() -> None:
                             ).classes(f"text-xs {TEXT_MUTED}")
                         analyst_sentiment_model_input = ui.input(
                             value="", placeholder="(same as Model)"
-                        ).props("dense outlined").classes("w-56 shrink-0")
+                        ).props("dense outlined").classes("w-full sm:w-56 sm:shrink-0")
                     with ui.row().classes(
-                        "w-full items-center justify-between gap-4 flex-nowrap"
+                        "w-full items-center justify-between gap-4 flex-wrap"
                     ):
                         with ui.column().classes("gap-0 min-w-0"):
                             ui.label("Watchlist Model").classes(
@@ -1115,9 +1227,9 @@ def dashboard() -> None:
                             ).classes(f"text-xs {TEXT_MUTED}")
                         analyst_watchlist_model_input = ui.input(
                             value="", placeholder="(same as Model)"
-                        ).props("dense outlined").classes("w-56 shrink-0")
+                        ).props("dense outlined").classes("w-full sm:w-56 sm:shrink-0")
                     with ui.row().classes(
-                        "w-full items-center justify-between gap-4 flex-nowrap"
+                        "w-full items-center justify-between gap-4 flex-wrap"
                     ):
                         with ui.column().classes("gap-0 min-w-0"):
                             ui.label("Risk Model").classes("text-sm text-white")
@@ -1127,9 +1239,9 @@ def dashboard() -> None:
                             ).classes(f"text-xs {TEXT_MUTED}")
                         analyst_risk_model_input = ui.input(
                             value="", placeholder="(same as Model)"
-                        ).props("dense outlined").classes("w-56 shrink-0")
+                        ).props("dense outlined").classes("w-full sm:w-56 sm:shrink-0")
                     with ui.row().classes(
-                        "w-full items-center justify-between gap-4 flex-nowrap"
+                        "w-full items-center justify-between gap-4 flex-wrap"
                     ):
                         with ui.column().classes("gap-0 min-w-0"):
                             ui.label("API Key").classes("text-sm text-white")
@@ -1140,10 +1252,10 @@ def dashboard() -> None:
                         analyst_api_key_input = ui.input(
                             value="", placeholder="sk-..."
                         ).props("dense outlined type=password").classes(
-                            "w-64 shrink-0"
+                            "w-full sm:w-64 sm:shrink-0"
                         )
                     with ui.row().classes(
-                        "w-full items-center justify-between gap-4 flex-nowrap"
+                        "w-full items-center justify-between gap-4 flex-wrap"
                     ):
                         with ui.column().classes("gap-0 min-w-0"):
                             ui.label("Trade review interval (hours)").classes(
@@ -1154,9 +1266,9 @@ def dashboard() -> None:
                             ).classes(f"text-xs {TEXT_MUTED}")
                         analyst_interval_input = ui.number(
                             value=4, min=1, max=24, step=1
-                        ).props("dense outlined").classes("w-24 shrink-0")
+                        ).props("dense outlined").classes("w-full sm:w-24 sm:shrink-0")
                     with ui.row().classes(
-                        "w-full items-center justify-between gap-4 flex-nowrap"
+                        "w-full items-center justify-between gap-4 flex-wrap"
                     ):
                         with ui.column().classes("gap-0 min-w-0"):
                             ui.label("Trade lookback").classes(
@@ -1167,7 +1279,7 @@ def dashboard() -> None:
                             ).classes(f"text-xs {TEXT_MUTED}")
                         analyst_lookback_input = ui.number(
                             value=50, min=10, max=500, step=10
-                        ).props("dense outlined").classes("w-24 shrink-0")
+                        ).props("dense outlined").classes("w-full sm:w-24 sm:shrink-0")
 
                     async def apply_analyst_config() -> None:
                         updates = {
@@ -1212,7 +1324,7 @@ def dashboard() -> None:
                             f"text-xs {TEXT_MUTED}"
                         )
 
-                with ui.row().classes("w-full gap-4 items-start flex-nowrap"):
+                with ui.row().classes("w-full gap-4 items-start flex-col md:flex-row"):
                     # Optimization review card
                     with ui.column().classes("gap-4 grow basis-0 min-w-0"):
                         with card():
@@ -1304,9 +1416,37 @@ def dashboard() -> None:
                                 "during market hours"
                             ).classes(f"text-sm {TEXT_MUTED}")
 
+                with ui.row().classes("w-full gap-4 items-start flex-col md:flex-row"):
+                    # Review history timeline
+                    with ui.column().classes("gap-4 grow basis-0 min-w-0"):
+                        with card():
+                            card_title(
+                                "📜 Review History",
+                                "past verdicts, newest first",
+                            )
+                            review_history_col = ui.column().classes(
+                                "w-full gap-2"
+                            )
+                            review_history_empty = ui.label(
+                                "No reviews recorded yet — the history "
+                                "starts with the next review"
+                            ).classes(f"text-sm {TEXT_MUTED}")
+
+                    # Raw LLM call log
+                    with ui.column().classes("gap-4 grow basis-0 min-w-0"):
+                        with card():
+                            card_title(
+                                "📡 LLM Call Log",
+                                "latest 25 calls, newest first",
+                            )
+                            call_log_col = ui.column().classes("w-full gap-0")
+                            call_log_empty = ui.label(
+                                "No LLM calls recorded yet"
+                            ).classes(f"text-sm {TEXT_MUTED}")
+
         # ============================ SETTINGS ========================= #
-        with ui.tab_panel(settings_tab).classes("p-6"):
-            with ui.row().classes("w-full gap-4 items-start flex-nowrap"):
+        with ui.tab_panel(settings_tab).classes("p-3 sm:p-6"):
+            with ui.row().classes("w-full gap-4 items-start flex-col md:flex-row"):
                 with ui.column().classes("gap-4 grow basis-0 min-w-0"):
                     with card():
                         card_title("🧠 Strategy Parameters")
@@ -1320,7 +1460,7 @@ def dashboard() -> None:
                         for key, meta in PARAM_META.items():
                             with ui.row().classes(
                                 "w-full items-center justify-between gap-4 "
-                                "flex-nowrap"
+                                "flex-wrap"
                             ):
                                 with ui.column().classes("gap-0 min-w-0"):
                                     ui.label(meta["label"]).classes(
@@ -1344,7 +1484,7 @@ def dashboard() -> None:
                                         min=meta["min"],
                                         max=meta["max"],
                                         step=meta["step"],
-                                    ).props("dense outlined").classes("w-32 shrink-0")
+                                    ).props("dense outlined").classes("w-full sm:w-32 sm:shrink-0")
 
                         async def apply_parameters() -> None:
                             updates: Dict[str, float] = {}
@@ -1445,7 +1585,7 @@ def dashboard() -> None:
                         for key, meta in WATCHLIST_PARAM_META.items():
                             with ui.row().classes(
                                 "w-full items-center justify-between gap-4 "
-                                "flex-nowrap"
+                                "flex-wrap"
                             ):
                                 with ui.column().classes("gap-0 min-w-0"):
                                     ui.label(meta["label"]).classes(
@@ -1459,7 +1599,7 @@ def dashboard() -> None:
                                     min=meta["min"],
                                     max=meta["max"],
                                     step=meta["step"],
-                                ).props("dense outlined").classes("w-32 shrink-0")
+                                ).props("dense outlined").classes("w-full sm:w-32 sm:shrink-0")
 
                         async def apply_watchlist_parameters() -> None:
                             updates: Dict[str, float] = {}
@@ -1510,7 +1650,7 @@ def dashboard() -> None:
                         for key, meta in SCREENER_PARAM_META.items():
                             with ui.row().classes(
                                 "w-full items-center justify-between gap-4 "
-                                "flex-nowrap"
+                                "flex-wrap"
                             ):
                                 with ui.column().classes("gap-0 min-w-0"):
                                     ui.label(meta["label"]).classes(
@@ -1525,14 +1665,14 @@ def dashboard() -> None:
                                         min=meta["min"],
                                         max=meta["max"],
                                         step=meta["step"],
-                                    ).props("dense outlined").classes("w-32 shrink-0")
+                                    ).props("dense outlined").classes("w-full sm:w-32 sm:shrink-0")
                                 else:
                                     screener_param_inputs[key] = ui.number(
                                         value=int(initial_config.get(key, 200.0)),
                                         min=meta["min"],
                                         max=meta["max"],
                                         step=meta["step"],
-                                    ).props("dense outlined").classes("w-32 shrink-0")
+                                    ).props("dense outlined").classes("w-full sm:w-32 sm:shrink-0")
 
                         async def apply_screener_parameters() -> None:
                             updates: Dict[str, float] = {}
@@ -1585,7 +1725,7 @@ def dashboard() -> None:
                                 )
                             refresh_select = ui.select(
                                 [1, 2, 5, 10], value=int(DEFAULT_REFRESH_SECONDS)
-                            ).props("dense outlined").classes("w-24")
+                            ).props("dense outlined").classes("w-full sm:w-24")
                         with ui.row().classes(
                             "w-full items-center justify-between"
                         ):
@@ -1596,7 +1736,7 @@ def dashboard() -> None:
                                 )
                             log_rows_select = ui.select(
                                 [20, 50, 100, 200, 500], value=DEFAULT_LOG_ROWS
-                            ).props("dense outlined").classes("w-24")
+                            ).props("dense outlined").classes("w-full sm:w-24")
 
                 with ui.column().classes("gap-4 grow basis-0 min-w-0"):
                     with card():
@@ -1668,7 +1808,7 @@ def dashboard() -> None:
                         for key, meta in OPERATIONAL_PARAM_META.items():
                             with ui.row().classes(
                                 "w-full items-center justify-between gap-4 "
-                                "flex-nowrap"
+                                "flex-wrap"
                             ):
                                 with ui.column().classes("gap-0 min-w-0"):
                                     ui.label(meta["label"]).classes(
@@ -1686,7 +1826,7 @@ def dashboard() -> None:
                                     min=meta["min"],
                                     max=meta["max"],
                                     step=meta["step"],
-                                ).props("dense outlined").classes("w-32 shrink-0")
+                                ).props("dense outlined").classes("w-full sm:w-32 sm:shrink-0")
 
                         async def apply_operational() -> None:
                             updates: Dict[str, float] = {}
@@ -1747,13 +1887,15 @@ def dashboard() -> None:
                         }
 
         # ============================== LOGS =========================== #
-        with ui.tab_panel(logs_tab).classes("p-6"):
+        with ui.tab_panel(logs_tab).classes("p-3 sm:p-6"):
             with card():
                 with ui.row().classes("w-full items-center justify-between gap-4"):
                     ui.label("🖥️ Live System Log").classes(
                         "text-lg font-semibold text-white"
                     )
-                    with ui.row().classes("items-center gap-3"):
+                    with ui.row().classes(
+                        "items-center gap-3 flex-wrap w-full sm:w-auto"
+                    ):
                         log_level_select = ui.select(
                             list(LEVEL_COLORS),
                             multiple=True,
@@ -1761,10 +1903,10 @@ def dashboard() -> None:
                             label="levels",
                         ).props(
                             "dense outlined use-chips options-dense"
-                        ).classes("min-w-[16rem]")
+                        ).classes("w-full sm:w-auto sm:min-w-[16rem]")
                         log_search = ui.input(placeholder="filter text…").props(
                             "dense outlined clearable"
-                        ).classes("w-56")
+                        ).classes("w-full sm:w-56")
                         log_count_label = ui.label("").classes(
                             f"text-xs {TEXT_MUTED}"
                         )
@@ -2261,6 +2403,211 @@ def dashboard() -> None:
             f"Reviewed {fmt_short(reviewed)}" if reviewed else ""
         )
 
+    AGENT_BY_KEY = {a["key"]: a for a in ANALYST_AGENTS}
+
+    REVIEW_TYPE_META = {
+        "trades": ("📊", "Trade review", "text-sky-400"),
+        "optimization": ("🔬", "Optimization", "text-violet-400"),
+        "watchlist": ("📋", "Watchlist", "text-teal-400"),
+    }
+
+    DECISION_CHIPS = {
+        "accept": "text-emerald-400 border-emerald-800",
+        "override": "text-amber-400 border-amber-800",
+        "reject": "text-rose-400 border-rose-800",
+    }
+
+    def render_analyst_agents(snapshot: Dict[str, Any]) -> None:
+        analyst_cfg = snapshot.get("analyst_config") or {}
+        call_log = snapshot.get("analyst_call_log") or []
+        fingerprint = (
+            len(call_log),
+            call_log[-1].get("ts") if call_log else None,
+            tuple(
+                analyst_cfg.get(f, "")
+                for f in ("model", "sentiment_model", "watchlist_model", "risk_model")
+            ),
+            analyst_cfg.get("trade_review_interval_hours"),
+        )
+        if render_state.get("agents_fp") == fingerprint:
+            return
+        render_state["agents_fp"] = fingerprint
+
+        stats = agent_call_stats(call_log)
+        main_model = analyst_cfg.get("model", "deepseek-r1")
+        agents_grid.clear()
+        with agents_grid:
+            for agent in ANALYST_AGENTS:
+                agent_stats = stats.get(agent["key"])
+                model = analyst_cfg.get(agent["model_field"]) or main_model
+                when = agent["when"]
+                if agent["key"] == "trades":
+                    try:
+                        hours = float(
+                            analyst_cfg.get("trade_review_interval_hours", 4)
+                        )
+                        when = f"every {hours:g}h during market hours"
+                    except (TypeError, ValueError):
+                        pass
+                with ui.column().classes(
+                    "gap-1 rounded-lg border border-[#2a3140] "
+                    "bg-[#1d2432] p-3 min-w-0"
+                ):
+                    with ui.row().classes(
+                        "w-full items-center justify-between flex-nowrap gap-2"
+                    ):
+                        ui.label(f"{agent['icon']} {agent['name']}").classes(
+                            "text-sm font-semibold text-white truncate"
+                        )
+                        if agent_stats is None:
+                            ui.label("●").classes("text-xs text-gray-600")
+                        elif agent_stats["last_ok"]:
+                            ui.label("●").classes("text-xs text-emerald-400")
+                        else:
+                            dot = ui.label("●").classes("text-xs text-rose-400")
+                            with dot:
+                                ui.tooltip(
+                                    agent_stats.get("last_error")
+                                    or "last call failed"
+                                ).classes("max-w-96 break-all")
+                    ui.label(agent["what"]).classes(f"text-xs {TEXT_MUTED}")
+                    with ui.row().classes(
+                        "w-full items-center gap-2 flex-nowrap mt-1"
+                    ):
+                        ui.label(model).classes(
+                            "text-[10px] font-mono text-sky-300 "
+                            "border border-[#2a3140] rounded px-1.5 py-0.5 "
+                            "truncate"
+                        )
+                        ui.label(when).classes(
+                            f"text-[10px] {TEXT_MUTED} truncate"
+                        )
+                    if agent_stats is None:
+                        ui.label("no calls recorded yet").classes(
+                            "text-[10px] text-gray-600"
+                        )
+                    else:
+                        errors = agent_stats["errors"]
+                        parts = [
+                            f"{agent_stats['calls']} calls",
+                            f"{errors} errors" if errors else "0 errors",
+                            f"⌀ {fmt_latency(agent_stats['avg_latency_ms'])}",
+                            humanize_age(age_seconds(agent_stats["last_ts"])),
+                        ]
+                        ui.label(" · ".join(parts)).classes(
+                            "text-[10px] "
+                            + ("text-rose-400" if errors else "text-gray-500")
+                        )
+
+    def render_review_history(snapshot: Dict[str, Any]) -> None:
+        history = snapshot.get("analyst_review_history") or []
+        fingerprint = (
+            len(history),
+            history[-1].get("ts") if history else None,
+        )
+        if render_state.get("history_fp") == fingerprint:
+            return
+        render_state["history_fp"] = fingerprint
+
+        review_history_empty.set_visibility(not history)
+        review_history_col.clear()
+        with review_history_col:
+            for entry in reversed(history[-20:]):
+                icon, type_label, type_color = REVIEW_TYPE_META.get(
+                    entry.get("type"),
+                    ("🧠", str(entry.get("type", "?")), "text-gray-300"),
+                )
+                with ui.column().classes(
+                    "w-full gap-1 rounded-lg border border-[#2a3140] "
+                    "bg-[#1d2432] px-3 py-2"
+                ):
+                    with ui.row().classes(
+                        "w-full items-center gap-2 flex-nowrap"
+                    ):
+                        ui.label(f"{icon} {type_label}").classes(
+                            f"text-xs font-semibold {type_color} shrink-0"
+                        )
+                        decision = entry.get("decision")
+                        if decision:
+                            chip = ui.label(str(decision).upper()).classes(
+                                "text-[10px] font-bold rounded border "
+                                "px-1.5 py-0.5 shrink-0 "
+                                + DECISION_CHIPS.get(
+                                    decision, "text-gray-300 border-gray-700"
+                                )
+                            )
+                            reason = entry.get("decision_reason")
+                            if reason:
+                                with chip:
+                                    ui.tooltip(reason).classes("max-w-96")
+                        conf = entry.get("confidence")
+                        if conf is not None:
+                            ui.label(f"{float(conf) * 100:.0f}%").classes(
+                                f"text-[10px] {TEXT_MUTED} shrink-0"
+                            )
+                        warn_count = entry.get("warnings") or 0
+                        if warn_count:
+                            ui.label(f"⚠ {warn_count}").classes(
+                                "text-[10px] text-amber-400 shrink-0"
+                            )
+                        ui.space()
+                        ui.label(fmt_short(entry.get("ts"))).classes(
+                            f"text-[10px] {TEXT_MUTED} shrink-0"
+                        )
+                    summary = entry.get("summary") or ""
+                    if summary:
+                        clamped = ui.label(summary).classes(
+                            "text-xs text-gray-300"
+                        ).style(
+                            "display:-webkit-box;-webkit-line-clamp:2;"
+                            "-webkit-box-orient:vertical;overflow:hidden"
+                        )
+                        with clamped:
+                            ui.tooltip(summary).classes("max-w-[32rem]")
+
+    def render_call_log(snapshot: Dict[str, Any]) -> None:
+        call_log = snapshot.get("analyst_call_log") or []
+        fingerprint = (
+            len(call_log),
+            call_log[-1].get("ts") if call_log else None,
+        )
+        if render_state.get("calllog_fp") == fingerprint:
+            return
+        render_state["calllog_fp"] = fingerprint
+
+        call_log_empty.set_visibility(not call_log)
+        call_log_col.clear()
+        with call_log_col:
+            for entry in reversed(call_log[-25:]):
+                agent = AGENT_BY_KEY.get(entry.get("agent"), {})
+                ok = entry.get("ok", False)
+                with ui.row().classes(
+                    "w-full gap-2 py-0.5 items-baseline flex-nowrap"
+                ):
+                    ui.label(fmt_clock(entry.get("ts"))).classes(
+                        "text-xs text-[#5a6274] shrink-0"
+                    )
+                    ui.label("✓" if ok else "✗").classes(
+                        "text-xs font-bold shrink-0 "
+                        + ("text-emerald-400" if ok else "text-rose-400")
+                    )
+                    ui.label(
+                        f"{agent.get('icon', '•')} "
+                        f"{agent.get('name', entry.get('agent', '?'))}"
+                    ).classes("text-xs text-gray-200 shrink-0")
+                    ui.label(entry.get("model", "")).classes(
+                        f"text-xs font-mono {TEXT_MUTED} truncate"
+                    )
+                    ui.space()
+                    ui.label(fmt_latency(entry.get("latency_ms"))).classes(
+                        f"text-xs {TEXT_MUTED} shrink-0"
+                    )
+                error = entry.get("error")
+                if not ok and error:
+                    ui.label(f"↳ {error}").classes(
+                        "text-[10px] text-rose-400/80 break-all pl-16 w-full"
+                    )
+
     def render_analyst(snapshot: Dict[str, Any]) -> None:
         config = snapshot["config"]
         enabled = bool(config.get("analyst_enabled", 0.0))
@@ -2335,6 +2682,9 @@ def dashboard() -> None:
             trade_timestamp,
             trade_empty,
         )
+        render_analyst_agents(snapshot)
+        render_review_history(snapshot)
+        render_call_log(snapshot)
 
     async def on_analyst_toggle(value: bool) -> None:
         if getattr(analyst_toggle, "_suppress_change", False):

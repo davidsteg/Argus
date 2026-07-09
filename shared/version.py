@@ -10,9 +10,41 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.12.0"
+__version__ = "2.13.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.13.0",
+        "date": "2026-07-09",
+        "title": "Analyst observability: agent roster, review history, LLM call log",
+        "notes": [
+            "New LLM Agents card in the Analyst tab: all seven LLM call types "
+            "(risk agent, portfolio manager, sentiment scorer, watchlist "
+            "curator, trade reviewer, optimization reviewer, decision memory) "
+            "shown with what they do, when they run, which model serves them, "
+            "and live 24h health — call counts, error counts, average latency, "
+            "last call. Red dot + hover error when the last call failed.",
+            "Review History card: past trade/optimization/watchlist review "
+            "verdicts are kept (last 40) and shown as a timeline with "
+            "confidence, warning counts and the optimizer accept/override/"
+            "reject decision — reviews no longer overwrite each other.",
+            "LLM Call Log card: the raw last 25 LLM calls with model, latency "
+            "and error, so a silent analyst outage is visible at a glance.",
+            "Every LLM call is now recorded to the shared DB (rolling 400 "
+            "entries) — including sentiment scoring — with agent, model, "
+            "latency, request/response size and error.",
+            "New debug endpoints: GET /analyst/activity (call log + per-agent "
+            "24h aggregates) and GET /analyst/reviews (review history).",
+            "Silent agent failures now surface in the Logs tab: a failed risk "
+            "agent call (which auto-approves the signal) and a failed "
+            "portfolio manager call (which passes signals through unranked) "
+            "write WARNING log entries instead of disappearing into stdout.",
+            "Mobile-friendly dashboard: the header, tabs, two-column card "
+            "layouts and all Settings/Analyst forms now stack to a single "
+            "column on phones (no horizontal scrolling); the positions grid "
+            "scrolls sideways within its card instead of squashing.",
+        ],
+    },
     {
         "version": "2.12.0",
         "date": "2026-07-08",

@@ -9,6 +9,44 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.13.0] - 2026-07-09
+
+### Added
+- **LLM Agents card** (Analyst tab) — all seven LLM call types (risk agent,
+  portfolio manager, sentiment scorer, watchlist curator, trade reviewer,
+  optimization reviewer, decision memory) are shown with a plain-language
+  description of what each one does, when it runs, which model serves it
+  (resolving the per-agent overrides), and live 24h health: call count,
+  error count, average latency and time of the last call. A red status dot
+  with the error text on hover marks an agent whose last call failed.
+- **Review History card** (Analyst tab) — trade, optimization and watchlist
+  reviews now append to a bounded history (`analyst_review_history`, last
+  40) instead of only overwriting the "latest" blob. Shown as a timeline
+  with per-review confidence, warning count, summary, and the optimizer
+  accept / override / reject decision chip.
+- **LLM Call Log card** (Analyst tab) — the raw last 25 LLM calls with
+  timestamp, agent, model, latency and error text, so "is the analyst
+  actually working?" is answerable at a glance.
+- **LLM call recording** — every LLM call in the system, including
+  sentiment scoring, is recorded to the shared DB via the new
+  `backend/llm_log.py` (rolling 400 entries in `runtime_state`): agent,
+  model, latency, success/error, request/response size.
+- **New debug endpoints** — `GET /analyst/activity` (call log + per-agent
+  24h aggregates) and `GET /analyst/reviews` (review history).
+- **Mobile-friendly dashboard** — the header (logo / condition chips /
+  balance-PnL-status / emergency button), the tab bar, every two-column
+  card layout, and all Settings and Analyst forms now collapse to a single
+  column below the `md` breakpoint, so nothing overflows horizontally on a
+  phone. Fixed-width inputs become full-width on small screens; the active
+  positions grid scrolls sideways inside its own card instead of squashing
+  its eight columns into unreadable slivers.
+
+### Fixed
+- **Silent agent failures are now visible** — a failed risk-agent call
+  auto-approves the signal and a failed portfolio-manager call passes
+  signals through unranked; both previously vanished into container stdout.
+  They now also write WARNING entries to the DB log shown in the Logs tab.
+
 ## [v2.12.0] - 2026-07-08
 
 ### Fixed

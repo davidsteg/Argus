@@ -297,6 +297,10 @@ class StrategyAnalyst:
             )
         except Exception as exc:
             logger.warning("Risk agent failed for %s: %s", signal.get("symbol"), exc)
+            try:
+                db.add_log("WARNING", f"Risk agent unavailable for {signal.get('symbol')} — signal auto-approved: {str(exc)[:200]}")
+            except Exception:
+                pass
             return {"approved": True, "reason": "risk agent unavailable", "risk_score": 0.5, "warnings": []}
 
         return {
@@ -370,6 +374,10 @@ class StrategyAnalyst:
             )
         except Exception as exc:
             logger.warning("Portfolio manager failed: %s", exc)
+            try:
+                db.add_log("WARNING", f"Portfolio manager unavailable — passing signals through unranked: {str(exc)[:200]}")
+            except Exception:
+                pass
             return {
                 "approved_symbols": [s["symbol"] for s in pending_signals],
                 "rejected_symbols": [],
@@ -556,6 +564,16 @@ class StrategyAnalyst:
 
         decision = result.get("decision", {})
         action = decision.get("action", "accept")
+        self._append_review_history(db, {
+            "ts": reviewed_at,
+            "type": "optimization",
+            "model": str(self._config.get("model", "")),
+            "summary": str(result.get("summary", ""))[:500],
+            "confidence": result.get("confidence"),
+            "warnings": len(result.get("warnings") or []),
+            "decision": action,
+            "decision_reason": str(decision.get("reason", ""))[:300],
+        })
         if action == "reject":
             db.add_log("ANALYST", f"LLM rejected optimizer winner — keeping current params. Reason: {decision.get('reason', 'not specified')}")
             return None
@@ -638,6 +656,14 @@ class StrategyAnalyst:
             db.set_state("analyst_trades", result)
         except Exception as exc:
             logger.error("Failed to store trade review: %s", exc)
+        self._append_review_history(db, {
+            "ts": reviewed_at,
+            "type": "trades",
+            "model": str(self._config.get("model", "")),
+            "summary": str(result.get("summary", ""))[:500],
+            "confidence": result.get("confidence"),
+            "warnings": len(result.get("warnings") or []),
+        })
         return result
 
     def should_review_trades(self) -> bool:
@@ -716,15 +742,23 @@ class StrategyAnalyst:
         if len(new_symbols) < 3:
             return None
 
+        reviewed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
             db.set_state("analyst_watchlist", {
                 "previous": current_symbols,
                 "suggested": new_symbols,
-                "reviewed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "reviewed_at": reviewed_at,
                 "summary": result.get("summary", ""),
             })
         except Exception as exc:
             logger.error("Failed to store watchlist review: %s", exc)
+        self._append_review_history(db, {
+            "ts": reviewed_at,
+            "type": "watchlist",
+            "model": str(self._config.get("watchlist_model") or self._config.get("model", "")),
+            "summary": str(result.get("summary", ""))[:500],
+            "symbols": len(new_symbols),
+        })
 
         return new_symbols
 
@@ -739,6 +773,25 @@ class StrategyAnalyst:
     # ------------------------------------------------------------------ #
     # internals
     # ------------------------------------------------------------------ #
+
+    #: bounded history of past review outcomes for the dashboard timeline
+    REVIEW_HISTORY_KEY = "analyst_review_history"
+    REVIEW_HISTORY_MAX = 40
+
+    def _append_review_history(self, db, entry: Dict[str, Any]) -> None:
+        """Append a compact review record so the dashboard can show past
+        reviews, not just the latest one. Never raises."""
+        entry.setdefault(
+            "ts", datetime.now(timezone.utc).isoformat(timespec="seconds")
+        )
+        try:
+            history = db.get_state(self.REVIEW_HISTORY_KEY) or []
+            history.append(entry)
+            db.set_state(
+                self.REVIEW_HISTORY_KEY, history[-self.REVIEW_HISTORY_MAX:]
+            )
+        except Exception as exc:
+            logger.error("Failed to append review history: %s", exc)
 
     def _load_config(self) -> None:
         try:
@@ -823,6 +876,8 @@ class StrategyAnalyst:
         model_override: Optional[str] = None,
         max_tokens: int = 2048,
     ) -> Dict[str, Any]:
+        from llm_log import record_llm_call
+
         client = client_override or self._client
         model = model_override or str(self._config.get("model", "deepseek-r1"))
         prompt = system_prompt or (
@@ -831,6 +886,15 @@ class StrategyAnalyst:
         )
         payload = json.dumps(data, default=str, indent=2)
         logger.info("Analyst calling %s for %s review (%d chars)", model, review_type, len(payload))
+        started = time.monotonic()
+
+        def _fail(reason: str) -> RuntimeError:
+            record_llm_call(
+                review_type, model, (time.monotonic() - started) * 1000,
+                ok=False, error=reason, request_chars=len(payload),
+            )
+            return RuntimeError(reason)
+
         try:
             response = client.chat.completions.create(
                 model=model,
@@ -842,7 +906,7 @@ class StrategyAnalyst:
                 max_tokens=max_tokens,
             )
         except Exception as exc:
-            raise RuntimeError(f"OpenAI API call failed: {type(exc).__name__}: {exc}")
+            raise _fail(f"OpenAI API call failed: {type(exc).__name__}: {exc}")
 
         choice = response.choices[0]
         msg = choice.message
@@ -855,7 +919,7 @@ class StrategyAnalyst:
             details = f"finish_reason={finish}"
             if hasattr(msg, "refusal") and msg.refusal:
                 details += f" refusal={msg.refusal}"
-            raise RuntimeError(f"LLM returned blank content ({details})")
+            raise _fail(f"LLM returned blank content ({details})")
 
         logger.info("Analyst %s review response received (%d chars, finish=%s)", review_type, len(text), finish)
         try:
@@ -863,8 +927,12 @@ class StrategyAnalyst:
         except json.JSONDecodeError:
             snippet = text[:500]
             logger.error("Analyst %s review — failed to parse JSON. Raw response (first 500 chars): %s", review_type, snippet)
-            raise RuntimeError(f"LLM returned non-JSON response: {snippet}")
+            raise _fail(f"LLM returned non-JSON response: {snippet}")
 
+        record_llm_call(
+            review_type, model, (time.monotonic() - started) * 1000,
+            ok=True, request_chars=len(payload), response_chars=len(text),
+        )
         return result
 
     @staticmethod

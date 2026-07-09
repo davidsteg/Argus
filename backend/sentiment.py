@@ -210,27 +210,41 @@ class SentimentProvider:
         return headlines[:HEADLINE_LIMIT]
 
     def _score_with_llm(self, symbol: str, headlines: List[str]) -> tuple:
+        from llm_log import record_llm_call
+
         numbered = "\n".join(f"{i + 1}. {h}" for i, h in enumerate(headlines))
-        response = self._client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": LLM_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        f"Stock: {symbol}\nHeadlines from the last 24 hours:\n"
-                        f"{numbered}\n\nScore the aggregate sentiment. "
-                        "Respond with valid JSON only, no markdown, no preamble: "
-                        '{"score": 0.0-1.0, "rationale": "..."}'
-                    ),
-                },
-            ],
-            temperature=0.3,
-            max_tokens=512,
+        started = time.monotonic()
+        try:
+            response = self._client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": LLM_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Stock: {symbol}\nHeadlines from the last 24 hours:\n"
+                            f"{numbered}\n\nScore the aggregate sentiment. "
+                            "Respond with valid JSON only, no markdown, no preamble: "
+                            '{"score": 0.0-1.0, "rationale": "..."}'
+                        ),
+                    },
+                ],
+                temperature=0.3,
+                max_tokens=512,
+            )
+            text = response.choices[0].message.content
+            if not text:
+                raise RuntimeError("LLM returned blank content")
+        except Exception as exc:
+            record_llm_call(
+                "sentiment", self._model, (time.monotonic() - started) * 1000,
+                ok=False, error=f"{symbol}: {exc}", request_chars=len(numbered),
+            )
+            raise
+        record_llm_call(
+            "sentiment", self._model, (time.monotonic() - started) * 1000,
+            ok=True, request_chars=len(numbered), response_chars=len(text),
         )
-        text = response.choices[0].message.content
-        if not text:
-            raise RuntimeError("LLM returned blank content")
         text = text.strip()
         text = re.sub(r"```(?:json)?\s*\n?(.*?)\n?```", r"\1", text, flags=re.DOTALL).strip()
         data = json.loads(text)

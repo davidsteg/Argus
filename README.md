@@ -142,6 +142,10 @@ the backend API.
 | `POST /optimize` | run the walk-forward grid search now |
 | `POST /kill` | emergency kill-sequence |
 | `POST /reset` | recover from KILLED and restart the engine |
+| `GET /analyst/activity` | every LLM call with model, latency, outcome + per-agent 24h stats |
+| `GET /analyst/reviews` | history of past trade/optimization/watchlist review verdicts |
+| `GET /analyst/config` `/optimization` `/trades` `/memory` | analyst state snapshots |
+| `POST /analyst/review` `/toggle` `/config` `/extract-lessons` | analyst actions |
 
 ## Configuration
 
