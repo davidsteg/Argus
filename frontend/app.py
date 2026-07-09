@@ -335,6 +335,44 @@ def fetch_snapshot(log_limit: int, equity_since: Optional[str]) -> Dict[str, Any
     }
 
 
+def _limit_close_order(trading, position) -> None:
+    """Submit a marketable extended-hours limit close for one position.
+
+    Market orders and close_all_positions liquidation are rejected outside the
+    regular session, so the dashboard controls — like the engine — close with a
+    limit order priced exit_slip_pct through the position's current price so it
+    still fills in a thin pre/post-market book."""
+    from alpaca.trading.enums import OrderSide, TimeInForce
+    from alpaca.trading.requests import LimitOrderRequest
+
+    raw_qty = float(position.qty)
+    qty = abs(raw_qty)
+    if qty <= 0:
+        return
+    is_long = raw_qty > 0
+    ref = (
+        position.current_price
+        if position.current_price is not None
+        else position.avg_entry_price
+    )
+    price = float(ref)
+    slip = get_db().get_config().get("exit_slip_pct", 0.002)
+    if is_long:
+        limit_price = max(round(price * (1 - slip), 2), 0.01)
+    else:
+        limit_price = round(price * (1 + slip), 2)
+    trading.submit_order(
+        LimitOrderRequest(
+            symbol=position.symbol,
+            qty=qty,
+            side=OrderSide.SELL if is_long else OrderSide.BUY,
+            time_in_force=TimeInForce.DAY,
+            extended_hours=True,
+            limit_price=limit_price,
+        )
+    )
+
+
 def execute_hard_stop() -> Dict[str, Any]:
     """Blocking emergency intervention (run via io_bound).
 
@@ -356,7 +394,11 @@ def execute_hard_stop() -> Dict[str, Any]:
             errors.append(f"cancel orders: {exc}")
             db.add_log("ERROR", f"Dashboard cancel-all failed: {exc}")
         try:
-            trading.close_all_positions(cancel_orders=True)
+            # Orders already cancelled above; close each position with an
+            # extended-hours limit order (market liquidation is rejected
+            # outside the regular session).
+            for position in trading.get_all_positions():
+                _limit_close_order(trading, position)
             db.add_log("CRITICAL", "All positions liquidated (dashboard)")
         except Exception as exc:
             errors.append(f"liquidate: {exc}")
@@ -373,8 +415,8 @@ def execute_hard_stop() -> Dict[str, Any]:
 
 
 def close_single_position(symbol: str) -> Optional[str]:
-    """Blocking market-close of one position via the dashboard's own
-    Alpaca client (paper trading, like the hard stop). Returns an error
+    """Blocking extended-hours limit close of one position via the dashboard's
+    own Alpaca client (paper trading, like the hard stop). Returns an error
     message or None on success."""
     from alpaca.trading.client import TradingClient
     from alpaca.trading.enums import QueryOrderStatus
@@ -384,14 +426,14 @@ def close_single_position(symbol: str) -> Optional[str]:
     db.add_log("WARNING", f"{symbol}: manual close requested from dashboard")
     try:
         trading = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
-        # The bracket's exit legs hold the shares — cancel them first or
-        # the market close would be rejected for insufficient quantity.
+        # Cancel any resting orders first (an unfilled entry limit would hold
+        # the shares), then submit an extended-hours limit close.
         open_orders = trading.get_orders(
             GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])
         )
         for order in open_orders:
             trading.cancel_order_by_id(order.id)
-        trading.close_position(symbol)
+        _limit_close_order(trading, trading.get_open_position(symbol))
         db.add_log("TRADE", f"{symbol}: manual close submitted (dashboard)")
         return None
     except Exception as exc:
@@ -2103,8 +2145,8 @@ def dashboard() -> None:
     async def on_close_position(symbol: str) -> None:
         if not await confirm(
             f"Close {symbol}",
-            f"Cancel {symbol}'s bracket exit orders and market-close the "
-            "position now.",
+            f"Cancel {symbol}'s resting orders and close the position now "
+            "with an extended-hours limit order.",
             f"CLOSE {symbol}",
         ):
             return
@@ -2566,34 +2608,32 @@ def dashboard() -> None:
         series = trade_info_chart.options["series"][0]
         series["data"] = bars
 
-        mark_points = []
         entry_ms = epoch_ms(trade["entry_time"])
-        if entry_ms is not None:
-            mark_points.append({
-                "name": "Entry",
-                "coord": [entry_ms, trade["entry_price"]],
-                "value": "IN",
-                "itemStyle": {"color": SERIES_BLUE},
-            })
         exit_ms = epoch_ms(trade["exit_time"]) if trade["exit_time"] else None
-        if exit_ms is not None and trade["exit_price"] is not None:
-            mark_points.append({
-                "name": "Exit",
-                "coord": [exit_ms, trade["exit_price"]],
-                "value": "OUT",
-                "itemStyle": {
-                    "color": PNL_GREEN if (pnl or 0) >= 0 else PNL_RED
+        exit_color = PNL_GREEN if (pnl or 0) >= 0 else PNL_RED
+
+        # Entry/exit are marked as vertical lines at their timestamps (cleaner
+        # than floating pins — they mark *when* without hiding the price line);
+        # TP/SL are horizontal level lines. Both share one markLine series.
+        mark_lines = []
+        if entry_ms is not None:
+            mark_lines.append({
+                "xAxis": entry_ms,
+                "lineStyle": {"color": SERIES_BLUE, "width": 1.5, "opacity": 0.9},
+                "label": {
+                    "formatter": "IN", "color": SERIES_BLUE, "position": "end",
+                    "fontSize": 10, "fontWeight": "bold",
                 },
             })
-        if mark_points:
-            series["markPoint"] = {
-                "symbol": "pin",
-                "symbolSize": 46,
-                "label": {"color": "#0e1117", "fontSize": 10, "fontWeight": "bold"},
-                "data": mark_points,
-            }
-
-        mark_lines = []
+        if exit_ms is not None:
+            mark_lines.append({
+                "xAxis": exit_ms,
+                "lineStyle": {"color": exit_color, "width": 1.5, "opacity": 0.9},
+                "label": {
+                    "formatter": "OUT", "color": exit_color, "position": "end",
+                    "fontSize": 10, "fontWeight": "bold",
+                },
+            })
         tp = trade.get("take_profit")
         sl = trade.get("stop_loss")
         if tp is not None:
@@ -2613,6 +2653,15 @@ def dashboard() -> None:
                 "silent": True,
                 "symbol": "none",
                 "data": mark_lines,
+            }
+
+        # Faint band over the window the position was actually held, so the
+        # hold period reads at a glance between the two vertical markers.
+        if entry_ms is not None and exit_ms is not None:
+            series["markArea"] = {
+                "silent": True,
+                "itemStyle": {"color": "rgba(57, 135, 229, 0.08)"},
+                "data": [[{"xAxis": entry_ms}, {"xAxis": exit_ms}]],
             }
         trade_info_chart.update()
 
