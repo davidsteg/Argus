@@ -93,6 +93,10 @@ PARAMETER_GRID: Dict[str, List[float]] = {
     "rsi_exit_signal": [60.0, 70.0, 80.0],
     "rsi_short_signal": [60.0, 70.0, 80.0],
     "rsi_short_exit": [20.0, 30.0, 40.0],
+    # Falling-knife cap: max fraction past VWAP an entry may sit before it is
+    # rejected as a collapse rather than a dip. 999.0 = off, so the optimizer
+    # can drop the gate entirely if it fails out-of-sample validation.
+    "max_vwap_dislocation_pct": [0.08, 0.15, 999.0],
 }
 
 
@@ -164,6 +168,7 @@ def backtest(
     rsi_exit_signal: float,
     rsi_short_signal: float = 999.0,
     rsi_short_exit: float = 0.0,
+    max_vwap_dislocation_pct: float = 999.0,
     cooldown_bars: int = 0,
     position_size_usd: float = 500.0,
     risk_per_trade_usd: float = 20.0,
@@ -278,8 +283,13 @@ def backtest(
         if stop_is_floored(closes[i], atr[i], atr_stop_mult):
             continue
 
-        # LONG entry: RSI crosses below buy_signal, price below VWAP
-        if rsi[i - 1] >= rsi_buy_signal > rsi[i] and closes[i] <= vwap[i]:
+        # LONG entry: RSI crosses below buy_signal, price below VWAP but not so
+        # far below it that the dip is a falling knife (live falling-knife gate).
+        if (
+            rsi[i - 1] >= rsi_buy_signal > rsi[i]
+            and closes[i] <= vwap[i]
+            and (vwap[i] - closes[i]) / vwap[i] <= max_vwap_dislocation_pct
+        ):
             entry_price = closes[i]
             stop_distance, target_distance = bracket_distances(
                 entry_price, atr[i], atr_stop_mult, atr_target_mult
@@ -295,11 +305,13 @@ def backtest(
             target_price = entry_price + target_distance
             continue
 
-        # SHORT entry: RSI crosses above short_signal, price above VWAP
+        # SHORT entry: RSI crosses above short_signal, price above VWAP but not
+        # so far above it that the move is a parabolic squeeze (mirror gate).
         if (
             rsi_short_signal < 999.0
             and rsi[i - 1] <= rsi_short_signal < rsi[i]
             and closes[i] >= vwap[i]
+            and (closes[i] - vwap[i]) / vwap[i] <= max_vwap_dislocation_pct
         ):
             entry_price = closes[i]
             stop_distance, target_distance = bracket_distances(
@@ -360,6 +372,7 @@ class _WindowData:
         rsi_exit_signal: float,
         rsi_short_signal: float = 999.0,
         rsi_short_exit: float = 0.0,
+        max_vwap_dislocation_pct: float = 999.0,
         cooldown_bars: int = 30,
         position_size_usd: float = 500.0,
         risk_per_trade_usd: float = 20.0,
@@ -388,6 +401,7 @@ class _WindowData:
                 rsi_exit_signal=rsi_exit_signal,
                 rsi_short_signal=rsi_short_signal,
                 rsi_short_exit=rsi_short_exit,
+                max_vwap_dislocation_pct=max_vwap_dislocation_pct,
                 cooldown_bars=cooldown_bars,
                 position_size_usd=position_size_usd,
                 risk_per_trade_usd=risk_per_trade_usd,
@@ -471,7 +485,7 @@ def run_optimization() -> Optional[Dict[str, float]]:
 
     # Score every combination on the train window, rank best-first.
     ranked: List[Tuple[float, Dict[str, float], Tuple[float, float, int]]] = []
-    for rsi_period, rsi_buy, stop_mult, target_mult, exit_signal, short_signal, short_exit in itertools.product(
+    for rsi_period, rsi_buy, stop_mult, target_mult, exit_signal, short_signal, short_exit, max_disloc in itertools.product(
         PARAMETER_GRID["rsi_period"],
         PARAMETER_GRID["rsi_buy_signal"],
         PARAMETER_GRID["atr_stop_mult"],
@@ -479,6 +493,7 @@ def run_optimization() -> Optional[Dict[str, float]]:
         PARAMETER_GRID["rsi_exit_signal"],
         PARAMETER_GRID["rsi_short_signal"],
         PARAMETER_GRID["rsi_short_exit"],
+        PARAMETER_GRID["max_vwap_dislocation_pct"],
     ):
         score, total_return, drawdown, trades = train.score(
             rsi_period=int(rsi_period),
@@ -488,6 +503,7 @@ def run_optimization() -> Optional[Dict[str, float]]:
             rsi_exit_signal=exit_signal,
             rsi_short_signal=short_signal,
             rsi_short_exit=short_exit,
+            max_vwap_dislocation_pct=max_disloc,
             cooldown_bars=cooldown_bars,
             **sizing,
         )
@@ -501,6 +517,7 @@ def run_optimization() -> Optional[Dict[str, float]]:
             "rsi_exit_signal": exit_signal,
             "rsi_short_signal": short_signal,
             "rsi_short_exit": short_exit,
+            "max_vwap_dislocation_pct": max_disloc,
         }
         ranked.append((score, params, (total_return, drawdown, trades)))
     ranked.sort(key=lambda item: item[0], reverse=True)
@@ -531,6 +548,7 @@ def run_optimization() -> Optional[Dict[str, float]]:
             rsi_exit_signal=params["rsi_exit_signal"],
             rsi_short_signal=params.get("rsi_short_signal", 999.0),
             rsi_short_exit=params.get("rsi_short_exit", 0.0),
+            max_vwap_dislocation_pct=params.get("max_vwap_dislocation_pct", 999.0),
             cooldown_bars=cooldown_bars,
             **sizing,
         )

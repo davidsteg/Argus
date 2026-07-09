@@ -9,6 +9,26 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.14.0] - 2026-07-10
+
+### Added
+- **Falling-knife gate: skip RSI-oversold entries that sit too far past VWAP.**
+  Post-mortem of the 2026-07-09 VRAX loss — the day's worst trade by 8×. The
+  engine bought VRAX at `$6.95` while session VWAP was `$9.17` (24% below fair
+  value, ~10× ATR) on an RSI 25.9 "dip". It was a collapse, not a dip: RSI kept
+  bleeding to 13 and the bracket stopped out for `−$23.40`. The existing VWAP
+  gate only checked *direction* (price below VWAP = "dip") with no floor on
+  *depth*, so a 1%-below-VWAP dip and a 24%-below-VWAP crash passed identically.
+- New `max_vwap_dislocation_pct` strategy parameter (default `0.15`): a long is
+  skipped when price sits more than this fraction below VWAP, and — mirrored — a
+  short is skipped when price sits more than this fraction above VWAP (a
+  parabolic squeeze). Editable from Settings → Strategy; the gate runs before
+  the sentiment LLM call, so a falling knife costs no tokens.
+- Modelled in the optimizer backtest and added to the nightly grid as
+  `[0.08, 0.15, 999.0]` — `999.0` disables the gate, so the walk-forward
+  out-of-sample validation step can drop it entirely if it fails to earn its
+  keep rather than overfitting to a single trade.
+
 ## [v2.13.3] - 2026-07-09
 
 ### Fixed

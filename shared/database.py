@@ -54,6 +54,7 @@ DEFAULT_CONFIG: Dict[str, float] = {
     "rsi_short_exit": 30.0,    # cover short early when RSI drops below this
     "short_enabled": 0.0,      # 0 = off, 1 = on — short selling toggle
     "news_cutoff": 0.45,       # minimum sentiment score required to trade (below 0.50 so no-news/neutral passes)
+    "max_vwap_dislocation_pct": 0.15,  # skip entries more than this fraction past VWAP — that deep a dislocation is a falling knife, not a mean reversion (999 = off)
     "atr_stop_mult": 1.5,      # bracket stop-loss distance, ATR multiples
     "atr_target_mult": 2.5,    # bracket take-profit distance, ATR multiples
     "analyst_enabled": 0.0,    # 0 = off, 1 = on — LLM strategy analyst toggle

@@ -177,6 +177,11 @@ PARAM_META: Dict[str, Dict[str, Any]] = {
         "hint": "minimum sentiment score to trade (0.50 = neutral/no news)",
         "min": 0.0, "max": 1.0, "step": 0.01, "int": False,
     },
+    "max_vwap_dislocation_pct": {
+        "label": "Max VWAP Dislocation",
+        "hint": "skip entries more than this fraction past VWAP — deeper is a falling knife, not a dip (999 = off)",
+        "min": 0.02, "max": 999.0, "step": 0.01, "int": False,
+    },
     "atr_stop_mult": {
         "label": "Stop Loss (× ATR)",
         "hint": "bracket stop-loss distance in ATR multiples",

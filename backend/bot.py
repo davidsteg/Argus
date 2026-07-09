@@ -240,6 +240,22 @@ class ArgusBot:
                 )
                 return None
 
+            # Falling-knife gate: a genuine dip sits just under VWAP; a price
+            # far below it is a collapse in progress, and RSI-oversold entries
+            # into that keep falling (see 2026-07-09 VRAX: 24% below VWAP, RSI
+            # 26 → −$23 as RSI bled to 13). Reject before any LLM cost.
+            dislocation = (vwap - latest_close) / vwap
+            max_dislocation = self.config.get("max_vwap_dislocation_pct", 0.15)
+            if dislocation > max_dislocation:
+                self.db.add_log(
+                    "INFO",
+                    f"{symbol}: RSI {latest_rsi:.1f} triggered BUY but price "
+                    f"${latest_close:.2f} is {dislocation * 100:.0f}% below VWAP "
+                    f"${vwap:.2f} (>{max_dislocation * 100:.0f}% cap) — falling "
+                    f"knife, skipped",
+                )
+                return None
+
             sentiment, source = await self.process_news_sentiment(symbol)
             if sentiment <= self.config["news_cutoff"]:
                 self.db.add_log(
@@ -270,6 +286,21 @@ class ArgusBot:
                     f"{symbol}: RSI {latest_rsi:.1f} triggered SELL but price "
                     f"${latest_close:.2f} is below VWAP ${vwap:.2f} — not a real "
                     f"overextension, skipped",
+                )
+                return None
+
+            # Mirror of the long falling-knife gate: a price far above VWAP is
+            # a parabolic squeeze, not an orderly overextension, and shorting
+            # into it gets run over the same way a dip-buy catches a knife.
+            dislocation = (latest_close - vwap) / vwap
+            max_dislocation = self.config.get("max_vwap_dislocation_pct", 0.15)
+            if dislocation > max_dislocation:
+                self.db.add_log(
+                    "INFO",
+                    f"{symbol}: RSI {latest_rsi:.1f} triggered SELL but price "
+                    f"${latest_close:.2f} is {dislocation * 100:.0f}% above VWAP "
+                    f"${vwap:.2f} (>{max_dislocation * 100:.0f}% cap) — parabolic "
+                    f"squeeze, skipped",
                 )
                 return None
 
