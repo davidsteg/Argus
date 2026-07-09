@@ -10,9 +10,43 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.15.0"
+__version__ = "2.16.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.16.0",
+        "date": "2026-07-10",
+        "title": "Extended-hours trading: the full 4:00 AM – 8:00 PM ET session",
+        "notes": [
+            "The engine now trades the entire extended session — pre-market "
+            "from 4:00 AM ET, regular hours, and after-hours through 8:00 PM "
+            "ET — instead of only the 9:30 AM – 4:00 PM regular session. The "
+            "session window is derived from Alpaca's trading calendar, so "
+            "holidays and half-days (extended close pulls back to 5:00 PM) are "
+            "handled automatically.",
+            "Alpaca forbids bracket and market orders outside regular hours, so "
+            "every entry and exit is now a marketable extended-hours LIMIT "
+            "order (priced entry_slip_pct / exit_slip_pct through the last "
+            "trade so it fills in a thin book). The exchange-side OCO bracket "
+            "is replaced by a SOFT stop/target that the engine enforces every "
+            "poll cycle — a held position is closed when price crosses the "
+            "recorded stop or target level.",
+            "Tradeoff: soft stops are polled at poll_interval_seconds (default "
+            "60s), so price can gap through a level between checks — there is "
+            "no resting exchange-side stop anymore. The daily-loss kill and the "
+            "end-of-day flatten (now timed to 8:00 PM ET) remain the backstops.",
+            "New entry_slip_pct (0.001) and exit_slip_pct (0.002) strategy "
+            "parameters control how aggressively limit orders are priced to "
+            "guarantee fills; both are shown in the operational environment.",
+            "EOD flatten, signal exits, and the emergency kill sequence all use "
+            "extended-hours limit closes instead of market liquidation, so they "
+            "work in every session.",
+            "UI: the per-trade info chart now marks entry and exit with slim "
+            "vertical lines (blue in; green on a win, red on a loss out) plus a "
+            "faint shaded band over the hold window, instead of the teardrop "
+            "pins that floated over and covered the price line.",
+        ],
+    },
     {
         "version": "2.15.0",
         "date": "2026-07-10",

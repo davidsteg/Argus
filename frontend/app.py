@@ -433,7 +433,12 @@ def close_single_position(symbol: str) -> Optional[str]:
         )
         for order in open_orders:
             trading.cancel_order_by_id(order.id)
-        _limit_close_order(trading, trading.get_open_position(symbol))
+        position = next(
+            (p for p in trading.get_all_positions() if p.symbol == symbol), None
+        )
+        if position is None:
+            return f"{symbol}: no open position to close"
+        _limit_close_order(trading, position)
         db.add_log("TRADE", f"{symbol}: manual close submitted (dashboard)")
         return None
     except Exception as exc:

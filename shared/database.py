@@ -55,8 +55,8 @@ DEFAULT_CONFIG: Dict[str, float] = {
     "short_enabled": 0.0,      # 0 = off, 1 = on — short selling toggle
     "news_cutoff": 0.45,       # minimum sentiment score required to trade (below 0.50 so no-news/neutral passes)
     "max_vwap_dislocation_pct": 0.15,  # skip entries more than this fraction past VWAP — that deep a dislocation is a falling knife, not a mean reversion (999 = off)
-    "atr_stop_mult": 1.5,      # bracket stop-loss distance, ATR multiples
-    "atr_target_mult": 2.5,    # bracket take-profit distance, ATR multiples
+    "atr_stop_mult": 1.5,      # soft stop-loss distance, ATR multiples
+    "atr_target_mult": 2.5,    # soft take-profit distance, ATR multiples
     "analyst_enabled": 0.0,    # 0 = off, 1 = on — LLM strategy analyst toggle
     "watchlist_refresh_minutes": 15.0,      # dynamic-mode screener refresh cadence
     "watchlist_override_ttl_minutes": 30.0,  # analyst watchlist override expiry
@@ -73,9 +73,16 @@ DEFAULT_CONFIG: Dict[str, float] = {
     "poll_interval_seconds": 60.0,
     "bar_lookback_minutes": 180.0,
     "watchlist_size": 50.0,
-    # Close everything this many minutes before the bell: the bracket legs
-    # are DAY orders that expire at the close, so an overnight hold would
-    # sit unprotected. 0 disables the flatten (allow overnight holds).
+    # Extended-hours execution: entries and exits are marketable limit orders
+    # (bracket/market orders are forbidden outside the regular session). These
+    # price the limit this fraction through the last trade so it fills in a
+    # thin pre/post-market book. entry = aggressiveness on the way in, exit =
+    # on the way out (stops, signal exits, EOD flatten, kill).
+    "entry_slip_pct": 0.001,
+    "exit_slip_pct": 0.002,
+    # Close everything this many minutes before the 8:00 PM ET extended close:
+    # entries are DAY limit orders that expire then, so an overnight hold would
+    # sit orphaned. 0 disables the flatten (allow overnight holds).
     "eod_flatten_minutes": 10.0,
 }
 

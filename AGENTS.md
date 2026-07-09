@@ -12,8 +12,14 @@ release pipeline, and mistakes already made and fixed once.
   this configurable, env-driven, or conditionally live. If live trading
   is ever genuinely wanted, that is a deliberate, reviewed, standalone
   change — not a side effect of something else.
-- **Every entry is a bracket order** (take-profit + stop-loss attached at
-  submission). Never submit a bare market/limit buy with no exit attached.
+- **Every entry records a stop_loss and take_profit** on `_open_entries` at
+  submission, and `evaluate_and_close_stops` enforces them every cycle. Since
+  v2.16.0 the bot trades the full extended session (4 AM–8 PM ET), where Alpaca
+  forbids bracket/market orders — so entries and exits are `extended_hours`
+  limit orders and the stop/target are SOFT (polled, not resting on the
+  exchange). Never submit an entry without computing and recording both levels,
+  and never route a close through a market order or `close_all_positions`
+  (rejected pre/post-market) — use the limit-close path.
 - **The daily kill-sequence and dashboard EMERGENCY HARD STOP must always
   work independently of engine state** — `EngineController.kill()` and
   the frontend's `execute_hard_stop()` both construct their own
@@ -27,10 +33,13 @@ release pipeline, and mistakes already made and fixed once.
 
 ```
 backend/
-  bot.py          async engine: fetch bars → evaluate_signal → place_bracket_buy
+  bot.py          async engine: fetch bars → evaluate_signal → place_limit_buy
                   → sync_portfolio/reconcile trades; run_cycle() is the
                   single per-minute state machine, EngineController owns
-                  start/kill/reset lifecycle
+                  start/kill/reset lifecycle. Trades the full extended
+                  session (4 AM–8 PM ET): extended-hours limit entries with
+                  SOFT stop/target enforced by evaluate_and_close_stops each
+                  cycle (no exchange-side bracket — forbidden pre/post-market)
   api.py          FastAPI debug/ops app (port 8000/8002 depending on deploy)
                   — THE primary diagnostic surface, see below
   optimizer.py    nightly grid search, midnight Europe/Zurich
@@ -65,7 +74,7 @@ operational knobs, not strategy parameters — don't conflate the two.
 **When adding a new tunable strategy parameter**: add it to
 `DEFAULT_CONFIG` in `shared/database.py`, to `PARAMETER_GRID` in
 `optimizer.py`, thread it through `backtest()`/`indicators.py`, and use it
-in `bot.py`'s `evaluate_signal`/`place_bracket_buy`. If you retire one,
+in `bot.py`'s `evaluate_signal`/`place_limit_buy`. If you retire one,
 remove it from `DEFAULT_CONFIG` — `get_config()` already filters any
 lingering DB row for a key not in `DEFAULT_CONFIG`, so retiring is safe
 without a migration.

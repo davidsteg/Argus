@@ -9,6 +9,37 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.16.0] - 2026-07-10
+
+### Changed
+- **Extended-hours trading — the engine now trades the full 4:00 AM – 8:00 PM ET
+  session** (pre-market + regular + after-hours) instead of only the 9:30 AM –
+  4:00 PM regular session. The window is derived from Alpaca's trading calendar,
+  so holidays and half-days (extended close pulls back to 5:00 PM) are handled
+  automatically.
+- **Entries and exits are now marketable extended-hours limit orders.** Alpaca
+  forbids bracket and market orders outside regular hours, so the exchange-side
+  OCO bracket is replaced by a **soft stop/target** the engine enforces every
+  poll cycle — a held position is closed when price crosses the recorded stop or
+  target level. Limit prices are set `entry_slip_pct` / `exit_slip_pct` through
+  the last trade so they fill in a thin book.
+- EOD flatten (now timed to 8:00 PM ET), signal exits, and the emergency kill
+  sequence all use extended-hours limit closes instead of market liquidation.
+- **Cleaner entry/exit markers on the per-trade info chart** — slim vertical
+  lines at the entry (blue) and exit (green on a win, red on a loss) timestamps
+  labelled `IN` / `OUT`, plus a faint shaded band over the held window, instead
+  of the teardrop pins that floated over and covered the price line.
+
+### Added
+- `entry_slip_pct` (0.001) and `exit_slip_pct` (0.002) strategy parameters
+  controlling how aggressively limit orders are priced to guarantee fills;
+  shown in the operational environment.
+
+### Risk note
+- Soft stops are polled at `poll_interval_seconds` (default 60s), so price can
+  gap through a level between checks — there is no resting exchange-side stop
+  anymore. The daily-loss kill and the end-of-day flatten remain the backstops.
+
 ## [v2.15.0] - 2026-07-10
 
 ### Added

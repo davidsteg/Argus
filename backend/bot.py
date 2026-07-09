@@ -5,23 +5,32 @@ Philosophy: trade small amounts on a large scale for quick flips.
 1-minute bars are the execution trigger; a SPY-based market regime filter
 (regime.py) blocks entries when the whole tape is falling; a VWAP check
 confirms the dip is real; curated news sentiment is the directional
-filter. Exits are volatility-adaptive: bracket stop/target distances are
-ATR multiples, and position size is chosen so each trade risks a roughly
-constant dollar amount. On top of the resting bracket, a held long is
-closed early when RSI recovers past the overbought exit level — the mean
-reversion has played out. Nightly walk-forward optimization (optimizer.py)
+filter. Exits are volatility-adaptive: stop/target distances are ATR
+multiples, and position size is chosen so each trade risks a roughly
+constant dollar amount. A held long is also closed early when RSI recovers
+past the overbought exit level — the mean reversion has played out. Nightly
+walk-forward optimization (optimizer.py)
 re-tunes the strategy parameters — validated out-of-sample — in the
 shared bot_config table, which this engine re-reads on every cycle so
 new parameters are absorbed seamlessly without a restart.
+
+Trading window: the full extended-hours session, 4:00 AM – 8:00 PM ET
+(pre-market + regular + after-hours). Alpaca forbids bracket and market
+orders outside the regular session, so every entry and exit is a plain
+extended_hours limit order and the stop/target are SOFT: enforced by the
+engine each poll cycle rather than resting on the exchange. Between polls
+(poll_interval_seconds) price can gap through a level — the accepted
+tradeoff for trading the widest possible window.
 
 Safety:
 * Alpaca Paper Trading is forced (paper=True). No hardcoded secrets —
   credentials come exclusively from the environment.
 * A hard daily loss limit triggers the emergency kill-sequence: cancel all
-  open orders, liquidate all positions, persist KILLED, shut down.
-* End-of-day flatten: bracket legs are DAY orders that die at the bell, so
-  everything is closed eod_flatten_minutes before the close — no position
-  is ever held overnight without a stop.
+  open orders, liquidate all positions (extended-hours limit closes),
+  persist KILLED, shut down.
+* End-of-day flatten: DAY limit orders expire at the extended close, so
+  everything is closed eod_flatten_minutes before 8:00 PM ET — no position
+  is ever held overnight.
 * Every Alpaca API request is wrapped in try/except; a single API hiccup
   never crashes the engine.
 """
@@ -33,7 +42,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as dtime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -43,12 +52,11 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockLatestTradeRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderClass, OrderSide, QueryOrderStatus, TimeInForce
+from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import (
+    GetCalendarRequest,
     GetOrdersRequest,
-    MarketOrderRequest,
-    StopLossRequest,
-    TakeProfitRequest,
+    LimitOrderRequest,
 )
 from dotenv import load_dotenv
 
@@ -76,6 +84,7 @@ logging.basicConfig(
 logger = logging.getLogger("argus.bot")
 
 ZURICH = ZoneInfo("Europe/Zurich")
+US_EASTERN = ZoneInfo("America/New_York")
 
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
@@ -109,6 +118,11 @@ class ArgusBot:
         # symbol -> time.monotonic() deadline until which entries are benched
         self._cooldowns: Dict[str, float] = {}
         self._current_day: Optional[str] = None
+        # (ET-date -> (open_utc, close_utc) | None) cache for the extended
+        # trading session, so Alpaca's calendar is hit once a day, not per poll.
+        self._session_cache: Optional[
+            Tuple[str, Optional[Tuple[datetime, datetime]]]
+        ] = None
         self._shutdown = asyncio.Event()
         self._cycle_count: int = 0
         self._review_task: Optional[asyncio.Task] = None
@@ -363,7 +377,7 @@ class ArgusBot:
     # order placement
     # ------------------------------------------------------------------ #
 
-    async def place_bracket_buy(self, signal: Dict[str, Any]) -> None:
+    async def place_limit_buy(self, signal: Dict[str, Any]) -> None:
         symbol = signal["symbol"]
         price = signal["price"]
 
@@ -415,20 +429,25 @@ class ArgusBot:
 
         take_profit = round(price + target_distance, 2)
         stop_loss = round(price - stop_distance, 2)
-        # Penny rounding must never collapse a bracket onto the entry price.
+        # Penny rounding must never collapse a level onto the entry price.
         # The 2-cent floor (not Alpaca's bare 1-cent minimum) leaves a little
         # slack for the price to keep moving between this quote and the fill.
         take_profit = max(take_profit, round(price + 0.02, 2))
         stop_loss = min(stop_loss, round(price - 0.02, 2))
 
-        order_request = MarketOrderRequest(
+        # Extended hours forbids market and bracket orders, so enter with a
+        # marketable limit — priced entry_slip_pct through the last trade so it
+        # fills in a thin book — and enforce the stop/target as soft levels
+        # each cycle (see evaluate_and_close_stops).
+        slip = self.config.get("entry_slip_pct", 0.001)
+        limit_price = max(round(price * (1 + slip), 2), round(price + 0.02, 2))
+        order_request = LimitOrderRequest(
             symbol=symbol,
             qty=qty,
             side=OrderSide.BUY,
             time_in_force=TimeInForce.DAY,
-            order_class=OrderClass.BRACKET,
-            take_profit=TakeProfitRequest(limit_price=take_profit),
-            stop_loss=StopLossRequest(stop_price=stop_loss),
+            extended_hours=True,
+            limit_price=limit_price,
         )
         try:
             order = await asyncio.to_thread(self.trading.submit_order, order_request)
@@ -469,11 +488,12 @@ class ArgusBot:
             f"SL ${stop_loss:.2f} | risk ~${qty * stop_distance:.0f} | "
             f"order {getattr(order, 'id', '?')}",
         )
-        logger.info("Submitted bracket BUY for %s x%d @ ~%.2f", symbol, qty, price)
+        logger.info("Submitted limit BUY for %s x%d @ ~%.2f", symbol, qty, price)
 
-    async def place_bracket_short(self, signal: Dict[str, Any]) -> None:
-        """Submit a bracket SELL (short) order: sell short with a buy-to-cover
-        bracket (take-profit below entry, stop-loss above entry)."""
+    async def place_limit_short(self, signal: Dict[str, Any]) -> None:
+        """Submit an extended-hours limit SELL (short) order. Take-profit sits
+        below entry and stop-loss above; both are soft levels enforced each
+        cycle rather than resting bracket legs (forbidden in extended hours)."""
         symbol = signal["symbol"]
         price = signal["price"]
 
@@ -511,20 +531,24 @@ class ArgusBot:
             )
             return
 
-        # Short bracket: take-profit is BELOW entry, stop-loss is ABOVE entry
+        # Short: take-profit is BELOW entry, stop-loss is ABOVE entry (soft
+        # levels enforced by evaluate_and_close_stops).
         take_profit = round(price - target_distance, 2)
         stop_loss = round(price + stop_distance, 2)
         take_profit = min(take_profit, round(price - 0.02, 2))
         stop_loss = max(stop_loss, round(price + 0.02, 2))
 
-        order_request = MarketOrderRequest(
+        # Marketable limit priced entry_slip_pct BELOW the last trade so the
+        # short fills in a thin extended-hours book.
+        slip = self.config.get("entry_slip_pct", 0.001)
+        limit_price = min(round(price * (1 - slip), 2), round(price - 0.02, 2))
+        order_request = LimitOrderRequest(
             symbol=symbol,
             qty=qty,
             side=OrderSide.SELL,
             time_in_force=TimeInForce.DAY,
-            order_class=OrderClass.BRACKET,
-            take_profit=TakeProfitRequest(limit_price=take_profit),
-            stop_loss=StopLossRequest(stop_price=stop_loss),
+            extended_hours=True,
+            limit_price=limit_price,
         )
         try:
             order = await asyncio.to_thread(self.trading.submit_order, order_request)
@@ -566,7 +590,7 @@ class ArgusBot:
             f"SL ${stop_loss:.2f} | risk ~${qty * stop_distance:.0f} | "
             f"order {getattr(order, 'id', '?')}",
         )
-        logger.info("Submitted bracket SELL for %s x%d @ ~%.2f", symbol, qty, price)
+        logger.info("Submitted limit SELL for %s x%d @ ~%.2f", symbol, qty, price)
 
     # ------------------------------------------------------------------ #
     # signal-driven exits
@@ -598,11 +622,90 @@ class ArgusBot:
             exits[symbol] = f"signal-exit-{side}"
         return exits
 
+    async def _latest_price(
+        self,
+        symbol: str,
+        frames: Dict[str, pd.DataFrame],
+        position: Dict[str, Any],
+    ) -> Optional[float]:
+        """Best available current price: freshest 1-minute bar close, else the
+        latest trade, else the position's last synced price."""
+        bars = frames.get(symbol)
+        if bars is not None and not bars.empty:
+            return float(bars["close"].iloc[-1])
+        try:
+            latest = await asyncio.to_thread(
+                self.data.get_stock_latest_trade,
+                StockLatestTradeRequest(symbol_or_symbols=symbol),
+            )
+            return float(latest[symbol].price)
+        except Exception as exc:
+            logger.warning("Latest-price fetch failed for %s: %s", symbol, exc)
+        current = position.get("current_price")
+        return None if current is None else float(current)
+
+    async def evaluate_and_close_stops(
+        self, portfolio: Dict[str, Any], frames: Dict[str, pd.DataFrame]
+    ) -> Dict[str, str]:
+        """Protective soft stop/target for held positions — the replacement for
+        the exchange-side bracket, which Alpaca forbids in extended hours.
+
+        Each cycle, compare the latest price against the stop_loss/take_profit
+        recorded at entry and close the position when a level is breached. This
+        is polled every poll_interval_seconds, so price can gap through a level
+        between checks — the accepted tradeoff for trading the extended
+        session. Runs before the entry gates so a stop is always honoured."""
+        exits: Dict[str, str] = {}
+        for position in portfolio["positions"]:
+            symbol = position["symbol"]
+            if symbol in self._closing:
+                continue
+            qty = float(position.get("qty", 0.0))
+            if qty == 0:
+                continue
+            entry = self._open_entries.get(symbol, {})
+            stop_loss = entry.get("stop_loss")
+            take_profit = entry.get("take_profit")
+            if stop_loss is None and take_profit is None:
+                continue  # adopted/legacy position with no recorded levels
+            price = await self._latest_price(symbol, frames, position)
+            if price is None:
+                continue
+            side = "BUY" if qty > 0 else "SELL"
+            hit: Optional[str] = None
+            if side == "BUY":
+                if stop_loss is not None and price <= stop_loss:
+                    hit = "stop"
+                elif take_profit is not None and price >= take_profit:
+                    hit = "target"
+            else:
+                if stop_loss is not None and price >= stop_loss:
+                    hit = "stop"
+                elif take_profit is not None and price <= take_profit:
+                    hit = "target"
+            if hit is None:
+                continue
+            level = stop_loss if hit == "stop" else take_profit
+            if symbol in self._open_entries:
+                verb = "stop-loss" if hit == "stop" else "take-profit"
+                self._open_entries[symbol]["exit_reason"] = (
+                    f"Soft {verb} hit: price ~${price:.2f} reached the "
+                    f"${level:.2f} {verb} level."
+                )
+            await self._limit_close(symbol, position)
+            exits[symbol] = f"soft-{hit}-{side}"
+            self.db.add_log(
+                "TRADE",
+                f"SOFT {hit.upper()} {symbol} x{abs(qty):g} ({side}) @ "
+                f"~${price:.2f} — ${level:.2f} {hit} level breached",
+            )
+        return exits
+
     async def _cancel_symbol_orders(self, symbol: str) -> None:
-        """Cancel a symbol's resting orders — critically the bracket's OCO
-        take-profit / stop-loss legs — before a manual close, so the close
-        cannot collide with a leg and no leg is left dangling to sell shares
-        the position no longer holds."""
+        """Cancel a symbol's resting orders (e.g. an unfilled entry limit)
+        before submitting a close, so the close cannot collide with a resting
+        order or leave one dangling to trade shares the position no longer
+        holds."""
         try:
             open_orders = await asyncio.to_thread(
                 self.trading.get_orders,
@@ -621,24 +724,85 @@ class ArgusBot:
                 )
                 self.db.add_log("ERROR", f"{symbol}: order cancel failed: {exc}")
 
+    @staticmethod
+    def _position_dict(p: Any) -> Dict[str, Any]:
+        """Minimal position dict (the fields _limit_close needs) from a live
+        Alpaca position object."""
+        return {
+            "symbol": p.symbol,
+            "qty": float(p.qty),
+            "current_price": (
+                None if p.current_price is None else float(p.current_price)
+            ),
+            "avg_entry_price": float(p.avg_entry_price),
+        }
+
+    async def _limit_close(
+        self, symbol: str, position: Dict[str, Any]
+    ) -> Optional[Any]:
+        """Close a held position with an extended-hours limit order — market
+        and bracket closes are rejected outside the regular session. Cancels
+        any resting orders first, then submits a marketable limit (exit_slip_pct
+        through the last trade) on the opposite side for the full quantity, so
+        the close actually fills in a thin book. Returns the submitted order, or
+        None on failure. The fill is reconciled into a trade record on the next
+        cycle by sync_portfolio — the single trade-recording path."""
+        self._closing.add(symbol)
+        await self._cancel_symbol_orders(symbol)
+        raw_qty = float(position.get("qty", 0.0))
+        qty = abs(raw_qty)
+        if qty <= 0:
+            self._closing.discard(symbol)
+            return None
+        is_long = raw_qty > 0
+        side = OrderSide.SELL if is_long else OrderSide.BUY
+
+        price = position.get("current_price")
+        try:
+            latest = await asyncio.to_thread(
+                self.data.get_stock_latest_trade,
+                StockLatestTradeRequest(symbol_or_symbols=symbol),
+            )
+            price = float(latest[symbol].price)
+        except Exception as exc:
+            logger.warning("Latest-trade fetch failed for %s close: %s", symbol, exc)
+        if price is None:
+            price = float(position.get("avg_entry_price", 0.0))
+
+        # Sell through the bid / buy through the ask so the close fills.
+        slip = self.config.get("exit_slip_pct", 0.002)
+        if is_long:
+            limit_price = max(round(price * (1 - slip), 2), 0.01)
+        else:
+            limit_price = round(price * (1 + slip), 2)
+        order_request = LimitOrderRequest(
+            symbol=symbol,
+            qty=qty,
+            side=side,
+            time_in_force=TimeInForce.DAY,
+            extended_hours=True,
+            limit_price=limit_price,
+        )
+        try:
+            return await asyncio.to_thread(self.trading.submit_order, order_request)
+        except Exception as exc:
+            self._closing.discard(symbol)
+            logger.error("Limit close failed for %s: %s", symbol, exc)
+            self.db.add_log("ERROR", f"{symbol}: limit close failed: {exc}")
+            return None
+
     async def close_position_now(
         self,
         symbol: str,
         position: Dict[str, Any],
         exit_signal: Dict[str, Any],
     ) -> None:
-        """Cancel the bracket legs and market-close a held position early. The
-        resulting fill is turned into a trade record on the next cycle
-        by sync_portfolio/reconcile_closed_trade — exactly like a bracket
-        TP/SL exit — so there is a single trade-recording path."""
-        self._closing.add(symbol)
-        await self._cancel_symbol_orders(symbol)
-        try:
-            order = await asyncio.to_thread(self.trading.close_position, symbol)
-        except Exception as exc:
-            self._closing.discard(symbol)
-            logger.error("Signal-exit close failed for %s: %s", symbol, exc)
-            self.db.add_log("ERROR", f"{symbol}: signal-exit close failed: {exc}")
+        """Close a held position early via an extended-hours limit order. The
+        resulting fill is turned into a trade record on the next cycle by
+        sync_portfolio/reconcile_closed_trade — exactly like a soft stop/target
+        exit — so there is a single trade-recording path."""
+        order = await self._limit_close(symbol, position)
+        if order is None:
             return
 
         entry = self._open_entries.get(symbol, {})
@@ -652,7 +816,7 @@ class ArgusBot:
             self._open_entries[symbol]["exit_reason"] = (
                 f"Signal exit: {verb} {exit_signal['rsi']:.1f}, so the "
                 f"reversion was banked early at ~${exit_signal['close']:.2f} "
-                "rather than waiting for the bracket."
+                "rather than waiting for the stop/target."
             )
         exit_label = "COVER" if side == "SELL" else "SIGNAL EXIT"
         self.db.add_log(
@@ -860,23 +1024,31 @@ class ArgusBot:
     async def flatten_all(self, reason: str) -> None:
         """Close every open position and cancel all resting orders.
 
-        Used ahead of the close, where the DAY bracket legs would expire
-        and leave positions unprotected overnight. Unlike kill_sequence
+        Used ahead of the extended close, where the DAY limit orders would
+        expire and leave positions orphaned overnight. Unlike kill_sequence
         this is routine housekeeping: the bot stays RUNNING and the fills
         are reconciled into trade records by the next cycle's
         sync_portfolio — the same single trade-recording path as any exit.
+
+        Extended hours forbids market and close_all_positions liquidation, so
+        every position is closed with its own extended-hours limit order.
         """
         self.db.add_log("TRADE", f"EOD FLATTEN — closing all positions ({reason})")
         try:
-            await asyncio.to_thread(
-                self.trading.close_all_positions, cancel_orders=True
-            )
+            positions = await asyncio.to_thread(self.trading.get_all_positions)
         except Exception as exc:
-            logger.error("EOD flatten failed: %s", exc)
-            self.db.add_log("ERROR", f"EOD flatten failed: {exc}")
+            logger.error("EOD flatten position fetch failed: %s", exc)
+            self.db.add_log("ERROR", f"EOD flatten position fetch failed: {exc}")
+            return
+        for p in positions:
+            await self._limit_close(p.symbol, self._position_dict(p))
 
     async def kill_sequence(self, reason: str) -> None:
-        """Emergency shutdown: flatten everything, persist KILLED, stop."""
+        """Emergency shutdown: flatten everything, persist KILLED, stop.
+
+        Liquidation uses extended-hours limit closes (marketable, priced
+        exit_slip_pct through the last trade) because market and
+        close_all_positions liquidation are rejected outside regular hours."""
         self.db.add_log("CRITICAL", f"KILL SEQUENCE INITIATED: {reason}")
         try:
             await asyncio.to_thread(self.trading.cancel_orders)
@@ -885,9 +1057,9 @@ class ArgusBot:
             logger.error("Cancel-all failed during kill sequence: %s", exc)
             self.db.add_log("ERROR", f"Cancel-all failed: {exc}")
         try:
-            await asyncio.to_thread(
-                self.trading.close_all_positions, cancel_orders=True
-            )
+            positions = await asyncio.to_thread(self.trading.get_all_positions)
+            for p in positions:
+                await self._limit_close(p.symbol, self._position_dict(p))
             self.db.add_log("CRITICAL", "All positions liquidated")
         except Exception as exc:
             logger.error("Liquidation failed during kill sequence: %s", exc)
@@ -918,6 +1090,56 @@ class ArgusBot:
             f"New trading day {today} (Europe/Zurich) — "
             f"daily baseline set to ${equity:,.2f}",
         )
+
+    # ------------------------------------------------------------------ #
+    # extended trading session (US-Eastern)
+    # ------------------------------------------------------------------ #
+
+    async def _extended_session_bounds(
+        self,
+    ) -> Optional[Tuple[datetime, datetime]]:
+        """(open_utc, close_utc) for today's extended session, or None when
+        today is not a trading day.
+
+        Pre-market always opens at 4:00 AM ET; after-hours always runs four
+        hours past the regular close (→ 8:00 PM on a normal day, 5:00 PM on a
+        half-day). Deriving the extended close from the regular close — which
+        alpaca-py's Calendar reliably exposes — keeps half-days correct without
+        depending on the optional session_open/session_close calendar fields.
+        Cached per US-Eastern calendar date; a fetch failure returns None
+        uncached so the next cycle retries."""
+        today_et = datetime.now(US_EASTERN).date()
+        cache_key = today_et.isoformat()
+        if self._session_cache is not None and self._session_cache[0] == cache_key:
+            return self._session_cache[1]
+
+        try:
+            calendars = await asyncio.to_thread(
+                self.trading.get_calendar,
+                GetCalendarRequest(start=today_et, end=today_et),
+            )
+        except Exception as exc:
+            logger.error("Calendar fetch failed: %s", exc)
+            self.db.add_log("ERROR", f"Calendar fetch failed: {exc}")
+            return None
+
+        bounds: Optional[Tuple[datetime, datetime]] = None
+        for cal in calendars:
+            if cal.date != today_et:
+                continue
+            open_et = datetime.combine(cal.date, dtime(4, 0), tzinfo=US_EASTERN)
+            close_et = (
+                datetime.combine(cal.date, cal.close, tzinfo=US_EASTERN)
+                + timedelta(hours=4)
+            )
+            bounds = (
+                open_et.astimezone(timezone.utc),
+                close_et.astimezone(timezone.utc),
+            )
+            break
+
+        self._session_cache = (cache_key, bounds)
+        return bounds
 
     # ------------------------------------------------------------------ #
     # main loop
@@ -960,6 +1182,8 @@ class ArgusBot:
                 "cooldown_minutes": cfg.get("cooldown_minutes", 30),
                 "poll_interval_seconds": cfg.get("poll_interval_seconds", 60),
                 "bar_lookback_minutes": cfg.get("bar_lookback_minutes", 180),
+                "entry_slip_pct": cfg.get("entry_slip_pct", 0.001),
+                "exit_slip_pct": cfg.get("exit_slip_pct", 0.002),
                 "regime_symbol": regime.REGIME_SYMBOL,
                 "paper_trading": True,
                 "engine_version": __version__,
@@ -1039,28 +1263,30 @@ class ArgusBot:
             cycle["stage"] = "risk-kill"
             return
 
-        try:
-            clock = await asyncio.to_thread(self.trading.get_clock)
-        except Exception as exc:
-            logger.error("Clock fetch failed: %s", exc)
-            self.db.add_log("ERROR", f"Clock fetch failed: {exc}")
-            cycle["stage"] = "clock-fetch-failed"
-            return
-        cycle["market_open"] = clock.is_open
-        if not clock.is_open:
-            logger.info("Market closed — next open %s", clock.next_open)
-            cycle["stage"] = "market-closed"
-            cycle["next_open"] = str(clock.next_open)
+        # Trade the full extended session (4:00 AM – 8:00 PM ET). Alpaca's
+        # regular-hours clock (is_open) would gate us to 9:30–4:00 only, so we
+        # derive the extended window from the trading calendar instead.
+        session = await self._extended_session_bounds()
+        now_utc = datetime.now(timezone.utc)
+        in_session = session is not None and session[0] <= now_utc < session[1]
+        cycle["market_open"] = in_session
+        if not in_session:
+            if session is None:
+                logger.info("Not a trading day — sitting out")
+                cycle["stage"] = "market-closed"
+            else:
+                logger.info("Outside extended session — next open %s", session[0])
+                cycle["stage"] = "market-closed"
+                cycle["next_open"] = str(session[0])
             return
 
-        # End-of-day flatten: the bracket legs are DAY orders and expire at
-        # the close, which would leave any surviving position naked
-        # overnight — an intraday dip strategy must not become an
-        # unprotected overnight holder. Flatten with a margin before the
-        # bell; no new entries are evaluated inside the window.
+        # End-of-day flatten: entries are DAY limit orders that expire at the
+        # extended close, which would leave any surviving position orphaned
+        # overnight. Flatten with a margin before 8:00 PM ET; no new entries
+        # are evaluated inside the window.
         flatten_minutes = self.config.get("eod_flatten_minutes", 10.0)
-        if flatten_minutes > 0 and clock.next_close is not None:
-            until_close = clock.next_close - datetime.now(timezone.utc)
+        if flatten_minutes > 0:
+            until_close = session[1] - now_utc
             if until_close <= timedelta(minutes=flatten_minutes):
                 if portfolio["positions"]:
                     await self.flatten_all(
@@ -1072,12 +1298,16 @@ class ArgusBot:
         held_symbols = {p["symbol"] for p in portfolio["positions"]}
         cycle["held_symbols"] = sorted(held_symbols)
 
-        # Phase 0: signal-driven early exits on held longs. Runs ahead of
-        # the entry gates on purpose — a full book or a TREND_DOWN tape must
-        # never stop us banking a bounce that is exhausted. Held symbols may
-        # have fallen off the current watchlist, so fetch their bars directly.
+        # Phase 0: protective soft stop/target, then signal-driven early
+        # exits, on held positions. Runs ahead of the entry gates on purpose —
+        # a full book or a TREND_DOWN tape must never stop us honouring a stop
+        # or banking a bounce that is exhausted. Held symbols may have fallen
+        # off the current watchlist, so fetch their bars directly.
         if held_symbols:
             exit_frames = await self.fetch_minute_bars(sorted(held_symbols))
+            stop_exits = await self.evaluate_and_close_stops(portfolio, exit_frames)
+            if stop_exits:
+                cycle["stop_exits"] = stop_exits
             signal_exits = await self.evaluate_and_close_exits(portfolio, exit_frames)
             if signal_exits:
                 cycle["signal_exits"] = signal_exits
@@ -1087,8 +1317,8 @@ class ArgusBot:
         # dip is a knife — while shorts stay allowed since a falling market
         # favours them. CAUTION (trend down OR vol elevated, like the losing
         # 2026-07-08 session) halves the position cap instead of trading at
-        # full throttle. Existing positions keep their brackets; the daily
-        # stop still guards them.
+        # full throttle. Existing positions keep their soft stop/target and
+        # the daily stop still guards them.
         regime_info = await asyncio.to_thread(regime.get_regime)
         cycle["regime"] = regime_info
         regime_blocks = regime.blocks_new_entries(regime_info)
@@ -1226,9 +1456,9 @@ class ArgusBot:
             if open_slots <= 0:
                 break
             if signal_info["side"] == "BUY":
-                await self.place_bracket_buy(signal_info)
+                await self.place_limit_buy(signal_info)
             else:
-                await self.place_bracket_short(signal_info)
+                await self.place_limit_short(signal_info)
             evaluated[signal_info["symbol"]] = signal_info["side"]
             open_slots -= 1
             # Record decision for memory
