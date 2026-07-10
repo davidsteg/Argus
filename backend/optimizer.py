@@ -436,205 +436,269 @@ def split_history(
     return train, validation
 
 
-def run_optimization() -> Optional[Dict[str, float]]:
+def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
     """Grid search on train data, out-of-sample gate on validation data;
-    writes the winner to bot_config and returns it."""
+    writes the winner to bot_config and returns it. Records a structured
+    row in optimizer_runs on every exit path."""
     db = get_db()
+    started_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    params_before = db.get_config()
     symbols = universe.get_watchlist(limit=OPTIMIZER_MAX_SYMBOLS)
-    db.add_log(
-        "OPTIMIZER",
-        f"Nightly walk-forward optimization started "
-        f"({LOOKBACK_DAYS}d of 1-minute bars, "
-        f"{TRAIN_FRACTION:.0%} train / {1 - TRAIN_FRACTION:.0%} validation, "
-        f"{len(symbols)} symbols: {', '.join(symbols)})",
-    )
-    try:
-        history = fetch_history(symbols, LOOKBACK_DAYS)
-    except Exception as exc:
-        logger.error("Historical data fetch failed: %s", exc)
-        db.add_log("ERROR", f"Optimizer data fetch failed: {exc}")
-        return None
 
-    if not history:
-        db.add_log("ERROR", "Optimizer aborted: no historical data returned")
-        return None
-
-    total_bars = sum(len(bars) for bars in history.values())
-    logger.info(
-        "Optimizing over %d bars across %d symbols", total_bars, len(history)
-    )
-
-    train_frames, validation_frames = split_history(history)
-    train = _WindowData(train_frames)
-    validation = _WindowData(validation_frames) if validation_frames else None
-
-    # Read cooldown and position sizing from live config/status so the
-    # backtest sizes and benches exactly like the engine. account_equity is
-    # the base the dollar P&L is expressed against; a fresh/empty status
-    # falls back to a nominal $100k so returns stay well-scaled.
-    live_config = db.get_config()
-    cooldown_bars = int(live_config.get("cooldown_minutes", 30.0))
-    position_size_usd = float(live_config.get("position_size_usd", 500.0))
-    risk_per_trade_usd = float(live_config.get("risk_per_trade_usd", 20.0))
-    account_equity = float(db.get_status().get("equity", 0.0)) or 100000.0
-    sizing = {
-        "position_size_usd": position_size_usd,
-        "risk_per_trade_usd": risk_per_trade_usd,
-        "account_equity": account_equity,
+    run: Dict[str, Any] = {
+        "started_at": started_at,
+        "trigger": trigger,
+        "status": "error",
+        "symbols": ",".join(symbols),
+        "n_symbols": len(symbols),
+        "params_before": params_before,
     }
 
-    # Score every combination on the train window, rank best-first.
-    ranked: List[Tuple[float, Dict[str, float], Tuple[float, float, int]]] = []
-    for rsi_period, rsi_buy, stop_mult, target_mult, exit_signal, short_signal, short_exit, max_disloc in itertools.product(
-        PARAMETER_GRID["rsi_period"],
-        PARAMETER_GRID["rsi_buy_signal"],
-        PARAMETER_GRID["atr_stop_mult"],
-        PARAMETER_GRID["atr_target_mult"],
-        PARAMETER_GRID["rsi_exit_signal"],
-        PARAMETER_GRID["rsi_short_signal"],
-        PARAMETER_GRID["rsi_short_exit"],
-        PARAMETER_GRID["max_vwap_dislocation_pct"],
-    ):
-        score, total_return, drawdown, trades = train.score(
-            rsi_period=int(rsi_period),
-            rsi_buy_signal=rsi_buy,
-            atr_stop_mult=stop_mult,
-            atr_target_mult=target_mult,
-            rsi_exit_signal=exit_signal,
-            rsi_short_signal=short_signal,
-            rsi_short_exit=short_exit,
-            max_vwap_dislocation_pct=max_disloc,
-            cooldown_bars=cooldown_bars,
-            **sizing,
-        )
-        if trades == 0:
-            continue
-        params = {
-            "rsi_period": float(int(rsi_period)),
-            "rsi_buy_signal": rsi_buy,
-            "atr_stop_mult": stop_mult,
-            "atr_target_mult": target_mult,
-            "rsi_exit_signal": exit_signal,
-            "rsi_short_signal": short_signal,
-            "rsi_short_exit": short_exit,
-            "max_vwap_dislocation_pct": max_disloc,
-        }
-        ranked.append((score, params, (total_return, drawdown, trades)))
-    ranked.sort(key=lambda item: item[0], reverse=True)
-
-    if not ranked:
-        db.add_log(
-            "OPTIMIZER",
-            "Grid search produced no trading combination — keeping current "
-            "parameters unchanged",
-        )
-        return None
-
-    # Walk down the train ranking and take the first combination that also
-    # made money on the unseen validation window.
-    best_params: Optional[Dict[str, float]] = None
-    best_train_score = 0.0
-    train_stats: Tuple[float, float, int] = (0.0, 0.0, 0)
-    val_stats: Optional[Tuple[float, float, int]] = None
-    for score, params, stats in ranked:
-        if validation is None:
-            best_params, best_train_score, train_stats = params, score, stats
-            break
-        _, val_return, val_drawdown, val_trades = validation.score(
-            rsi_period=int(params["rsi_period"]),
-            rsi_buy_signal=params["rsi_buy_signal"],
-            atr_stop_mult=params["atr_stop_mult"],
-            atr_target_mult=params["atr_target_mult"],
-            rsi_exit_signal=params["rsi_exit_signal"],
-            rsi_short_signal=params.get("rsi_short_signal", 999.0),
-            rsi_short_exit=params.get("rsi_short_exit", 0.0),
-            max_vwap_dislocation_pct=params.get("max_vwap_dislocation_pct", 999.0),
-            cooldown_bars=cooldown_bars,
-            **sizing,
-        )
-        if val_return > 0.0:
-            best_params, best_train_score, train_stats = params, score, stats
-            val_stats = (val_return, val_drawdown, val_trades)
-            break
-
-    if best_params is None:
-        db.add_log(
-            "OPTIMIZER",
-            f"No combination survived out-of-sample validation "
-            f"({len(ranked)} candidates were profitable in-sample only) — "
-            f"keeping current parameters unchanged",
-        )
-        return None
-
-    # news_cutoff, analyst_enabled and short_enabled are not part of the
-    # technical grid; carry the live values forward so a config read after
-    # this write stays complete.
-    current = db.get_config()
-    best_params["news_cutoff"] = current["news_cutoff"]
-    best_params["analyst_enabled"] = current.get("analyst_enabled", 0.0)
-    best_params["short_enabled"] = current.get("short_enabled", 0.0)
-
-    # Post-optimization LLM review (if analyst is enabled).
-    # The analyst can accept, override (pick a different rank), or reject
-    # the winner. If it rejects, keep current params unchanged.
     try:
-        from analyst import get_analyst
-        import regime as regime_module
-
-        analyst = get_analyst()
-        regime_info = regime_module.get_regime()
-        analyst_result = analyst.review_optimization(
-            ranked, best_params, regime_info, db
+        db.add_log(
+            "OPTIMIZER",
+            f"{'Nightly' if trigger == 'nightly' else 'Manual'} walk-forward "
+            f"optimization started "
+            f"({LOOKBACK_DAYS}d of 1-minute bars, "
+            f"{TRAIN_FRACTION:.0%} train / {1 - TRAIN_FRACTION:.0%} validation, "
+            f"{len(symbols)} symbols: {', '.join(symbols)})",
         )
-        if analyst_result is None:
+        try:
+            history = fetch_history(symbols, LOOKBACK_DAYS)
+        except Exception as exc:
+            logger.error("Historical data fetch failed: %s", exc)
+            db.add_log("ERROR", f"Optimizer data fetch failed: {exc}")
+            run["status"] = "error"
+            run["detail"] = f"Data fetch failed: {exc}"
+            return None
+
+        if not history:
+            db.add_log("ERROR", "Optimizer aborted: no historical data returned")
+            run["status"] = "no_data"
+            run["detail"] = "No historical data returned from Alpaca"
+            return None
+
+        total_bars = sum(len(bars) for bars in history.values())
+        run["total_bars"] = total_bars
+        logger.info(
+            "Optimizing over %d bars across %d symbols", total_bars, len(history)
+        )
+
+        train_frames, validation_frames = split_history(history)
+        train = _WindowData(train_frames)
+        validation = _WindowData(validation_frames) if validation_frames else None
+
+        # Read cooldown and position sizing from live config/status so the
+        # backtest sizes and benches exactly like the engine. account_equity is
+        # the base the dollar P&L is expressed against; a fresh/empty status
+        # falls back to a nominal $100k so returns stay well-scaled.
+        live_config = db.get_config()
+        cooldown_bars = int(live_config.get("cooldown_minutes", 30.0))
+        position_size_usd = float(live_config.get("position_size_usd", 500.0))
+        risk_per_trade_usd = float(live_config.get("risk_per_trade_usd", 20.0))
+        account_equity = float(db.get_status().get("equity", 0.0)) or 100000.0
+        sizing = {
+            "position_size_usd": position_size_usd,
+            "risk_per_trade_usd": risk_per_trade_usd,
+            "account_equity": account_equity,
+        }
+
+        # Score every combination on the train window, rank best-first.
+        ranked: List[Tuple[float, Dict[str, float], Tuple[float, float, int]]] = []
+        for rsi_period, rsi_buy, stop_mult, target_mult, exit_signal, short_signal, short_exit, max_disloc in itertools.product(
+            PARAMETER_GRID["rsi_period"],
+            PARAMETER_GRID["rsi_buy_signal"],
+            PARAMETER_GRID["atr_stop_mult"],
+            PARAMETER_GRID["atr_target_mult"],
+            PARAMETER_GRID["rsi_exit_signal"],
+            PARAMETER_GRID["rsi_short_signal"],
+            PARAMETER_GRID["rsi_short_exit"],
+            PARAMETER_GRID["max_vwap_dislocation_pct"],
+        ):
+            score, total_return, drawdown, trades = train.score(
+                rsi_period=int(rsi_period),
+                rsi_buy_signal=rsi_buy,
+                atr_stop_mult=stop_mult,
+                atr_target_mult=target_mult,
+                rsi_exit_signal=exit_signal,
+                rsi_short_signal=short_signal,
+                rsi_short_exit=short_exit,
+                max_vwap_dislocation_pct=max_disloc,
+                cooldown_bars=cooldown_bars,
+                **sizing,
+            )
+            if trades == 0:
+                continue
+            params = {
+                "rsi_period": float(int(rsi_period)),
+                "rsi_buy_signal": rsi_buy,
+                "atr_stop_mult": stop_mult,
+                "atr_target_mult": target_mult,
+                "rsi_exit_signal": exit_signal,
+                "rsi_short_signal": short_signal,
+                "rsi_short_exit": short_exit,
+                "max_vwap_dislocation_pct": max_disloc,
+            }
+            ranked.append((score, params, (total_return, drawdown, trades)))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        run["candidates"] = len(ranked)
+
+        if not ranked:
             db.add_log(
-                "ANALYST",
-                "LLM rejected optimizer winner — keeping current parameters",
+                "OPTIMIZER",
+                "Grid search produced no trading combination — keeping current "
+                "parameters unchanged",
+            )
+            run["status"] = "no_combination"
+            run["detail"] = "No combination produced any trades on train data"
+            return None
+
+        # Walk down the train ranking and take the first combination that also
+        # made money on the unseen validation window.
+        best_params: Optional[Dict[str, float]] = None
+        best_train_score = 0.0
+        train_stats: Tuple[float, float, int] = (0.0, 0.0, 0)
+        val_stats: Optional[Tuple[float, float, int]] = None
+        for score, params, stats in ranked:
+            if validation is None:
+                best_params, best_train_score, train_stats = params, score, stats
+                break
+            _, val_return, val_drawdown, val_trades = validation.score(
+                rsi_period=int(params["rsi_period"]),
+                rsi_buy_signal=params["rsi_buy_signal"],
+                atr_stop_mult=params["atr_stop_mult"],
+                atr_target_mult=params["atr_target_mult"],
+                rsi_exit_signal=params["rsi_exit_signal"],
+                rsi_short_signal=params.get("rsi_short_signal", 999.0),
+                rsi_short_exit=params.get("rsi_short_exit", 0.0),
+                max_vwap_dislocation_pct=params.get("max_vwap_dislocation_pct", 999.0),
+                cooldown_bars=cooldown_bars,
+                **sizing,
+            )
+            if val_return > 0.0:
+                best_params, best_train_score, train_stats = params, score, stats
+                val_stats = (val_return, val_drawdown, val_trades)
+                break
+
+        if best_params is None:
+            db.add_log(
+                "OPTIMIZER",
+                f"No combination survived out-of-sample validation "
+                f"({len(ranked)} candidates were profitable in-sample only) — "
+                f"keeping current parameters unchanged",
+            )
+            run["status"] = "rejected_validation"
+            run["detail"] = (
+                f"All {len(ranked)} candidates failed out-of-sample validation"
             )
             return None
-        if analyst_result != best_params:
-            best_params = analyst_result
-            db.add_log(
-                "ANALYST",
-                f"LLM overrode optimizer winner — new params: "
-                f"RSI({int(best_params['rsi_period'])}) "
-                f"buy<{best_params['rsi_buy_signal']:.0f}, "
-                f"exit>{best_params['rsi_exit_signal']:.0f}, "
-                f"stop {best_params['atr_stop_mult']:.1f}×ATR, "
-                f"target {best_params['atr_target_mult']:.1f}×ATR",
+
+        # news_cutoff, analyst_enabled and short_enabled are not part of the
+        # technical grid; carry the live values forward so a config read after
+        # this write stays complete.
+        current = db.get_config()
+        best_params["news_cutoff"] = current["news_cutoff"]
+        best_params["analyst_enabled"] = current.get("analyst_enabled", 0.0)
+        best_params["short_enabled"] = current.get("short_enabled", 0.0)
+
+        # Post-optimization LLM review (if analyst is enabled).
+        # The analyst can accept, override (pick a different rank), or reject
+        # the winner. If it rejects, keep current params unchanged.
+        analyst_decision = None
+        try:
+            from analyst import get_analyst
+            import regime as regime_module
+
+            analyst = get_analyst()
+            regime_info = regime_module.get_regime()
+            analyst_result = analyst.review_optimization(
+                ranked, best_params, regime_info, db
             )
-    except Exception as exc:
-        logger.error("Post-optimization analyst review failed: %s", exc)
+            if analyst_result is None:
+                db.add_log(
+                    "ANALYST",
+                    "LLM rejected optimizer winner — keeping current parameters",
+                )
+                run["status"] = "rejected_analyst"
+                run["detail"] = "LLM analyst rejected the optimizer winner"
+                run["analyst_decision"] = "reject"
+                return None
+            if analyst_result != best_params:
+                best_params = analyst_result
+                analyst_decision = "override"
+                db.add_log(
+                    "ANALYST",
+                    f"LLM overrode optimizer winner — new params: "
+                    f"RSI({int(best_params['rsi_period'])}) "
+                    f"buy<{best_params['rsi_buy_signal']:.0f}, "
+                    f"exit>{best_params['rsi_exit_signal']:.0f}, "
+                    f"stop {best_params['atr_stop_mult']:.1f}×ATR, "
+                    f"target {best_params['atr_target_mult']:.1f}×ATR",
+                )
+            else:
+                analyst_decision = "accept"
+        except Exception as exc:
+            logger.error("Post-optimization analyst review failed: %s", exc)
 
-    db.set_config(best_params)
+        db.set_config(best_params)
 
-    total_return, drawdown, trades = train_stats
-    validation_note = "no validation window (too little data)"
-    if val_stats is not None:
-        validation_note = (
-            f"validation: {val_stats[0] * 100:+.2f}% return, "
-            f"{val_stats[1] * 100:.2f}% max drawdown, {val_stats[2]} trades"
+        total_return, drawdown, trades = train_stats
+        validation_note = "no validation window (too little data)"
+        if val_stats is not None:
+            validation_note = (
+                f"validation: {val_stats[0] * 100:+.2f}% return, "
+                f"{val_stats[1] * 100:.2f}% max drawdown, {val_stats[2]} trades"
+            )
+        db.add_log(
+            "OPTIMIZER",
+            f"New parameters live: RSI({int(best_params['rsi_period'])}) "
+            f"buy<{best_params['rsi_buy_signal']:.0f}, "
+            f"exit>{best_params['rsi_exit_signal']:.0f}, "
+            f"short>{best_params.get('rsi_short_signal', 70):.0f}, "
+            f"cover<{best_params.get('rsi_short_exit', 30):.0f}, "
+            f"stop {best_params['atr_stop_mult']:.1f}×ATR, "
+            f"target {best_params['atr_target_mult']:.1f}×ATR | "
+            f"train: {total_return * 100:+.2f}% return, "
+            f"{drawdown * 100:.2f}% max drawdown, {trades} trades, "
+            f"score {best_train_score:.2f} | {validation_note}",
         )
-    db.add_log(
-        "OPTIMIZER",
-        f"New parameters live: RSI({int(best_params['rsi_period'])}) "
-        f"buy<{best_params['rsi_buy_signal']:.0f}, "
-        f"exit>{best_params['rsi_exit_signal']:.0f}, "
-        f"short>{best_params.get('rsi_short_signal', 70):.0f}, "
-        f"cover<{best_params.get('rsi_short_exit', 30):.0f}, "
-        f"stop {best_params['atr_stop_mult']:.1f}×ATR, "
-        f"target {best_params['atr_target_mult']:.1f}×ATR | "
-        f"train: {total_return * 100:+.2f}% return, "
-        f"{drawdown * 100:.2f}% max drawdown, {trades} trades, "
-        f"score {best_train_score:.2f} | {validation_note}",
-    )
-    logger.info(
-        "Optimization complete: %s (train score %.2f)",
-        best_params,
-        best_train_score,
-    )
+        logger.info(
+            "Optimization complete: %s (train score %.2f)",
+            best_params,
+            best_train_score,
+        )
 
-    return best_params
+        # Determine if parameters actually changed.
+        grid_keys = set(PARAMETER_GRID.keys())
+        changed_keys = [
+            k for k in grid_keys
+            if params_before.get(k) != best_params.get(k)
+        ]
+        run["status"] = "no_change" if not changed_keys else "applied"
+        run["detail"] = (
+            "Parameters unchanged (winner matches current)"
+            if not changed_keys
+            else None
+        )
+        run["params_after"] = best_params
+        run["changed_keys"] = changed_keys
+        run["train_return"] = total_return
+        run["train_drawdown"] = drawdown
+        run["train_score"] = best_train_score
+        run["train_trades"] = trades
+        if val_stats is not None:
+            run["val_return"] = val_stats[0]
+            run["val_drawdown"] = val_stats[1]
+            run["val_trades"] = val_stats[2]
+        run["analyst_decision"] = analyst_decision
+
+        return best_params
+
+    finally:
+        run["finished_at"] = datetime.now(timezone.utc).isoformat(
+            timespec="milliseconds"
+        )
+        db.record_optimizer_run(run)
 
 
 def seconds_until_midnight_zurich() -> float:
@@ -659,7 +723,7 @@ async def schedule_daily_optimization() -> None:
             logger.info("Optimizer schedule cancelled")
             raise
         try:
-            await asyncio.to_thread(run_optimization)
+            await asyncio.to_thread(run_optimization, "nightly")
         except Exception as exc:
             logger.exception("Nightly optimization failed: %s", exc)
             get_db().add_log("ERROR", f"Nightly optimization failed: {exc}")

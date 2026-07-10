@@ -323,7 +323,7 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
         from optimizer import run_optimization
 
         db.add_log("OPTIMIZER", "Manual optimization triggered via API")
-        best = await asyncio.to_thread(run_optimization)
+        best = await asyncio.to_thread(run_optimization, "manual")
         if best is None:
             raise HTTPException(
                 status_code=500,

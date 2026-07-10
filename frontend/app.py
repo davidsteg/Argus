@@ -90,6 +90,7 @@ def market_owns(symbol: str, market: str) -> bool:
 DEFAULT_REFRESH_SECONDS = 2.0
 DEFAULT_LOG_ROWS = 50
 TRADES_LIMIT = 200
+OPTIMIZER_RUNS_LIMIT = 50
 
 # Palette (Tailwind arbitrary values) — matches the dark look of the
 # original dashboard: near-black app background, elevated slate cards.
@@ -359,6 +360,7 @@ def fetch_snapshot(
         "analyst_call_log": db.get_state("analyst_call_log") or [],
         "analyst_review_history": db.get_state("analyst_review_history") or [],
         "screener_candidates": db.get_state("screener_candidates") or [],
+        "optimizer_runs": db.get_optimizer_runs(OPTIMIZER_RUNS_LIMIT),
     }
 
 
@@ -1168,6 +1170,7 @@ def dashboard() -> None:
         overview_tab = ui.tab("Overview", icon="dashboard")
         trades_tab = ui.tab("Trades", icon="receipt_long")
         analyst_tab = ui.tab("Analyst", icon="psychology")
+        optimizer_tab = ui.tab("Optimizer", icon="science")
         settings_tab = ui.tab("Settings", icon="tune")
         logs_tab = ui.tab("Logs", icon="terminal")
 
@@ -1627,6 +1630,36 @@ def dashboard() -> None:
                                 "No LLM calls recorded yet"
                             ).classes(f"text-sm {TEXT_MUTED}")
 
+        # =========================== OPTIMIZER ========================= #
+        with ui.tab_panel(optimizer_tab).classes("p-3 sm:p-6"):
+            with ui.column().classes("w-full gap-4"):
+                with card():
+                    card_title("🗓️ Run History", "every optimizer run, newest first")
+                    with ui.row().classes(
+                        "w-full items-center justify-between gap-4 flex-wrap"
+                    ):
+                        with ui.column().classes("gap-0 min-w-0"):
+                            ui.label("Last applied parameters").classes(
+                                "text-sm text-white"
+                            )
+                            config_updated_opt_label = ui.label("—").classes(
+                                f"text-xs {TEXT_MUTED}"
+                            )
+                        with ui.row().classes("items-center gap-2"):
+                            optimize_button_opt = ui.button(
+                                "Run optimizer now",
+                                on_click=lambda: run_optimizer_btn(
+                                    optimize_button_opt, optimize_spinner_opt
+                                ),
+                            ).props("no-caps unelevated color=deep-purple")
+                            optimize_spinner_opt = ui.spinner(size="sm")
+                            optimize_spinner_opt.set_visibility(False)
+                    optimizer_runs_col = ui.column().classes("w-full gap-2")
+                    optimizer_runs_empty = ui.label(
+                        "No optimizer runs recorded yet — runs are recorded "
+                        "after the first grid search"
+                    ).classes(f"text-sm {TEXT_MUTED}")
+
         # ============================ SETTINGS ========================= #
         with ui.tab_panel(settings_tab).classes("p-3 sm:p-6"):
             with ui.row().classes("w-full gap-4 items-start flex-col md:flex-row"):
@@ -1930,7 +1963,9 @@ def dashboard() -> None:
                             "dashboard reads the shared database directly."
                         ).classes(f"text-xs {TEXT_MUTED}")
 
-                        async def run_optimizer() -> None:
+                        async def run_optimizer_btn(
+                            button: ui.button, spinner: ui.spinner
+                        ) -> None:
                             if not await confirm(
                                 "Run optimizer now",
                                 "Trigger the walk-forward grid search "
@@ -1940,8 +1975,8 @@ def dashboard() -> None:
                                 "OPTIMIZE",
                             ):
                                 return
-                            optimize_button.disable()
-                            optimize_spinner.set_visibility(True)
+                            button.disable()
+                            spinner.set_visibility(True)
                             ui.notify(
                                 "Optimizer running — this can take a few "
                                 "minutes…",
@@ -1951,8 +1986,8 @@ def dashboard() -> None:
                                 call_backend, "/optimize", 900.0,
                                 ui_state["market"],
                             )
-                            optimize_spinner.set_visibility(False)
-                            optimize_button.enable()
+                            spinner.set_visibility(False)
+                            button.enable()
                             if result["ok"]:
                                 params = result["data"].get("parameters", {})
                                 pretty = ", ".join(
@@ -1972,13 +2007,18 @@ def dashboard() -> None:
 
                         with ui.row().classes("items-center gap-2 mt-1"):
                             optimize_button = ui.button(
-                                "Run optimizer now", on_click=run_optimizer
+                                "Run optimizer now",
+                                on_click=lambda: run_optimizer_btn(
+                                    optimize_button, optimize_spinner
+                                ),
                             ).props("no-caps unelevated color=deep-purple")
                             optimize_spinner = ui.spinner(size="sm")
                             optimize_spinner.set_visibility(False)
                         ui.label(
                             "Resume-from-KILLED lives in the header — it "
-                            "appears when the bot is stopped."
+                            "appears when the bot is stopped. The Run "
+                            "optimizer now button has moved to the "
+                            "Optimizer tab."
                         ).classes(f"text-xs {TEXT_MUTED} mt-1")
 
                     with card():
@@ -2377,6 +2417,10 @@ def dashboard() -> None:
         config_updated_label.set_text(
             f"Last optimization: {fmt_short(updated_at)}" if updated_at
             else "Last optimization: —"
+        )
+        config_updated_opt_label.set_text(
+            f"Last applied: {fmt_short(updated_at)}" if updated_at
+            else "Last applied: —"
         )
 
     def render_screener(snapshot: Dict[str, Any]) -> None:
@@ -2824,6 +2868,16 @@ def dashboard() -> None:
         "reject": "text-rose-400 border-rose-800",
     }
 
+    OPTIMIZER_STATUS_CHIPS = {
+        "applied": "text-emerald-400 border-emerald-800",
+        "no_change": "text-gray-400 border-gray-700",
+        "rejected_validation": "text-amber-400 border-amber-800",
+        "rejected_analyst": "text-rose-400 border-rose-800",
+        "no_combination": "text-amber-400 border-amber-800",
+        "no_data": "text-rose-400 border-rose-800",
+        "error": "text-red-500 border-red-800",
+    }
+
     def render_analyst_agents(snapshot: Dict[str, Any]) -> None:
         analyst_cfg = snapshot.get("analyst_config") or {}
         call_log = snapshot.get("analyst_call_log") or []
@@ -2971,6 +3025,118 @@ def dashboard() -> None:
                         )
                         with clamped:
                             ui.tooltip(summary).classes("max-w-[32rem]")
+
+    def render_optimizer_runs(snapshot: Dict[str, Any]) -> None:
+        runs = snapshot.get("optimizer_runs") or []
+        fingerprint = (
+            len(runs),
+            runs[0].get("id") if runs else None,
+        )
+        if render_state.get("opt_runs_fp") == fingerprint:
+            return
+        render_state["opt_runs_fp"] = fingerprint
+
+        optimizer_runs_empty.set_visibility(not runs)
+        optimizer_runs_col.clear()
+        with optimizer_runs_col:
+            for run in runs:
+                status = run.get("status", "error")
+                chip_style = OPTIMIZER_STATUS_CHIPS.get(
+                    status, "text-gray-300 border-gray-700"
+                )
+                with ui.column().classes(
+                    "w-full gap-1 rounded-lg border border-[#2a3140] "
+                    "bg-[#1d2432] px-3 py-2"
+                ):
+                    # Header row: timestamp, trigger badge, duration, outcome
+                    with ui.row().classes(
+                        "w-full items-center gap-2 flex-nowrap"
+                    ):
+                        ui.label(fmt_short(run.get("started_at"))).classes(
+                            "text-xs font-mono text-gray-300 shrink-0"
+                        )
+                        trigger = run.get("trigger", "manual")
+                        ui.label(trigger.upper()).classes(
+                            "text-[10px] font-bold rounded border "
+                            "px-1.5 py-0.5 shrink-0 "
+                            + (
+                                "text-sky-400 border-sky-800"
+                                if trigger == "nightly"
+                                else "text-amber-400 border-amber-800"
+                            )
+                        )
+                        dur = humanize_duration(
+                            run.get("started_at"), run.get("finished_at")
+                        )
+                        ui.label(dur).classes(
+                            f"text-[10px] font-mono {TEXT_MUTED} shrink-0"
+                        )
+                        ui.label(status.upper()).classes(
+                            "text-[10px] font-bold rounded border "
+                            "px-1.5 py-0.5 shrink-0 " + chip_style
+                        )
+                        if run.get("analyst_decision"):
+                            ad = run["analyst_decision"]
+                            ui.label(f"analyst: {ad}").classes(
+                                "text-[10px] font-mono "
+                                + DECISION_CHIPS.get(ad, "text-gray-300")
+                                + " shrink-0"
+                            )
+                        ui.space()
+                        if run.get("detail"):
+                            ui.label(run["detail"]).classes(
+                                f"text-[10px] {TEXT_MUTED} truncate"
+                            ).tooltip(run["detail"])
+
+                    # Stats row: symbols, candidates, train/val
+                    parts = []
+                    n_sym = run.get("n_symbols", 0)
+                    cand = run.get("candidates", 0)
+                    parts.append(f"{n_sym} symbols")
+                    if cand:
+                        parts.append(f"{cand} candidates")
+                    tr = run.get("train_return")
+                    if tr is not None:
+                        td = run.get("train_drawdown", 0)
+                        tt = run.get("train_trades", 0)
+                        ts = run.get("train_score", 0)
+                        parts.append(
+                            f"train: {tr * 100:+.2f}% / {td * 100:.1f}%dd "
+                            f"/ {tt}t / score {ts:.1f}"
+                        )
+                    vr = run.get("val_return")
+                    if vr is not None:
+                        vd = run.get("val_drawdown", 0)
+                        vt = run.get("val_trades", 0)
+                        parts.append(
+                            f"val: {vr * 100:+.2f}% / {vd * 100:.1f}%dd / {vt}t"
+                        )
+                    if parts:
+                        ui.label(" · ".join(parts)).classes(
+                            f"text-[10px] {TEXT_MUTED}"
+                        )
+
+                    # Changed parameters
+                    changed = run.get("changed_keys") or []
+                    params_before = run.get("params_before") or {}
+                    params_after = run.get("params_after") or {}
+                    if changed:
+                        lines = []
+                        for k in changed:
+                            b = params_before.get(k, "—")
+                            a = params_after.get(k, "—")
+                            if isinstance(b, float):
+                                b = f"{b:g}"
+                            if isinstance(a, float):
+                                a = f"{a:g}"
+                            lines.append(f"{k}: {b} → {a}")
+                        ui.label(" | ".join(lines)).classes(
+                            "text-[10px] font-mono text-sky-300"
+                        )
+                    else:
+                        ui.label("No parameter change").classes(
+                            f"text-[10px] {TEXT_MUTED}"
+                        )
 
     def render_call_log(snapshot: Dict[str, Any]) -> None:
         call_log = snapshot.get("analyst_call_log") or []
@@ -3180,6 +3346,7 @@ def dashboard() -> None:
         render_analyst(snapshot)
         render_environment(snapshot)
         render_logs(snapshot)
+        render_optimizer_runs(snapshot)
 
     timer = ui.timer(DEFAULT_REFRESH_SECONDS, refresh)
     refresh_select.on_value_change(

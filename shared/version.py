@@ -10,9 +10,29 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.17.4"
+__version__ = "2.18.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.18.0",
+        "date": "2026-07-10",
+        "title": "Optimizer Run History: structured persistence + dedicated dashboard tab",
+        "notes": [
+            "Every optimizer run is now recorded as a structured row in a new "
+            "optimizer_runs SQLite table: timestamp, trigger (nightly/manual), "
+            "duration, outcome (applied/no_change/rejected_validation/"
+            "rejected_analyst/no_combination/no_data/error), before→after "
+            "parameter diff, train/validation stats, and analyst decision.",
+            "New Optimizer tab in the dashboard (after Analyst) with a Run "
+            "History card showing every run with outcome chips, trigger badges, "
+            "duration, train/val stats, and changed parameters as "
+            "key: before → after lines. The Run optimizer now button moved "
+            "from Settings to this tab; a pointer remains in Settings.",
+            "run_optimization() now always records exactly one run row via a "
+            "try/finally block — even on early-return failure paths (no data, "
+            "no combination, validation reject, analyst reject, error).",
+        ],
+    },
     {
         "version": "2.17.4",
         "date": "2026-07-10",

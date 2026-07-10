@@ -9,6 +9,23 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.18.0] - 2026-07-10
+
+### Added
+- **Optimizer Run History** — every optimizer run is now persisted as a
+  structured row in a new `optimizer_runs` SQLite table: timestamp, trigger
+  (nightly/manual), duration, outcome (`applied`/`no_change`/`rejected_validation`/
+  `rejected_analyst`/`no_combination`/`no_data`/`error`), before→after parameter
+  diff, train/validation stats, and analyst decision.
+- **Optimizer tab** in the dashboard (after Analyst) with a Run History card
+  showing every run with outcome chips, trigger badges, duration, train/val
+  stats, and changed parameters as `key: before → after` lines.
+- The Run optimizer now button moved from Settings to the Optimizer tab; a
+  pointer remains in the Engine & Optimizer card.
+- `run_optimization()` now always records exactly one run row via a
+  `try/finally` block — even on early-return failure paths (no data, no
+  combination, validation reject, analyst reject, error).
+
 ## [v2.17.4] - 2026-07-10
 
 ### Fixed

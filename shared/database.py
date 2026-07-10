@@ -160,6 +160,32 @@ CREATE TABLE IF NOT EXISTS runtime_state (
     value       TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS optimizer_runs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at      TEXT NOT NULL,
+    finished_at     TEXT,
+    trigger         TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    symbols         TEXT,
+    n_symbols       INTEGER,
+    total_bars      INTEGER,
+    candidates      INTEGER,
+    params_before   TEXT,
+    params_after    TEXT,
+    changed_keys    TEXT,
+    train_return    REAL,
+    train_drawdown  REAL,
+    train_score     REAL,
+    train_trades    INTEGER,
+    val_return      REAL,
+    val_drawdown    REAL,
+    val_trades      INTEGER,
+    analyst_decision TEXT,
+    detail          TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_optimizer_runs_id_desc ON optimizer_runs (id DESC);
 """
 
 # Columns added to existing tables after their initial release. CREATE TABLE
@@ -601,6 +627,71 @@ class Database:
             (limit,),
         )
         return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------ #
+    # optimizer runs
+    # ------------------------------------------------------------------ #
+
+    def record_optimizer_run(self, run: Dict[str, Any]) -> int:
+        now = _utcnow()
+        if "finished_at" not in run:
+            run["finished_at"] = now
+        cursor = self._execute(
+            "INSERT INTO optimizer_runs "
+            "(started_at, finished_at, trigger, status, symbols, n_symbols, "
+            " total_bars, candidates, params_before, params_after, "
+            " changed_keys, train_return, train_drawdown, train_score, "
+            " train_trades, val_return, val_drawdown, val_trades, "
+            " analyst_decision, detail) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                run.get("started_at", now),
+                run.get("finished_at", now),
+                run.get("trigger", "manual"),
+                run.get("status", "error"),
+                run.get("symbols"),
+                run.get("n_symbols"),
+                run.get("total_bars"),
+                run.get("candidates"),
+                json.dumps(run.get("params_before", {}), default=str)
+                if run.get("params_before") else None,
+                json.dumps(run.get("params_after", {}), default=str)
+                if run.get("params_after") else None,
+                json.dumps(run.get("changed_keys", []), default=str)
+                if run.get("changed_keys") else None,
+                run.get("train_return"),
+                run.get("train_drawdown"),
+                run.get("train_score"),
+                run.get("train_trades"),
+                run.get("val_return"),
+                run.get("val_drawdown"),
+                run.get("val_trades"),
+                run.get("analyst_decision"),
+                run.get("detail"),
+            ),
+        )
+        # Bound the table like logs — keep the most recent ~200 rows.
+        self._execute(
+            "DELETE FROM optimizer_runs WHERE id <= "
+            "(SELECT MAX(id) FROM optimizer_runs) - 200"
+        )
+        return int(cursor.lastrowid)
+
+    def get_optimizer_runs(self, limit: int = 50) -> List[Dict[str, Any]]:
+        rows = self._query(
+            "SELECT * FROM optimizer_runs ORDER BY id DESC LIMIT ?", (limit,)
+        )
+        result = []
+        for row in rows:
+            d = dict(row)
+            for key in ("params_before", "params_after", "changed_keys"):
+                if d.get(key) is not None:
+                    try:
+                        d[key] = json.loads(d[key])
+                    except (TypeError, ValueError):
+                        pass
+            result.append(d)
+        return result
 
     def close(self) -> None:
         with self._lock:
