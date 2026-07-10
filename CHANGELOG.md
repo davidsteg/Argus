@@ -9,6 +9,17 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.18.1] - 2026-07-10
+
+### Fixed
+- **Trade info chart: stale markers bleeding between trades.** The per-trade
+  info popup's price chart showed entry/exit markers and the hold-window band
+  from the previous trade overlaid on the new one. ECharts' `setOption` merges
+  by default, and the chart reset (`options.clear` + `update`) didn't explicitly
+  clear `markLine` and `markArea` — so they persisted from the prior trade. The
+  reset now sets `markLine=None` and `markArea=None` on the series before calling
+  `update()`, telling ECharts to remove those keys during the merge.
+
 ## [v2.18.0] - 2026-07-10
 
 ### Added

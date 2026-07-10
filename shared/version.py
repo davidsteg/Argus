@@ -10,9 +10,24 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.18.0"
+__version__ = "2.18.1"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.18.1",
+        "date": "2026-07-10",
+        "title": "Fix trade info chart: stale markers bleeding between trades",
+        "notes": [
+            "The per-trade info popup's price chart showed entry/exit markers "
+            "and the hold-window band from the previous trade overlaid on the "
+            "new one. ECharts' setOption merges by default, and the chart "
+            "reset (options.clear + update) didn't explicitly clear markLine "
+            "and markArea — so they persisted from the prior trade.",
+            "Fix: the reset now sets markLine=None and markArea=None on the "
+            "series before calling update(), telling ECharts to remove those "
+            "keys during the merge.",
+        ],
+    },
     {
         "version": "2.18.0",
         "date": "2026-07-10",

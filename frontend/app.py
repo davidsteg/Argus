@@ -2627,6 +2627,10 @@ def dashboard() -> None:
         # --- reset the chart to a clean slate for this trade ---
         trade_info_chart.options.clear()
         trade_info_chart.options.update(trade_hold_chart_options())
+        # ECharts setOption merges by default — explicitly clear markers
+        # from any previous trade so they don't bleed into the new chart.
+        trade_info_chart.options["series"][0]["markLine"] = None
+        trade_info_chart.options["series"][0]["markArea"] = None
         trade_info_chart.update()
         trade_info_chart.set_visibility(True)
         trade_info_chart_empty.set_text("Loading price history…")
