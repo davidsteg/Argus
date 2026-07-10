@@ -723,7 +723,10 @@ class ArgusBot:
             self.config.get("exit_slip_pct", 0.002),
         )
         try:
-            return await asyncio.to_thread(self.trading.submit_order, order_request)
+            order = await asyncio.to_thread(self.trading.submit_order, order_request)
+            if symbol in self._open_entries:
+                self._open_entries[symbol]["_close_order_id"] = order.id
+            return order
         except Exception as exc:
             self._closing.discard(symbol)
             logger.error("Limit close failed for %s: %s", symbol, exc)
@@ -875,22 +878,27 @@ class ArgusBot:
     async def reconcile_closed_trade(self, symbol: str, entry: Dict[str, Any]) -> None:
         """A tracked position vanished — find its exit fill and log the trade."""
         side = entry.get("side", "BUY")
-        # The exit order's side is the opposite of the entry: a long exits
-        # with a SELL, a short covers with a BUY. Matching on SELL for a
-        # short would find the short's own entry order and record ~zero PnL.
-        exit_side = OrderSide.BUY if side == "SELL" else OrderSide.SELL
         exit_price: Optional[float] = None
+        close_order_id = entry.get("_close_order_id")
         try:
-            closed_orders = await asyncio.to_thread(
-                self.trading.get_orders,
-                GetOrdersRequest(
-                    status=QueryOrderStatus.CLOSED, symbols=[symbol], limit=10
-                ),
-            )
-            for order in closed_orders:
-                if order.side == exit_side and order.filled_avg_price:
+            if close_order_id:
+                order = await asyncio.to_thread(
+                    self.trading.get_order_by_id, close_order_id
+                )
+                if order.filled_avg_price:
                     exit_price = float(order.filled_avg_price)
-                    break
+            else:
+                exit_side = OrderSide.BUY if side == "SELL" else OrderSide.SELL
+                closed_orders = await asyncio.to_thread(
+                    self.trading.get_orders,
+                    GetOrdersRequest(
+                        status=QueryOrderStatus.CLOSED, symbols=[symbol], limit=10
+                    ),
+                )
+                for order in closed_orders:
+                    if order.side == exit_side and order.filled_avg_price:
+                        exit_price = float(order.filled_avg_price)
+                        break
         except Exception as exc:
             logger.error("Exit reconciliation failed for %s: %s", symbol, exc)
             self.db.add_log("ERROR", f"{symbol}: exit reconciliation failed: {exc}")

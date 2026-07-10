@@ -535,8 +535,11 @@ def fetch_trade_bars(
     info chart, padded a few minutes either side so the entry and exit sit
     inside the frame. Any failure (no data, feed hiccup) returns an empty list
     and the dialog falls back to a 'chart unavailable' note."""
-    from alpaca.data.historical import StockHistoricalDataClient
-    from alpaca.data.requests import StockBarsRequest
+    from alpaca.data.historical import (
+        CryptoHistoricalDataClient,
+        StockHistoricalDataClient,
+    )
+    from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
     from alpaca.data.timeframe import TimeFrame
 
     start = to_local(entry_iso)
@@ -545,15 +548,26 @@ def fetch_trade_bars(
         return []
     end = end or (start + timedelta(hours=1))
     pad = timedelta(minutes=10)
+    is_crypto = "/" in symbol
     try:
-        client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
-        request = StockBarsRequest(
-            symbol_or_symbols=symbol,
-            timeframe=TimeFrame.Minute,
-            start=(start - pad).astimezone(timezone.utc),
-            end=(end + pad).astimezone(timezone.utc),
-        )
-        bars = client.get_stock_bars(request)
+        if is_crypto:
+            client = CryptoHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+            request = CryptoBarsRequest(
+                symbol_or_symbols=symbol,
+                timeframe=TimeFrame.Minute,
+                start=(start - pad).astimezone(timezone.utc),
+                end=(end + pad).astimezone(timezone.utc),
+            )
+            bars = client.get_crypto_bars(request)
+        else:
+            client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+            request = StockBarsRequest(
+                symbol_or_symbols=symbol,
+                timeframe=TimeFrame.Minute,
+                start=(start - pad).astimezone(timezone.utc),
+                end=(end + pad).astimezone(timezone.utc),
+            )
+            bars = client.get_stock_bars(request)
     except Exception as exc:  # noqa: BLE001 — best-effort, chart is optional
         logger.warning("Trade-bar fetch failed for %s: %s", symbol, exc)
         return []

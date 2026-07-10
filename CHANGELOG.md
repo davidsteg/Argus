@@ -9,6 +9,24 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.17.3] - 2026-07-10
+
+### Fixed
+- **Crypto trade history: missing exit price, PnL, and price chart.** Crypto
+  trades in the Trade History tab showed "—" for exit price, PnL, and PnL %
+  because `reconcile_closed_trade` searched for the exit fill by side with
+  `limit=10` — if the close order wasn't in the first 10 results (common for
+  crypto pairs with many orders), the trade was permanently recorded with
+  `exit_price=None` and `realized_pnl=None`.
+- `_limit_close` now records the close order's ID on the entry tracking dict,
+  and `reconcile_closed_trade` uses a direct `get_order_by_id` lookup — precise,
+  no limit, no side ambiguity. Falls back to the old side-based search for
+  adopted/legacy positions that have no tracked close order ID.
+- The per-trade info popup's price chart also failed for crypto trades because
+  `fetch_trade_bars` hardcoded `StockHistoricalDataClient` — it now detects
+  crypto symbols (by the `/` in the symbol) and uses `CryptoHistoricalDataClient`
+  + `CryptoBarsRequest` instead.
+
 ## [v2.17.2] - 2026-07-10
 
 ### Fixed
