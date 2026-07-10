@@ -9,6 +9,25 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.21.0] - 2026-07-10
+
+### Added
+- **Live optimizer progress in the dashboard.** The Optimizer tab now shows
+  real-time progress while a grid search is running — phase (fetching / grid
+  search / validation / analyst / writing), a progress bar with combinations
+  evaluated vs total, candidate count, and elapsed time — instead of a frozen
+  spinner that gave no signal the process was alive. The status is polled every
+  refresh cycle (2s default) from the `optimizer_status` runtime_state blob.
+
+### Changed
+- **`POST /optimize` is now fire-and-forget.** It launches the grid search in
+  a background thread and returns immediately, so the dashboard can poll
+  `GET /optimizer/status` for live progress. Returns 409 if a run is already
+  in progress, preventing overlapping runs. `run_optimization` publishes
+  phase/evaluated/candidates to runtime_state at each boundary (every 500
+  combinations during the grid search, every 50 during validation) and clears
+  it to idle in the `finally` block.
+
 ## [v2.20.3] - 2026-07-10
 
 ### Fixed

@@ -361,6 +361,7 @@ def fetch_snapshot(
         "analyst_review_history": db.get_state("analyst_review_history") or [],
         "screener_candidates": db.get_state("screener_candidates") or [],
         "optimizer_runs": db.get_optimizer_runs(OPTIMIZER_RUNS_LIMIT),
+        "optimizer_status": db.get_state("optimizer_status", {"phase": "idle"}),
     }
 
 
@@ -1682,6 +1683,11 @@ def dashboard() -> None:
                             ).props("no-caps unelevated color=deep-purple")
                             optimize_spinner_opt = ui.spinner(size="sm")
                             optimize_spinner_opt.set_visibility(False)
+                    # Live progress card — shown only while a grid search is
+                    # running. Populated by render_optimizer_status() on each
+                    # refresh cycle from the optimizer_status runtime_state blob.
+                    optimizer_live_card = ui.column().classes("w-full gap-2")
+                    optimizer_live_card.set_visibility(False)
                     optimizer_runs_col = ui.column().classes("w-full gap-2")
                     optimizer_runs_empty = ui.label(
                         "No optimizer runs recorded yet — runs are recorded "
@@ -2014,39 +2020,40 @@ def dashboard() -> None:
                                 "Trigger the walk-forward grid search "
                                 "immediately instead of waiting for midnight. "
                                 "This can take several minutes; validated "
-                                "parameters go live automatically.",
+                                "parameters go live automatically. Progress is "
+                                "shown live in the Optimizer tab.",
                                 "OPTIMIZE",
                             ):
                                 return
                             button.disable()
                             spinner.set_visibility(True)
                             ui.notify(
-                                "Optimizer running — this can take a few "
-                                "minutes…",
+                                "Optimizer started — watch the Optimizer tab "
+                                "for live progress",
                                 type="info",
                             )
+                            # /optimize now returns immediately after launching
+                            # the grid search in a background thread; the live
+                            # status is polled via the normal refresh timer and
+                            # rendered in render_optimizer_status().
                             result = await run.io_bound(
-                                call_backend, "/optimize", 900.0,
+                                call_backend, "/optimize", 10.0,
                                 ui_state["market"],
                             )
-                            spinner.set_visibility(False)
-                            button.enable()
-                            if result["ok"]:
-                                params = result["data"].get("parameters", {})
-                                pretty = ", ".join(
-                                    f"{k}={v:g}" for k, v in params.items()
-                                ) or "unchanged"
+                            if not result["ok"]:
+                                spinner.set_visibility(False)
+                                button.enable()
                                 ui.notify(
-                                    f"Optimization complete: {pretty}",
-                                    type="positive",
-                                    timeout=10000,
-                                )
-                            else:
-                                ui.notify(
-                                    f"Optimization failed: {result['error']}",
+                                    f"Optimization failed to start: "
+                                    f"{result['error']}",
                                     type="negative",
                                     timeout=10000,
                                 )
+                            # On success the button stays disabled and the
+                            # spinner stays visible until the next refresh
+                            # detects the running status and takes over the
+                            # UI; render_optimizer_status re-enables the button
+                            # when the run finishes.
 
                         with ui.row().classes("items-center gap-2 mt-1") as optimize_row:
                             optimize_button = ui.button(
@@ -3093,6 +3100,107 @@ def dashboard() -> None:
                         with clamped:
                             ui.tooltip(summary).classes("max-w-[32rem]")
 
+    def render_optimizer_status(snapshot: Dict[str, Any]) -> None:
+        """Show live optimizer progress while a grid search is running, and
+        hide it when idle. Also keeps the 'Run optimizer now' buttons
+        disabled/enabled to match the running state."""
+        status = snapshot.get("optimizer_status") or {"phase": "idle"}
+        phase = status.get("phase", "idle")
+        is_running = phase not in ("idle", None)
+        started_at = status.get("started_at")
+
+        # Keep both "Run optimizer now" buttons in sync with the live state —
+        # disabled while running, re-enabled when the run finishes.
+        for btn in (optimize_button_opt, optimize_button):
+            if is_running:
+                btn.disable()
+            else:
+                btn.enable()
+        for sp in (optimize_spinner_opt, optimize_spinner):
+            sp.set_visibility(is_running)
+
+        # Only rebuild the live card contents when the phase or a key counter
+        # changes — avoids flickering on every 2s refresh tick. While running
+        # we always rebuild so the elapsed timer ticks on every refresh.
+        fingerprint = (
+            phase,
+            status.get("evaluated"),
+            status.get("candidates"),
+            status.get("validated"),
+        )
+        if not is_running and render_state.get("opt_status_fp") == fingerprint:
+            return
+        render_state["opt_status_fp"] = fingerprint
+
+        optimizer_live_card.set_visibility(is_running)
+        optimizer_live_card.clear()
+        if not is_running:
+            return
+
+        phase_labels = {
+            "fetching": "Fetching historical bars",
+            "grid_search": "Scoring parameter combinations",
+            "validation": "Validating out-of-sample",
+            "analyst": "LLM analyst review",
+            "writing": "Writing parameters",
+        }
+        with optimizer_live_card:
+            with ui.column().classes(
+                "w-full gap-2 rounded-lg border border-violet-900/50 "
+                "bg-violet-950/20 px-4 py-3"
+            ):
+                with ui.row().classes("w-full items-center gap-2"):
+                    ui.spinner(size="sm", color="primary")
+                    ui.label(phase_labels.get(phase, phase)).classes(
+                        "text-sm font-medium text-violet-200"
+                    )
+                    ui.space()
+                    trigger = status.get("trigger", "manual")
+                    ui.label(trigger.upper()).classes(
+                        "text-[10px] font-bold rounded border "
+                        "px-1.5 py-0.5 shrink-0 "
+                        + (
+                            "text-sky-400 border-sky-800"
+                            if trigger == "nightly"
+                            else "text-amber-400 border-amber-800"
+                        )
+                    )
+                # Progress bar for the grid-search phase (the only phase with
+                # a known total); other phases show a spinner without a bar.
+                if phase == "grid_search":
+                    total = status.get("total_combinations", 0) or 0
+                    done = status.get("evaluated", 0) or 0
+                    pct = (done / total * 100) if total > 0 else 0.0
+                    ui.linear_progress(value=pct / 100.0).classes("w-full")
+                    ui.label(
+                        f"{done:,} / {total:,} combinations "
+                        f"({pct:.0f}%) · {status.get('candidates', 0)} candidates"
+                    ).classes(f"text-xs {TEXT_MUTED}")
+                elif phase == "validation":
+                    ui.label(
+                        f"Validated {status.get('validated', 0)} of "
+                        f"{status.get('candidates', 0)} ranked candidates"
+                    ).classes(f"text-xs {TEXT_MUTED}")
+                # Elapsed time since the run started.
+                if started_at:
+                    start_local = to_local(started_at)
+                    if start_local is not None:
+                        elapsed_min = max(
+                            (datetime.now(start_local.tzinfo) - start_local)
+                            .total_seconds() / 60.0,
+                            0,
+                        )
+                        if elapsed_min < 60:
+                            elapsed = f"{elapsed_min:.0f}m"
+                        else:
+                            elapsed = (
+                                f"{int(elapsed_min // 60)}h "
+                                f"{int(elapsed_min % 60):02d}m"
+                            )
+                        ui.label(f"Elapsed {elapsed}").classes(
+                            f"text-[10px] font-mono {TEXT_MUTED}"
+                        )
+
     def render_optimizer_runs(snapshot: Dict[str, Any]) -> None:
         runs = snapshot.get("optimizer_runs") or []
         fingerprint = (
@@ -3413,6 +3521,7 @@ def dashboard() -> None:
         render_analyst(snapshot)
         render_environment(snapshot)
         render_logs(snapshot)
+        render_optimizer_status(snapshot)
         render_optimizer_runs(snapshot)
 
     timer = ui.timer(DEFAULT_REFRESH_SECONDS, refresh)

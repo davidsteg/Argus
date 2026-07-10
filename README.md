@@ -139,7 +139,8 @@ the backend API.
 | `GET /regime` | current market regime (SPY trend + realized vol) |
 | `GET /signals` | dry-run of the full decision pipeline per symbol |
 | `GET /positions` `/trades` `/logs` `/version` | state snapshots |
-| `POST /optimize` | run the walk-forward grid search now |
+| `GET /optimizer/status` | live progress of a running grid search (phase, combinations, elapsed) |
+| `POST /optimize` | start the walk-forward grid search in the background |
 | `POST /kill` | emergency kill-sequence |
 | `POST /reset` | recover from KILLED and restart the engine |
 | `GET /analyst/activity` | every LLM call with model, latency, outcome + per-agent 24h stats |

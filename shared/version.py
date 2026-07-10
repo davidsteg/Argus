@@ -10,9 +10,30 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.20.3"
+__version__ = "2.21.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.21.0",
+        "date": "2026-07-10",
+        "title": "Live optimizer progress in the dashboard",
+        "notes": [
+            "The Optimizer tab now shows live progress while a grid search is "
+            "running — phase (fetching / grid search / validation / analyst / "
+            "writing), a progress bar with combinations evaluated vs total, "
+            "candidate count, and elapsed time — instead of a frozen spinner "
+            "that gave no signal the process was alive.",
+            "POST /optimize now starts the grid search in a background "
+            "thread and returns immediately, so the dashboard's refresh timer "
+            "polls GET /optimizer/status (and the optimizer_status "
+            "runtime_state blob) to render progress. A 409 is returned if a "
+            "run is already in progress, preventing overlapping runs.",
+            "run_optimization publishes phase/evaluated/candidates to "
+            "runtime_state at each boundary (every 500 combinations during the "
+            "grid search, every 50 during validation) and clears it to idle "
+            "in the finally block.",
+        ],
+    },
     {
         "version": "2.20.3",
         "date": "2026-07-10",

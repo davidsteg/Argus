@@ -26,7 +26,7 @@ import logging
 import os
 import sys
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -80,6 +80,25 @@ TRAIN_FRACTION = float(os.getenv("OPTIMIZER_TRAIN_FRACTION", "0.75"))
 COST_PER_TRADE_PCT = float(os.getenv("OPTIMIZER_COST_PCT", "0.10")) / 100.0
 STOP_SLIPPAGE_PCT = float(os.getenv("OPTIMIZER_STOP_SLIP_PCT", "0.05")) / 100.0
 
+
+def _publish_status(db, status: Dict[str, Any]) -> None:
+    """Publish the optimizer's live progress to runtime_state so the
+    dashboard and GET /optimizer/status can report a running grid search
+    instead of a frozen spinner. Called at each phase boundary."""
+    try:
+        db.set_state("optimizer_status", status)
+    except Exception:
+        pass
+
+
+def _clear_status(db) -> None:
+    """Mark the optimizer idle by clearing the live status blob."""
+    try:
+        db.set_state("optimizer_status", {"phase": "idle"})
+    except Exception:
+        pass
+
+
 # Grid searched nightly. Kept deliberately compact: 4*4*3*4*3*3*3 = 5184
 # combinations replayed over train+validation finish in a few minutes of
 # CPU inside the container. Bracket distances are ATR multiples
@@ -98,6 +117,13 @@ PARAMETER_GRID: Dict[str, List[float]] = {
     # can drop the gate entirely if it fails out-of-sample validation.
     "max_vwap_dislocation_pct": [0.08, 0.15, 999.0],
 }
+
+# Total number of parameter combinations the grid search evaluates, computed
+# once so the live status can report a concrete progress fraction (the grid
+# itself is a module-level constant so this never drifts from the actual loop).
+GRID_TOTAL_COMBINATIONS = 1
+for _values in PARAMETER_GRID.values():
+    GRID_TOTAL_COMBINATIONS *= len(_values)
 
 
 def fetch_history(symbols: List[str], days: int) -> Dict[str, pd.DataFrame]:
@@ -452,6 +478,13 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
     }
 
     try:
+        _publish_status(db, {
+            "phase": "fetching",
+            "trigger": trigger,
+            "started_at": started_at,
+            "symbols": symbols,
+            "n_symbols": len(symbols),
+        })
         db.add_log(
             "OPTIMIZER",
             f"{'Nightly' if trigger == 'nightly' else 'Manual'} walk-forward "
@@ -501,7 +534,18 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
         }
 
         # Score every combination on the train window, rank best-first.
+        _publish_status(db, {
+            "phase": "grid_search",
+            "trigger": trigger,
+            "started_at": started_at,
+            "total_bars": total_bars,
+            "n_symbols": len(history),
+            "total_combinations": GRID_TOTAL_COMBINATIONS,
+            "evaluated": 0,
+            "candidates": 0,
+        })
         ranked: List[Tuple[float, Dict[str, float], Tuple[float, float, int]]] = []
+        evaluated = 0
         for rsi_period, rsi_buy, stop_mult, target_mult, exit_signal, short_signal, short_exit, max_disloc in itertools.product(
             PARAMETER_GRID["rsi_period"],
             PARAMETER_GRID["rsi_buy_signal"],
@@ -524,6 +568,18 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
                 cooldown_bars=cooldown_bars,
                 **sizing,
             )
+            evaluated += 1
+            if evaluated % 500 == 0:
+                _publish_status(db, {
+                    "phase": "grid_search",
+                    "trigger": trigger,
+                    "started_at": started_at,
+                    "total_bars": total_bars,
+                    "n_symbols": len(history),
+                    "total_combinations": GRID_TOTAL_COMBINATIONS,
+                    "evaluated": evaluated,
+                    "candidates": len(ranked),
+                })
             if trades == 0:
                 continue
             params = {
@@ -552,10 +608,22 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
 
         # Walk down the train ranking and take the first combination that also
         # made money on the unseen validation window.
+        _publish_status(db, {
+            "phase": "validation",
+            "trigger": trigger,
+            "started_at": started_at,
+            "total_bars": total_bars,
+            "n_symbols": len(history),
+            "total_combinations": GRID_TOTAL_COMBINATIONS,
+            "evaluated": GRID_TOTAL_COMBINATIONS,
+            "candidates": len(ranked),
+            "validated": 0,
+        })
         best_params: Optional[Dict[str, float]] = None
         best_train_score = 0.0
         train_stats: Tuple[float, float, int] = (0.0, 0.0, 0)
         val_stats: Optional[Tuple[float, float, int]] = None
+        validated = 0
         for score, params, stats in ranked:
             if validation is None:
                 best_params, best_train_score, train_stats = params, score, stats
@@ -572,6 +640,19 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
                 cooldown_bars=cooldown_bars,
                 **sizing,
             )
+            validated += 1
+            if validated % 50 == 0:
+                _publish_status(db, {
+                    "phase": "validation",
+                    "trigger": trigger,
+                    "started_at": started_at,
+                    "total_bars": total_bars,
+                    "n_symbols": len(history),
+                    "total_combinations": GRID_TOTAL_COMBINATIONS,
+                    "evaluated": GRID_TOTAL_COMBINATIONS,
+                    "candidates": len(ranked),
+                    "validated": validated,
+                })
             if val_return > 0.0:
                 best_params, best_train_score, train_stats = params, score, stats
                 val_stats = (val_return, val_drawdown, val_trades)
@@ -606,6 +687,17 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
             from analyst import get_analyst
             import regime as regime_module
 
+            _publish_status(db, {
+                "phase": "analyst",
+                "trigger": trigger,
+                "started_at": started_at,
+                "total_bars": total_bars,
+                "n_symbols": len(history),
+                "total_combinations": GRID_TOTAL_COMBINATIONS,
+                "evaluated": GRID_TOTAL_COMBINATIONS,
+                "candidates": len(ranked),
+                "validated": validated,
+            })
             analyst = get_analyst()
             regime_info = regime_module.get_regime()
             analyst_result = analyst.review_optimization(
@@ -637,6 +729,17 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
         except Exception as exc:
             logger.error("Post-optimization analyst review failed: %s", exc)
 
+        _publish_status(db, {
+            "phase": "writing",
+            "trigger": trigger,
+            "started_at": started_at,
+            "total_bars": total_bars,
+            "n_symbols": len(history),
+            "total_combinations": GRID_TOTAL_COMBINATIONS,
+            "evaluated": GRID_TOTAL_COMBINATIONS,
+            "candidates": len(ranked),
+            "validated": validated,
+        })
         db.set_config(best_params)
 
         total_return, drawdown, trades = train_stats
@@ -696,6 +799,7 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
             timespec="milliseconds"
         )
         db.record_optimizer_run(run)
+        _clear_status(db)
 
 
 def seconds_until_midnight_zurich() -> float:

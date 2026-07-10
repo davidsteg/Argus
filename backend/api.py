@@ -17,10 +17,11 @@ GET /signals    evaluate the strategy RIGHT NOW for every watchlist symbol
 GET /positions  positions snapshot from the shared database
 GET /trades     recent trade history
 GET /logs       recent system log entries
+GET /optimizer/status  live progress of a running grid search
 
 Action endpoints
 ----------------
-POST /optimize  run the walk-forward grid search immediately
+POST /optimize  start the walk-forward grid search in the background
 POST /kill      emergency kill-sequence (cancel, liquidate, KILLED)
 POST /reset     recover from KILLED: set RUNNING and restart the engine
 """
@@ -339,6 +340,15 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
             "max_candidates": int(config.get("screener_max_candidates", 5.0)),
         }
 
+    @app.get("/optimizer/status")
+    async def optimizer_status() -> Dict[str, Any]:
+        """Live progress of the optimizer grid search — the dashboard polls
+        this to show a running progress bar instead of a frozen spinner. The
+        optimizer publishes phase/evaluated/candidates to runtime_state at
+        each boundary; `phase: 'idle'` means no run is active."""
+        status = db.get_state("optimizer_status", {"phase": "idle"})
+        return {"status": status}
+
     # ------------------------------------------------------------------ #
     # action endpoints
     # ------------------------------------------------------------------ #
@@ -355,14 +365,24 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
                 detail="Optimizer is equity-only; the crypto engine runs on "
                 "static parameters.",
             )
-        db.add_log("OPTIMIZER", "Manual optimization triggered via API")
-        best = await asyncio.to_thread(run_optimization, "manual")
-        if best is None:
+        # Prevent overlapping runs — the grid search is CPU-heavy and a second
+        # concurrent run would corrupt the live status blob and double the load.
+        current = db.get_state("optimizer_status", {"phase": "idle"})
+        if current.get("phase") not in ("idle", None):
             raise HTTPException(
-                status_code=500,
-                detail="Optimization produced no result — see /logs",
+                status_code=409,
+                detail="Optimizer already running — watch /optimizer/status",
             )
-        return {"optimized": True, "parameters": best}
+        db.add_log("OPTIMIZER", "Manual optimization triggered via API")
+
+        async def _run() -> None:
+            try:
+                await asyncio.to_thread(run_optimization, "manual")
+            except Exception as exc:
+                logger.exception("Background optimization failed: %s", exc)
+
+        asyncio.create_task(_run())
+        return {"optimized": False, "status": "started", "message": "Optimizer started — poll /optimizer/status"}
 
     @app.post("/kill")
     async def kill() -> Dict[str, Any]:
