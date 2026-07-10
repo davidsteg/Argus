@@ -232,9 +232,16 @@ class SentimentProvider:
                 temperature=0.3,
                 max_tokens=512,
             )
-            text = response.choices[0].message.content
+            choice = response.choices[0]
+            msg = choice.message
+            text = msg.content
             if not text:
-                raise RuntimeError("LLM returned blank content")
+                text = getattr(msg, "reasoning", None) or ""
+            if not text:
+                details = f"finish_reason={choice.finish_reason}"
+                if hasattr(msg, "refusal") and msg.refusal:
+                    details += f" refusal={msg.refusal}"
+                raise RuntimeError(f"LLM returned blank content ({details})")
         except Exception as exc:
             record_llm_call(
                 "sentiment", self._model, (time.monotonic() - started) * 1000,

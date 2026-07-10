@@ -9,6 +9,18 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.18.2] - 2026-07-10
+
+### Fixed
+- **Sentiment LLM blank-content error — missing reasoning fallback.** v2.4.10
+  added a fallback to the non-standard `reasoning` field when Ollama Cloud
+  DeepSeek models return empty `content`, but only applied it to the analyst
+  module — `sentiment.py` was missed. Sentiment scoring for every symbol failed
+  with "LLM returned blank content" and fell back to the keyword heuristic.
+  `sentiment.py` now mirrors `analyst.py`'s response extraction: try `content`
+  first, fall back to `reasoning`, and include `finish_reason` and `refusal` in
+  the error message when both are empty.
+
 ## [v2.18.1] - 2026-07-10
 
 ### Fixed

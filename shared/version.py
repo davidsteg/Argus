@@ -10,9 +10,24 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.18.1"
+__version__ = "2.18.2"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.18.2",
+        "date": "2026-07-10",
+        "title": "Fix sentiment LLM blank-content error — missing reasoning fallback",
+        "notes": [
+            "v2.4.10 added a fallback to the non-standard 'reasoning' field when "
+            "Ollama Cloud DeepSeek models return empty 'content', but only "
+            "applied it to the analyst module — sentiment.py was missed. "
+            "Sentiment scoring for every symbol failed with 'LLM returned blank "
+            "content' and fell back to the keyword heuristic.",
+            "sentiment.py now mirrors analyst.py's response extraction: try "
+            "content first, fall back to reasoning, and include finish_reason "
+            "and refusal in the error message when both are empty.",
+        ],
+    },
     {
         "version": "2.18.1",
         "date": "2026-07-10",
