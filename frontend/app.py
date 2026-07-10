@@ -905,6 +905,22 @@ def dashboard() -> None:
     # through cur_db()/ui_state so the whole dashboard follows the selection.
     ui_state = {"market": MARKETS[0]}
 
+    def is_crypto() -> bool:
+        return ui_state["market"] == "crypto"
+
+    _market_vis_tracked: list = []
+
+    def _track_visibility(element, show_for_crypto: bool = False):
+        _market_vis_tracked.append((element, show_for_crypto))
+
+    def _update_market_visibility():
+        crypto = is_crypto()
+        for element, show_for_crypto in _market_vis_tracked:
+            try:
+                element.set_visibility(show_for_crypto if crypto else True)
+            except Exception:
+                pass
+
     def cur_db():
         return db_for(ui_state["market"])
 
@@ -1044,6 +1060,7 @@ def dashboard() -> None:
         if len(MARKETS) > 1:
             async def on_market_change(event: Any) -> None:
                 ui_state["market"] = event.value or MARKETS[0]
+                _update_market_visibility()
                 await refresh()
 
             ui.toggle(
@@ -1073,7 +1090,9 @@ def dashboard() -> None:
                 "Market regime gates new entries only (TREND_DOWN = no new "
                 "buys). Evaluated while the market is open."
             )
-            market_chip["holder"].tooltip("US equity market session")
+            market_chip["holder"].tooltip(
+                "Crypto market — 24/7" if is_crypto() else "US equity market session"
+            )
             engine_chip["holder"].tooltip(
                 "Heartbeat of the backend trading engine — LIVE while cycle "
                 "traces keep arriving within 3× the poll interval"
@@ -1171,6 +1190,7 @@ def dashboard() -> None:
         trades_tab = ui.tab("Trades", icon="receipt_long")
         analyst_tab = ui.tab("Analyst", icon="psychology")
         optimizer_tab = ui.tab("Optimizer", icon="science")
+        _track_visibility(optimizer_tab)
         settings_tab = ui.tab("Settings", icon="tune")
         logs_tab = ui.tab("Logs", icon="terminal")
 
@@ -1249,17 +1269,20 @@ def dashboard() -> None:
                         param_labels: Dict[str, ui.label] = {
                             key: kv_row(meta["label"])
                             for key, meta in PARAM_META.items()
+                            if not (is_crypto() and key in {"short_enabled", "rsi_short_signal", "rsi_short_exit"})
                         }
                         config_updated_label = ui.label(
                             "Last optimization: —"
                         ).classes(f"text-xs {TEXT_MUTED} mt-2")
 
-                    with card():
+                    with card() as screener_overview_card:
                         card_title("🔍 Screener Candidates", "RSI-oversold + VWAP-dip setups")
                         screener_container = ui.column().classes("w-full gap-0")
                         screener_empty = ui.label(
                             "Screener disabled or no candidates yet — enable it in Settings"
                         ).classes(f"text-sm {TEXT_MUTED}")
+
+                    _track_visibility(screener_overview_card)
 
                     with card():
                         card_title("🕑 Recent Activity", "full log in Logs tab")
@@ -1400,7 +1423,7 @@ def dashboard() -> None:
                         ).props("dense outlined").classes("w-full sm:w-56 sm:shrink-0")
                     with ui.row().classes(
                         "w-full items-center justify-between gap-4 flex-wrap"
-                    ):
+                    ) as watchlist_model_row:
                         with ui.column().classes("gap-0 min-w-0"):
                             ui.label("Watchlist Model").classes(
                                 "text-sm text-white"
@@ -1412,6 +1435,7 @@ def dashboard() -> None:
                         analyst_watchlist_model_input = ui.input(
                             value="", placeholder="(same as Model)"
                         ).props("dense outlined").classes("w-full sm:w-56 sm:shrink-0")
+                    _track_visibility(watchlist_model_row)
                     with ui.row().classes(
                         "w-full items-center justify-between gap-4 flex-wrap"
                     ):
@@ -1511,7 +1535,7 @@ def dashboard() -> None:
 
                 with ui.row().classes("w-full gap-4 items-start flex-col md:flex-row"):
                     # Optimization review card
-                    with ui.column().classes("gap-4 grow basis-0 min-w-0"):
+                    with ui.column().classes("gap-4 grow basis-0 min-w-0") as opt_review_col:
                         with card():
                             card_title("🔬 Post-Optimization Review")
                             opt_summary = ui.label("").classes(
@@ -1538,6 +1562,8 @@ def dashboard() -> None:
                                 "No optimization review yet — runs after the "
                                 "nightly grid search"
                             ).classes(f"text-sm {TEXT_MUTED}")
+
+                    _track_visibility(opt_review_col)
 
                     # Trade review card
                     with ui.column().classes("gap-4 grow basis-0 min-w-0"):
@@ -1631,7 +1657,7 @@ def dashboard() -> None:
                             ).classes(f"text-sm {TEXT_MUTED}")
 
         # =========================== OPTIMIZER ========================= #
-        with ui.tab_panel(optimizer_tab).classes("p-3 sm:p-6"):
+        with ui.tab_panel(optimizer_tab).classes("p-3 sm:p-6") as optimizer_panel:
             with ui.column().classes("w-full gap-4"):
                 with card():
                     card_title("🗓️ Run History", "every optimizer run, newest first")
@@ -1660,6 +1686,8 @@ def dashboard() -> None:
                         "after the first grid search"
                     ).classes(f"text-sm {TEXT_MUTED}")
 
+        _track_visibility(optimizer_panel)
+
         # ============================ SETTINGS ========================= #
         with ui.tab_panel(settings_tab).classes("p-3 sm:p-6"):
             with ui.row().classes("w-full gap-4 items-start flex-col md:flex-row"):
@@ -1673,7 +1701,10 @@ def dashboard() -> None:
                             "re-tunes and overwrites these values."
                         ).classes(f"text-xs {TEXT_MUTED}")
                         param_inputs: Dict[str, Any] = {}
+                        _CRYPTO_SKIP_PARAMS = {"short_enabled", "rsi_short_signal", "rsi_short_exit"}
                         for key, meta in PARAM_META.items():
+                            if is_crypto() and key in _CRYPTO_SKIP_PARAMS:
+                                continue
                             with ui.row().classes(
                                 "w-full items-center justify-between gap-4 "
                                 "flex-wrap"
@@ -1705,6 +1736,8 @@ def dashboard() -> None:
                         async def apply_parameters() -> None:
                             updates: Dict[str, float] = {}
                             for key, meta in PARAM_META.items():
+                                if is_crypto() and key in _CRYPTO_SKIP_PARAMS:
+                                    continue
                                 raw = param_inputs[key].value
                                 if raw is None:
                                     ui.notify(
@@ -1755,6 +1788,8 @@ def dashboard() -> None:
                             ):
                                 return
                             for key, meta in PARAM_META.items():
+                                if is_crypto() and key in _CRYPTO_SKIP_PARAMS:
+                                    continue
                                 if meta.get("toggle"):
                                     param_inputs[key].value = bool(int(DEFAULT_CONFIG[key]))
                                 else:
@@ -1768,6 +1803,8 @@ def dashboard() -> None:
                         def reload_from_db() -> None:
                             live = cur_db().get_config()
                             for key, meta in PARAM_META.items():
+                                if is_crypto() and key in _CRYPTO_SKIP_PARAMS:
+                                    continue
                                 if meta.get("toggle"):
                                     param_inputs[key].value = bool(int(live.get(key, 0.0)))
                                 else:
@@ -1789,7 +1826,7 @@ def dashboard() -> None:
                                 "Restore defaults", on_click=restore_defaults
                             ).props("no-caps flat color=orange")
 
-                    with card():
+                    with card() as watchlist_card:
                         card_title("📡 Watchlist")
                         ui.label(
                             "Whole-market mode only. Written to the shared "
@@ -1852,7 +1889,9 @@ def dashboard() -> None:
                                 "Reload from DB", on_click=reload_watchlist_from_db
                             ).props("no-caps flat")
 
-                    with card():
+                    _track_visibility(watchlist_card)
+
+                    with card() as screener_card:
                         card_title("🔍 Opportunity Screener")
                         ui.label(
                             "Scans a wide pool of most-active symbols for "
@@ -1926,6 +1965,8 @@ def dashboard() -> None:
                             ui.button(
                                 "Reload from DB", on_click=reload_screener_from_db
                             ).props("no-caps flat")
+
+                    _track_visibility(screener_card)
 
                     with card():
                         card_title("🖥️ Dashboard")
@@ -2005,7 +2046,7 @@ def dashboard() -> None:
                                     timeout=10000,
                                 )
 
-                        with ui.row().classes("items-center gap-2 mt-1"):
+                        with ui.row().classes("items-center gap-2 mt-1") as optimize_row:
                             optimize_button = ui.button(
                                 "Run optimizer now",
                                 on_click=lambda: run_optimizer_btn(
@@ -2020,6 +2061,7 @@ def dashboard() -> None:
                             "optimizer now button has moved to the "
                             "Optimizer tab."
                         ).classes(f"text-xs {TEXT_MUTED} mt-1")
+                        _track_visibility(optimize_row)
 
                     with card():
                         card_title("🌍 Operational Environment")
@@ -2029,7 +2071,10 @@ def dashboard() -> None:
                             "take effect on the next engine cycle."
                         ).classes(f"text-xs {TEXT_MUTED}")
                         op_param_inputs: Dict[str, Any] = {}
+                        _CRYPTO_SKIP_OP = {"eod_flatten_minutes"}
                         for key, meta in OPERATIONAL_PARAM_META.items():
+                            if is_crypto() and key in _CRYPTO_SKIP_OP:
+                                continue
                             with ui.row().classes(
                                 "w-full items-center justify-between gap-4 "
                                 "flex-wrap"
@@ -2055,6 +2100,8 @@ def dashboard() -> None:
                         async def apply_operational() -> None:
                             updates: Dict[str, float] = {}
                             for key, meta in OPERATIONAL_PARAM_META.items():
+                                if is_crypto() and key in _CRYPTO_SKIP_OP:
+                                    continue
                                 raw = op_param_inputs[key].value
                                 if raw is None:
                                     ui.notify(
@@ -2085,6 +2132,8 @@ def dashboard() -> None:
                         def reload_operational_from_db() -> None:
                             live = cur_db().get_config()
                             for key, meta in OPERATIONAL_PARAM_META.items():
+                                if is_crypto() and key in _CRYPTO_SKIP_OP:
+                                    continue
                                 op_param_inputs[key].value = (
                                     int(live.get(key, meta["min"]))
                                     if meta["int"]
@@ -2911,6 +2960,8 @@ def dashboard() -> None:
         agents_grid.clear()
         with agents_grid:
             for agent in ANALYST_AGENTS:
+                if is_crypto() and agent["key"] == "optimization":
+                    continue
                 agent_stats = stats.get(agent["key"])
                 model = analyst_cfg.get(agent["model_field"]) or main_model
                 when = agent["when"]
@@ -3369,6 +3420,8 @@ def dashboard() -> None:
         await refresh()
 
     equity_range.on_value_change(on_range_change)
+
+    _update_market_visibility()
 
 
 if __name__ in {"__main__", "__mp_main__"}:

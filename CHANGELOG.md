@@ -9,6 +9,25 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.19.0] - 2026-07-10
+
+### Added
+- **Crypto dashboard: hide equity-only features that don't apply.** When the
+  Crypto market is selected, the dashboard now hides features that are
+  equity-only and have no crypto equivalent: the entire Optimizer tab (crypto
+  has no nightly grid search), Short Selling and RSI short parameters (crypto
+  is spot-only, long-only), EOD Flatten (crypto is 24/7), the Watchlist and
+  Opportunity Screener cards (crypto universe is static USD pairs, not
+  screener-based), the Watchlist Model input and Post-Optimization Review card
+  in the Analyst tab, and the Screener Candidates card on the Overview tab.
+  The Optimization Reviewer agent card is also hidden for crypto since it
+  never fires without an optimizer run.
+- The market chip tooltip now says "Crypto market — 24/7" instead of "US
+  equity market session" when crypto is selected.
+- Visibility updates on market switch and initial page load via a declarative
+  `_track_visibility` / `_update_market_visibility` pattern — no conditional
+  UI duplication.
+
 ## [v2.18.3] - 2026-07-10
 
 ### Fixed
