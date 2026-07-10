@@ -1344,6 +1344,9 @@ class ArgusBot:
             return
 
         self.db.set_status(status=STATUS_RUNNING)
+        # Zero the analyst fail-open counters so the dashboard's
+        # "auto-approvals this session" badge means this session.
+        get_analyst().reset_health(self.db)
         cfg = self.config
         self.db.add_log(
             "INFO",

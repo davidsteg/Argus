@@ -151,16 +151,21 @@ OPTIMIZATION_REVIEW_PROMPT = (
     "parameter optimizer of an automated paper-trading bot called Argus. "
     "The optimizer grid-searches RSI/ATR bracket parameters, ranks them "
     "by in-sample yield-to-drawdown, and validates the winner on an "
-    "unseen out-of-sample window.\n\n"
-    "Your job is to decide whether to accept the optimizer's winning "
-    "parameters, override with a different ranked candidate, or reject "
-    "and keep the current parameters. Watch for overfitting (a huge "
-    "train/validation gap), too few trades to be meaningful, or "
-    "parameter drift that doesn't fit the current market regime.\n\n"
+    "unseen out-of-sample window. The winner you are shown is the "
+    "highest-ranked combination that PASSED that out-of-sample gate; the "
+    "other listed candidates carry train-window stats only and mostly "
+    "did not pass it.\n\n"
+    "Your job is a binary sanity check: accept the optimizer's winning "
+    "parameters, or reject them and keep the current live parameters. "
+    "Reject when something looks structurally wrong — a huge "
+    "train/validation gap, too few trades to be meaningful, or parameter "
+    "drift that clearly doesn't fit the current market regime. You may "
+    "NOT choose different parameters yourself: selection belongs to the "
+    "validated search, not to this review.\n\n"
     "You MUST respond with ONLY a valid JSON object. No markdown, no "
     "code fences, no preamble. Use this exact structure:\n"
-    '{"decision": {"action": "accept|override|reject", '
-    '"override_rank": 1, "reason": "brief explanation"}, '
+    '{"decision": {"action": "accept|reject", '
+    '"reason": "brief explanation"}, '
     '"summary": "one-paragraph assessment", '
     '"warnings": ["warning1", "warning2"], '
     '"suggestions": ["suggestion1", "suggestion2"], '
@@ -202,6 +207,10 @@ class StrategyAnalyst:
         self._last_trade_review: float = 0.0
         self._last_watchlist_review: float = 0.0
         self._lock = threading.Lock()
+        # Guards the read-modify-write on the analyst_health blob: risk-agent
+        # calls run concurrently (asyncio.gather -> threads), so two fail-opens
+        # in one cycle would otherwise drop a count.
+        self._health_lock = threading.Lock()
         self._config: Dict[str, Any] = dict(DEFAULT_ANALYST_CONFIG)
         self._load_config()
         self._build_client()
@@ -222,6 +231,52 @@ class StrategyAnalyst:
     def get_config(self) -> Dict[str, Any]:
         with self._lock:
             return dict(self._config)
+
+    # ------------------------------------------------------------------ #
+    # fail-open visibility
+    # ------------------------------------------------------------------ #
+
+    def reset_health(self, db) -> None:
+        """Zero the fail-open counters at engine start, so the dashboard's
+        'auto-approvals this session' badge means this session."""
+        try:
+            db.set_state(
+                "analyst_health",
+                {
+                    "auto_approvals": {"risk": 0, "portfolio": 0},
+                    "last_error": None,
+                    "last_error_at": None,
+                    "since": datetime.now(timezone.utc).isoformat(
+                        timespec="seconds"
+                    ),
+                },
+            )
+        except Exception as exc:
+            logger.error("Failed to reset analyst health state: %s", exc)
+
+    def _record_fail_open(self, db, agent: str, exc: Exception) -> None:
+        """Count a fail-open (agent unreachable → signals pass un-gated).
+
+        The auto-approve itself is the right availability tradeoff, but it
+        must not be invisible: without this counter the bot can run un-gated
+        for days on a dead Ollama with nothing but per-signal log lines."""
+        try:
+            with self._health_lock:
+                state = db.get_state("analyst_health") or {}
+                counts = state.get("auto_approvals") or {}
+                counts[agent] = int(counts.get(agent, 0)) + 1
+                state["auto_approvals"] = counts
+                state["last_error"] = str(exc)[:300]
+                state["last_error_at"] = datetime.now(timezone.utc).isoformat(
+                    timespec="seconds"
+                )
+                state.setdefault(
+                    "since",
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                )
+                db.set_state("analyst_health", state)
+        except Exception as health_exc:
+            logger.error("Failed to record analyst fail-open: %s", health_exc)
 
     def configure(self, updates: Dict[str, Any], db) -> Dict[str, Any]:
         with self._lock:
@@ -308,6 +363,7 @@ class StrategyAnalyst:
             )
         except Exception as exc:
             logger.warning("Risk agent failed for %s: %s", signal.get("symbol"), exc)
+            self._record_fail_open(db, "risk", exc)
             try:
                 db.add_log("WARNING", f"Risk agent unavailable for {signal.get('symbol')} — signal auto-approved: {str(exc)[:200]}")
             except Exception:
@@ -385,6 +441,7 @@ class StrategyAnalyst:
             )
         except Exception as exc:
             logger.warning("Portfolio manager failed: %s", exc)
+            self._record_fail_open(db, "portfolio", exc)
             try:
                 db.add_log("WARNING", f"Portfolio manager unavailable — passing signals through unranked: {str(exc)[:200]}")
             except Exception:
@@ -516,7 +573,16 @@ class StrategyAnalyst:
         winner: Optional[Dict[str, float]],
         regime: Dict[str, Any],
         db,
+        validation: Optional[tuple] = None,
     ) -> Optional[Dict[str, Any]]:
+        """Binary accept/reject sanity check of the optimizer's validated
+        winner. Deliberately NOT a selection step: an earlier version let the
+        LLM "override" with a different rank from the train-window list —
+        i.e. the least-validated component picking parameters from exactly
+        the in-sample ranking the walk-forward gate exists to distrust.
+        Returns the winner unchanged (accept / any failure — the validated
+        result must not be lost to a flaky reviewer) or None (reject: keep
+        the current live parameters)."""
         if not self.available or not self.enabled(db):
             return winner
 
@@ -538,6 +604,13 @@ class StrategyAnalyst:
         winner_info = None
         if winner:
             winner_info = {k: (int(v) if k == "rsi_period" else round(v, 2)) for k, v in winner.items()}
+        winner_validation = None
+        if validation is not None:
+            winner_validation = {
+                "return_pct": round(validation[0] * 100, 2),
+                "max_drawdown_pct": round(validation[1] * 100, 2),
+                "trades": validation[2],
+            }
 
         prompt_data = {
             "context": "Post-optimization review of the nightly walk-forward grid search.",
@@ -548,7 +621,8 @@ class StrategyAnalyst:
                 "realized_vol_pct": regime.get("realized_vol_pct"),
             },
             "winner": winner_info,
-            "top_candidates": candidates,
+            "winner_out_of_sample_validation": winner_validation,
+            "top_candidates_train_window_only": candidates,
             "total_combinations_tested": len(ranked),
         }
 
@@ -588,14 +662,15 @@ class StrategyAnalyst:
         if action == "reject":
             db.add_log("ANALYST", f"LLM rejected optimizer winner — keeping current params. Reason: {decision.get('reason', 'not specified')}")
             return None
-        elif action == "override":
-            override_rank = int(decision.get("override_rank", 1))
-            if 1 <= override_rank <= len(ranked):
-                _, override_params, _ = ranked[override_rank - 1]
-                db.add_log("ANALYST", f"LLM overrode optimizer winner — using rank {override_rank}. Reason: {decision.get('reason', 'not specified')}")
-                return override_params
-            else:
-                db.add_log("WARNING", f"LLM requested invalid rank {override_rank} (max {len(ranked)}) — falling back to winner")
+        if action not in ("accept",):
+            # Retired "override" (and anything else hallucinated) degrades to
+            # accept: the validated winner stands, the odd action is recorded
+            # in the review history above for the dashboard to show.
+            db.add_log(
+                "WARNING",
+                f"Optimization review returned unknown action "
+                f"{action!r} — treating as accept (binary accept/reject only)",
+            )
         return winner
 
     def review_trades(

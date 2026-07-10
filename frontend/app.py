@@ -357,6 +357,7 @@ def fetch_snapshot(
         "environment": db.get_state("environment", {}) or {},
         "analyst_optimization": db.get_state("analyst_optimization"),
         "analyst_trades": db.get_state("analyst_trades"),
+        "analyst_health": db.get_state("analyst_health"),
         "analyst_config": db.get_state("analyst_config") or {},
         "analyst_call_log": db.get_state("analyst_call_log") or [],
         "analyst_review_history": db.get_state("analyst_review_history") or [],
@@ -1379,6 +1380,16 @@ def dashboard() -> None:
                         "Red: last call failed (hover for the error). Gray: "
                         "no calls recorded yet."
                     ).classes(f"text-xs {TEXT_MUTED}")
+                    # Fail-open badge: the risk agent / portfolio manager
+                    # auto-approve when unreachable (availability over
+                    # gating) — that must be visible, not just a log line,
+                    # or the bot can run un-gated for days on a dead Ollama.
+                    analyst_failopen_banner = ui.label("").classes(
+                        "w-full text-xs font-semibold text-amber-300 "
+                        "bg-amber-950 rounded border border-amber-800 "
+                        "px-2 py-1 mt-1"
+                    )
+                    analyst_failopen_banner.set_visibility(False)
                     agents_grid = ui.element("div").classes(
                         "w-full grid grid-cols-1 lg:grid-cols-2 "
                         "2xl:grid-cols-3 gap-3 mt-2"
@@ -3652,6 +3663,28 @@ def dashboard() -> None:
             analyst_status_label.set_text(
                 "Configured but disabled — toggle ON to activate"
             )
+
+        # Fail-open badge: signals that passed un-gated because the risk
+        # agent / portfolio manager was unreachable (counted per engine
+        # session, reset at engine start).
+        health = snapshot.get("analyst_health") or {}
+        counts = health.get("auto_approvals") or {}
+        risk_n = int(counts.get("risk", 0) or 0)
+        pm_n = int(counts.get("portfolio", 0) or 0)
+        total = risk_n + pm_n
+        if total > 0:
+            last_at = humanize_age(age_seconds(health.get("last_error_at")))
+            analyst_failopen_banner.set_text(
+                f"⚠️ Fail-open: {total} auto-approval"
+                f"{'s' if total != 1 else ''} this session — signals passed "
+                f"UN-GATED because an agent was unreachable "
+                f"(risk agent {risk_n}, portfolio manager {pm_n}; "
+                f"last error {last_at}: "
+                f"{(health.get('last_error') or '?')[:120]})"
+            )
+            analyst_failopen_banner.set_visibility(True)
+        else:
+            analyst_failopen_banner.set_visibility(False)
 
         _render_analyst_card(
             snapshot.get("analyst_optimization"),

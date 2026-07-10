@@ -679,9 +679,13 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
         best_params["analyst_enabled"] = current.get("analyst_enabled", 0.0)
         best_params["short_enabled"] = current.get("short_enabled", 0.0)
 
-        # Post-optimization LLM review (if analyst is enabled).
-        # The analyst can accept, override (pick a different rank), or reject
-        # the winner. If it rejects, keep current params unchanged.
+        # Post-optimization LLM review (if analyst is enabled): a binary
+        # sanity check that can only accept the validated winner or reject
+        # it and keep the current parameters. It deliberately cannot pick a
+        # different rank — an earlier "override" option let the LLM select
+        # from the train-window ranking (mostly combinations that failed or
+        # never saw the out-of-sample gate), i.e. exactly the in-sample
+        # cherry-picking the walk-forward validation exists to prevent.
         analyst_decision = None
         try:
             from analyst import get_analyst
@@ -701,7 +705,7 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
             analyst = get_analyst()
             regime_info = regime_module.get_regime()
             analyst_result = analyst.review_optimization(
-                ranked, best_params, regime_info, db
+                ranked, best_params, regime_info, db, validation=val_stats
             )
             if analyst_result is None:
                 db.add_log(
@@ -712,20 +716,7 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
                 run["detail"] = "LLM analyst rejected the optimizer winner"
                 run["analyst_decision"] = "reject"
                 return None
-            if analyst_result != best_params:
-                best_params = analyst_result
-                analyst_decision = "override"
-                db.add_log(
-                    "ANALYST",
-                    f"LLM overrode optimizer winner — new params: "
-                    f"RSI({int(best_params['rsi_period'])}) "
-                    f"buy<{best_params['rsi_buy_signal']:.0f}, "
-                    f"exit>{best_params['rsi_exit_signal']:.0f}, "
-                    f"stop {best_params['atr_stop_mult']:.1f}×ATR, "
-                    f"target {best_params['atr_target_mult']:.1f}×ATR",
-                )
-            else:
-                analyst_decision = "accept"
+            analyst_decision = "accept"
         except Exception as exc:
             logger.error("Post-optimization analyst review failed: %s", exc)
 

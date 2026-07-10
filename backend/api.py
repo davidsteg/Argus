@@ -136,6 +136,7 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
             "engine_started_at": controller.started_at,
             "last_cycle": controller.bot.last_cycle if controller.bot else {},
             "open_entries": controller.bot._open_entries if controller.bot else {},
+            "analyst_health": db.get_state("analyst_health"),
             "market_clock": clock_info,
             "cooldowns_active": (
                 sorted(controller.bot._cooldowns) if controller.bot else []
