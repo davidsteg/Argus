@@ -9,6 +9,17 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.17.1] - 2026-07-10
+
+### Fixed
+- **Diagnostic endpoints now report each engine's own regime proxy.** `/regime`,
+  `/signals`, and the manual trade-review endpoint called the regime classifier
+  directly (defaults to the SPY equity proxy), so on the crypto engine they
+  showed `UNKNOWN — no SPY bars returned` instead of the BTC/USD regime. They
+  now route through the engine's market adapter. Diagnostic-only — live trading
+  always used the correct per-market regime (the crypto cycle's `/debug` already
+  showed `TREND_UP` from BTC/USD).
+
 ## [v2.17.0] - 2026-07-10
 
 ### Added

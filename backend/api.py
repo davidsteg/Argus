@@ -150,8 +150,10 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
 
     @app.get("/regime")
     async def market_regime() -> Dict[str, Any]:
-        """Current market regime — TREND_DOWN means no new BUY entries."""
-        info = await asyncio.to_thread(regime_module.get_regime)
+        """Current market regime — TREND_DOWN means no new BUY entries. Uses the
+        engine's own proxy (SPY for equities, BTC/USD for crypto)."""
+        probe = bot_or_probe()
+        info = await asyncio.to_thread(probe.market.regime)
         return {
             **info,
             "blocks_new_entries": regime_module.blocks_new_entries(info),
@@ -167,7 +169,7 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
         provider = get_sentiment_provider()
         watchlist = probe.watchlist or universe.get_watchlist()
         frames = await probe.fetch_minute_bars()
-        regime_info = await asyncio.to_thread(regime_module.get_regime)
+        regime_info = await asyncio.to_thread(probe.market.regime)
         regime_blocks = regime_module.blocks_new_entries(regime_info)
         evaluation: Dict[str, Any] = {}
         for symbol in watchlist:
@@ -378,7 +380,7 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
         trades = db.get_trades(200)
         stats = db.get_trade_stats()
         config = db.get_config()
-        regime_info = await asyncio.to_thread(regime_module.get_regime)
+        regime_info = await asyncio.to_thread(bot_or_probe().market.regime)
         report = await asyncio.to_thread(
             analyst.review_trades, trades, stats, config, regime_info, db
         )

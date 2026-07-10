@@ -10,9 +10,23 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.17.0"
+__version__ = "2.17.1"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.17.1",
+        "date": "2026-07-10",
+        "title": "Diagnostic endpoints report each engine's own regime proxy",
+        "notes": [
+            "The /regime, /signals and manual trade-review endpoints called the "
+            "regime classifier directly, which defaults to the SPY equity proxy "
+            "— so on the crypto engine they reported 'UNKNOWN — no SPY bars' "
+            "instead of the BTC/USD regime. They now go through the engine's "
+            "market adapter, so each backend shows its own proxy (SPY for "
+            "equities, BTC/USD for crypto). Diagnostic-only: live trading always "
+            "used the correct per-market regime.",
+        ],
+    },
     {
         "version": "2.17.0",
         "date": "2026-07-10",
