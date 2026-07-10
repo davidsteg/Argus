@@ -9,6 +9,25 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.22.0] - 2026-07-10
+
+### Added
+- **Per-position info popup on the Active Positions card.** Every row in
+  Active Positions now has an ℹ button that opens the same info popup used by
+  Trade History — the entry rationale, entry signal numbers (RSI, VWAP, ATR,
+  news sentiment), execution (qty, entry price, now, market value), and a
+  price chart from entry to now with the entry marker, dashed take-profit /
+  stop-loss lines, and a faint band over the hold window.
+- **Soft stop / target section** in the popup shows the polled levels the bot
+  is enforcing each cycle alongside the current price, so you can see how
+  close a live position is to its stop or target at a glance.
+
+### Changed
+- **Backend publishes `_open_entries` to the shared DB** every cycle so the
+  frontend can render entry metadata for live positions. Internal guard fields
+  (prefixed with `_`) are stripped. Positions adopted from outside the engine
+  (restart, manual fill) have no entry metadata; their ℹ button is disabled.
+
 ## [v2.21.0] - 2026-07-10
 
 ### Added

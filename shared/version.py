@@ -10,9 +10,34 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.21.0"
+__version__ = "2.22.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.22.0",
+        "date": "2026-07-10",
+        "title": "Per-position info popup on the Active Positions card",
+        "notes": [
+            "Every row in the Active Positions card now has an ℹ button that "
+            "opens the same info popup used by Trade History — the entry "
+            "rationale ('RSI 27.4 was oversold below the 30 buy level while "
+            "price sat below VWAP…'), the entry signal numbers (RSI, VWAP, "
+            "ATR, news sentiment), the execution (qty, entry price, now, "
+            "market value), and a price chart from entry to now with the "
+            "entry marker, dashed take-profit / stop-loss lines, and a faint "
+            "band over the hold window.",
+            "A new 🎯 Soft stop / target section shows the levels the bot is "
+            "enforcing each cycle (polled, not resting on the exchange) "
+            "alongside the current price, so you can see how close a live "
+            "position is to its stop or target at a glance.",
+            "The backend publishes its in-memory _open_entries blob (RSI / "
+            "VWAP / ATR / sentiment / stop / target / entry_reason) to the "
+            "shared DB every cycle so the frontend can render it — internal "
+            "guard fields (prefixed with _) are stripped. Positions adopted "
+            "from outside the engine (restart, manual fill) have no entry "
+            "metadata; their ℹ button is disabled.",
+        ],
+    },
     {
         "version": "2.21.0",
         "date": "2026-07-10",

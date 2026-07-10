@@ -1353,6 +1353,20 @@ class ArgusBot:
                 self.db.set_state("last_cycle", cycle)
             except Exception as exc:
                 logger.error("Failed to publish cycle state: %s", exc)
+            # Publish the in-memory open-entry metadata (RSI/VWAP/ATR/
+            # sentiment/stop/target/entry_reason) so the dashboard's
+            # per-position info popup can render it for live positions.
+            # Internal guard fields (prefixed with _) are stripped.
+            try:
+                self.db.set_state(
+                    "open_entries",
+                    {
+                        symbol: {k: v for k, v in entry.items() if not k.startswith("_")}
+                        for symbol, entry in self._open_entries.items()
+                    },
+                )
+            except Exception as exc:
+                logger.error("Failed to publish open entries: %s", exc)
 
     async def _run_cycle_inner(self, cycle: Dict[str, Any]) -> None:
         # Absorb parameter changes written by the optimizer overnight.

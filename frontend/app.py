@@ -353,6 +353,7 @@ def fetch_snapshot(
             local_midnight.astimezone(timezone.utc).isoformat(timespec="seconds")
         ),
         "last_cycle": db.get_state("last_cycle", {}) or {},
+        "open_entries": db.get_state("open_entries", {}) or {},
         "environment": db.get_state("environment", {}) or {},
         "analyst_optimization": db.get_state("analyst_optimization"),
         "analyst_trades": db.get_state("analyst_trades"),
@@ -883,7 +884,7 @@ def dashboard() -> None:
         ".pnl-pos { color: #34d399 !important; }"
         ".pnl-neg { color: #f87171 !important; }"
         ".pos-grid { display: grid;"
-        " grid-template-columns: 1.1fr 0.5fr 0.7fr 1fr 1fr 1.1fr 1.5fr 2.75rem;"
+        " grid-template-columns: 1.1fr 0.5fr 0.7fr 1fr 1fr 1.1fr 1.5fr 2.75rem 2.75rem;"
         " column-gap: 0.5rem; align-items: center; width: 100%; }"
         # Trade-history grid: a hand-built grid (not aggrid) so it lives inside
         # the card cleanly and carries a per-row info button. A trailing fixed
@@ -1225,7 +1226,10 @@ def dashboard() -> None:
                         ).classes(f"text-sm {TEXT_MUTED}")
 
                     with card():
-                        card_title("📊 Active Positions", "live from Alpaca sync")
+                        card_title(
+                            "📊 Active Positions",
+                            "live from Alpaca sync — tap ℹ for the full story",
+                        )
                         with ui.element("div").classes("w-full scroll-x-mobile"):
                             with ui.element("div").classes(
                                 "pos-grid text-xs font-semibold uppercase "
@@ -1233,7 +1237,7 @@ def dashboard() -> None:
                             ):
                                 for header in (
                                     "Symbol", "Side", "Qty", "Entry", "Now",
-                                    "Value", "Unrealized PnL", "",
+                                    "Value", "Unrealized PnL", "", "",
                                 ):
                                     ui.label(header)
                             positions_container = ui.column().classes("w-full gap-0")
@@ -2348,6 +2352,7 @@ def dashboard() -> None:
             if market_owns(p["symbol"], market)
         ]
         positions_empty.set_visibility(not positions)
+        open_entries = snapshot.get("open_entries") or {}
         positions_container.clear()
         with positions_container:
             for pos in positions:
@@ -2385,6 +2390,15 @@ def dashboard() -> None:
                     ui.label(pnl_text).classes(
                         f"font-mono font-semibold {pnl_text_class(pnl)}"
                     )
+                    entry_meta = open_entries.get(pos["symbol"])
+                    info_button = ui.button(
+                        icon="info",
+                        on_click=lambda _, p=dict(pos), e=dict(entry_meta) if entry_meta else None: show_position_info(p, e),
+                    ).props("flat round dense color=blue-4").tooltip(
+                        "Why this position?"
+                    )
+                    if entry_meta is None:
+                        info_button.disable()
                     close_button = ui.button(
                         icon="close",
                         on_click=lambda _, s=pos["symbol"]: on_close_position(s),
@@ -2861,6 +2875,231 @@ def dashboard() -> None:
                 "silent": True,
                 "itemStyle": {"color": "rgba(57, 135, 229, 0.08)"},
                 "data": [[{"xAxis": entry_ms}, {"xAxis": exit_ms}]],
+            }
+        trade_info_chart.update()
+
+    async def show_position_info(
+        pos: Dict[str, Any], entry: Optional[Dict[str, Any]]
+    ) -> None:
+        """Open the per-position info popup: the entry rationale, the numbers,
+        and a price chart from entry to now (the still-open hold window).
+
+        Mirrors show_trade_info for closed trades; the key difference is that
+        the hold window is open-ended (entry → now) and the entry metadata
+        comes from the bot's published open_entries blob, not a persisted
+        trade row. Positions adopted from outside the engine (restart, manual
+        fill) have no entry metadata — the button is disabled in that case and
+        this branch is unreachable, but we still guard for None defensively."""
+        render_state["trade_info_token"] += 1
+        token = render_state["trade_info_token"]
+
+        symbol = pos["symbol"]
+        qty = pos["qty"]
+        side = "BUY" if qty > 0 else "SELL"
+        pnl = pos["unrealized_pnl"]
+        cost_basis = pos["avg_entry_price"] * abs(qty)
+        pnl_pct = (
+            pnl / cost_basis * 100.0 if pnl is not None and cost_basis else None
+        )
+        entry = entry or {}
+
+        # --- header: symbol, side chip, unrealized PnL ---
+        trade_info_title.clear()
+        with trade_info_title:
+            ui.label(symbol).classes("text-xl font-bold text-white")
+            side_color = "text-green-400" if side == "BUY" else "text-red-400"
+            ui.label(("▲ LONG" if side == "BUY" else "▼ SHORT")).classes(
+                f"text-xs font-mono font-semibold {side_color} "
+                "bg-[#1d2432] px-2 py-0.5 rounded border border-[#2a3140]"
+            )
+            if pnl is not None:
+                ui.label(
+                    money(pnl, signed=True)
+                    + (f" ({pnl_pct:+.2f}%)" if pnl_pct is not None else "")
+                ).classes(f"text-sm font-mono font-semibold {pnl_text_class(pnl)}")
+
+        # --- reset the chart to a clean slate for this position ---
+        trade_info_chart.options.clear()
+        trade_info_chart.options.update(trade_hold_chart_options())
+        trade_info_chart.run_chart_method(
+            "setOption", trade_info_chart.options, ":true"
+        )
+        trade_info_chart.set_visibility(True)
+        trade_info_chart_empty.set_text("Loading price history…")
+
+        # --- details body ---
+        def info_row(label: str, value: str, value_class: str = "text-white") -> None:
+            with ui.row().classes(
+                "w-full justify-between py-1 border-b border-[#222938] "
+                "flex-nowrap gap-3"
+            ):
+                ui.label(label).classes(f"text-sm {TEXT_MUTED} shrink-0")
+                ui.label(value).classes(
+                    f"text-sm font-mono {value_class} text-right"
+                )
+
+        entry_time = entry.get("entry_time")
+        held = (
+            humanize_duration(entry_time, datetime.now(timezone.utc).isoformat(
+                timespec="seconds"
+            ))
+            if entry_time else "—"
+        )
+        trade_info_body.clear()
+        with trade_info_body:
+            # Why the bot took this position — the headline of the popup.
+            with ui.column().classes(
+                f"w-full gap-1 {BG_APP} rounded-lg p-3 border border-[#222938]"
+            ):
+                ui.label("🧠 Why the bot took this position").classes(
+                    "text-sm font-semibold text-white"
+                )
+                ui.label(
+                    entry.get("entry_reason")
+                    or "No rationale on record — this position was adopted from "
+                    "an external fill (e.g. before a restart) and predates "
+                    "decision capture, or its entry metadata is unavailable."
+                ).classes("text-sm text-gray-300 leading-relaxed")
+
+            # Soft stop/target status — the levels the bot is enforcing each
+            # cycle, with the current price so you can see how close it is.
+            tp = entry.get("take_profit")
+            sl = entry.get("stop_loss")
+            current = pos.get("current_price")
+            with ui.column().classes(
+                f"w-full gap-1 {BG_APP} rounded-lg p-3 border border-[#222938]"
+            ):
+                ui.label("🎯 Soft stop / target (polled each cycle)").classes(
+                    "text-sm font-semibold text-white"
+                )
+                with ui.row().classes("w-full justify-between py-1 gap-3"):
+                    ui.label("Take profit").classes(
+                        f"text-sm {TEXT_MUTED} shrink-0"
+                    )
+                    ui.label(
+                        f"${tp:,.2f}" if tp is not None else "—"
+                    ).classes(
+                        f"text-sm font-mono {PNL_GREEN} text-right"
+                    )
+                with ui.row().classes("w-full justify-between py-1 gap-3"):
+                    ui.label("Stop loss").classes(
+                        f"text-sm {TEXT_MUTED} shrink-0"
+                    )
+                    ui.label(
+                        f"${sl:,.2f}" if sl is not None else "—"
+                    ).classes(
+                        f"text-sm font-mono {PNL_RED} text-right"
+                    )
+                with ui.row().classes("w-full justify-between py-1 gap-3"):
+                    ui.label("Current price").classes(
+                        f"text-sm {TEXT_MUTED} shrink-0"
+                    )
+                    ui.label(
+                        "—" if current is None else f"${current:,.2f}"
+                    ).classes("text-sm font-mono text-white text-right")
+
+            with ui.element("div").classes(
+                "w-full grid grid-cols-1 sm:grid-cols-2 gap-x-6"
+            ):
+                with ui.column().classes("gap-0"):
+                    ui.label("Entry signal").classes(
+                        f"text-xs font-semibold uppercase {TEXT_MUTED} mt-1 mb-1"
+                    )
+                    rsi = entry.get("entry_rsi")
+                    info_row("RSI at entry", f"{rsi:.1f}" if rsi is not None else "—")
+                    vwap = entry.get("entry_vwap")
+                    info_row("VWAP", f"${vwap:,.2f}" if vwap is not None else "—")
+                    atr = entry.get("entry_atr")
+                    info_row("ATR", f"${atr:,.3f}" if atr is not None else "—")
+                    sent = entry.get("entry_sentiment")
+                    src = entry.get("sentiment_source")
+                    info_row(
+                        "News sentiment",
+                        f"{sent:.2f} ({src})" if sent is not None else "—",
+                    )
+                with ui.column().classes("gap-0"):
+                    ui.label("Execution").classes(
+                        f"text-xs font-semibold uppercase {TEXT_MUTED} mt-1 mb-1"
+                    )
+                    info_row("Qty", f"{abs(qty):g} sh")
+                    info_row("Entry price", f"${pos['avg_entry_price']:,.2f}")
+                    info_row(
+                        "Now",
+                        "—" if current is None else f"${current:,.2f}",
+                    )
+                    info_row(
+                        "Market value",
+                        "—" if pos.get("market_value") is None
+                        else f"${pos['market_value']:,.2f}",
+                    )
+
+            with ui.element("div").classes(
+                "w-full grid grid-cols-1 sm:grid-cols-2 gap-x-6"
+            ):
+                info_row("Opened", fmt_short(entry_time) if entry_time else "—")
+                info_row("Held so far", held)
+
+        trade_info_dialog.open()
+
+        # --- price chart from entry to now (best-effort, async) ---
+        now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        bars = await run.io_bound(
+            fetch_trade_bars, symbol, entry_time or now_iso, now_iso
+        )
+        # A newer popup opened while we were fetching — its draw wins, drop ours.
+        if token != render_state["trade_info_token"]:
+            return
+        if not bars:
+            trade_info_chart.set_visibility(False)
+            trade_info_chart_empty.set_text(
+                "Price history unavailable for this window."
+            )
+            return
+
+        trade_info_chart_empty.set_text("")
+        series = trade_info_chart.options["series"][0]
+        series["data"] = bars
+
+        entry_ms = epoch_ms(entry_time) if entry_time else None
+
+        # Entry is marked as a vertical line; an open position has no exit
+        # marker yet. TP/SL are horizontal level lines.
+        mark_lines = []
+        if entry_ms is not None:
+            mark_lines.append({
+                "xAxis": entry_ms,
+                "lineStyle": {"color": SERIES_BLUE, "width": 1.5, "opacity": 0.9},
+                "label": {
+                    "formatter": "IN", "color": SERIES_BLUE, "position": "end",
+                    "fontSize": 10, "fontWeight": "bold",
+                },
+            })
+        if tp is not None:
+            mark_lines.append({
+                "yAxis": tp,
+                "lineStyle": {"color": PNL_GREEN, "type": "dashed", "width": 1},
+                "label": {"formatter": "TP", "color": PNL_GREEN, "position": "insideEndTop"},
+            })
+        if sl is not None:
+            mark_lines.append({
+                "yAxis": sl,
+                "lineStyle": {"color": PNL_RED, "type": "dashed", "width": 1},
+                "label": {"formatter": "SL", "color": PNL_RED, "position": "insideEndBottom"},
+            })
+        if mark_lines:
+            series["markLine"] = {
+                "silent": True,
+                "symbol": "none",
+                "data": mark_lines,
+            }
+
+        # Faint band from entry to the last bar (the position is still open).
+        if entry_ms is not None and bars:
+            last_ms = bars[-1][0]
+            series["markArea"] = {
+                "silent": True,
+                "itemStyle": {"color": "rgba(57, 135, 229, 0.08)"},
+                "data": [[{"xAxis": entry_ms}, {"xAxis": last_ms}]],
             }
         trade_info_chart.update()
 
