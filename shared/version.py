@@ -10,9 +10,36 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.16.1"
+__version__ = "2.17.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.17.0",
+        "date": "2026-07-10",
+        "title": "Crypto trading — a second 24/7 engine alongside equities, one dashboard",
+        "notes": [
+            "New crypto engine trades all Alpaca-supported USD pairs (BTC/USD, "
+            "ETH/USD, …) spot, long-only, 24/7 — the same RSI/VWAP dip strategy "
+            "and soft stop/target as equities. It runs as a second, independent "
+            "container (MARKET=crypto) with its own SQLite DB, so the live "
+            "equities engine is completely untouched.",
+            "Both engines share one Alpaca account, so each partitions the "
+            "blended book to its own asset class and computes its own equity "
+            "(crypto: a notional base + its own realized/unrealized PnL), "
+            "keeping the two daily-stops and equity curves independent.",
+            "Market-specific behaviour lives behind a new MarketAdapter "
+            "(backend/market.py): data client, universe, session hours, order "
+            "construction (crypto uses GTC limits with fractional sizing; "
+            "equities keep extended-hours DAY limits), regime proxy (BTC/USD "
+            "for crypto), and position/equity partitioning. The strategy and "
+            "orchestration stay single-sourced so the two markets can't drift.",
+            "One dashboard: a header Equities ⇄ Crypto switcher flips every "
+            "view, setting, and action (hard-stop, close, resume, optimize) to "
+            "the selected engine. Crypto has no scheduled end-of-day flatten "
+            "(24/7) and no nightly optimizer in v1 (the backtest is equity-bar "
+            "based) — it runs on static/default parameters.",
+        ],
+    },
     {
         "version": "2.16.1",
         "date": "2026-07-10",

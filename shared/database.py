@@ -86,6 +86,15 @@ DEFAULT_CONFIG: Dict[str, float] = {
     "eod_flatten_minutes": 10.0,
 }
 
+# Per-market overrides applied on first seed only (selected by the MARKET
+# env). Crypto trades sub-dollar pairs and never flattens on a schedule (24/7).
+_MARKET_DEFAULT_OVERRIDES: Dict[str, Dict[str, float]] = {
+    "crypto": {
+        "min_price_usd": 0.0,
+        "eod_flatten_minutes": 0.0,
+    },
+}
+
 STATUS_RUNNING = "RUNNING"
 STATUS_KILLED = "KILLED"
 
@@ -234,7 +243,13 @@ class Database:
 
     def _seed_defaults(self) -> None:
         now = _utcnow()
-        for key, value in DEFAULT_CONFIG.items():
+        seed = dict(DEFAULT_CONFIG)
+        seed.update(
+            _MARKET_DEFAULT_OVERRIDES.get(
+                os.getenv("MARKET", "equity").strip().lower(), {}
+            )
+        )
+        for key, value in seed.items():
             self._conn.execute(
                 "INSERT OR IGNORE INTO bot_config (key, value, updated_at) "
                 "VALUES (?, ?, ?)",
@@ -587,14 +602,20 @@ class Database:
             self._conn.close()
 
 
-_db_instance: Optional[Database] = None
+_db_instances: Dict[str, Database] = {}
 _db_instance_lock = threading.Lock()
 
 
-def get_db() -> Database:
-    """Process-wide singleton accessor."""
-    global _db_instance
+def get_db(db_path: Optional[str] = None) -> Database:
+    """Process-wide accessor, one instance per DB path.
+
+    get_db() returns the default (DB_PATH) instance — the backend's single
+    engine. The frontend passes an explicit path to also read the crypto
+    engine's separate DB (both live in the shared volume)."""
+    path = db_path or DB_PATH
     with _db_instance_lock:
-        if _db_instance is None:
-            _db_instance = Database()
-        return _db_instance
+        inst = _db_instances.get(path)
+        if inst is None:
+            inst = Database(path)
+            _db_instances[path] = inst
+        return inst

@@ -42,22 +42,15 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime, time as dtime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest, StockLatestTradeRequest
-from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
-from alpaca.trading.requests import (
-    GetCalendarRequest,
-    GetOrdersRequest,
-    LimitOrderRequest,
-)
+from alpaca.trading.enums import OrderSide, QueryOrderStatus
+from alpaca.trading.requests import GetOrdersRequest
 from dotenv import load_dotenv
 
 import regime
@@ -70,6 +63,7 @@ from indicators import (
     compute_vwap,
     stop_is_floored,
 )
+from market import make_adapter
 from sentiment import get_sentiment_provider
 from shared.database import STATUS_KILLED, STATUS_RUNNING, get_db
 from shared.version import __version__
@@ -84,7 +78,6 @@ logging.basicConfig(
 logger = logging.getLogger("argus.bot")
 
 ZURICH = ZoneInfo("Europe/Zurich")
-US_EASTERN = ZoneInfo("America/New_York")
 
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
@@ -103,11 +96,14 @@ class ArgusBot:
         # paper=True is deliberately hardcoded: Argus never touches live money
         # unless this line is consciously changed and reviewed.
         self.trading = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
-        self.data = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+        # The MarketAdapter (equity | crypto, chosen by the MARKET env) owns
+        # every asset-class-specific seam: data client, universe, session hours,
+        # order construction, regime proxy, position partitioning, equity.
+        self.market = make_adapter(self.trading, ALPACA_API_KEY, ALPACA_SECRET_KEY)
         self.db = get_db()
         self.sentiment = get_sentiment_provider()
         self.config: Dict[str, float] = self.db.get_config()
-        self.watchlist: list = universe.get_watchlist()
+        self.watchlist: list = self.market.get_watchlist()
         self.last_cycle: Dict[str, Any] = {}
         self._open_entries: Dict[str, Dict[str, Any]] = {}
         # Symbols with a signal-exit close submitted but not yet filled —
@@ -118,11 +114,6 @@ class ArgusBot:
         # symbol -> time.monotonic() deadline until which entries are benched
         self._cooldowns: Dict[str, float] = {}
         self._current_day: Optional[str] = None
-        # (ET-date -> (open_utc, close_utc) | None) cache for the extended
-        # trading session, so Alpaca's calendar is hit once a day, not per poll.
-        self._session_cache: Optional[
-            Tuple[str, Optional[Tuple[datetime, datetime]]]
-        ] = None
         self._shutdown = asyncio.Event()
         self._cycle_count: int = 0
         self._review_task: Optional[asyncio.Task] = None
@@ -181,30 +172,12 @@ class ArgusBot:
         if not targets:
             return {}
         start = datetime.now(timezone.utc) - timedelta(minutes=self.config.get("bar_lookback_minutes", 180))
-        request = StockBarsRequest(
-            symbol_or_symbols=targets,
-            timeframe=TimeFrame.Minute,
-            start=start,
-        )
         try:
-            bars = await asyncio.to_thread(self.data.get_stock_bars, request)
+            return await asyncio.to_thread(self.market.fetch_bars, list(targets), start)
         except Exception as exc:
             logger.error("Failed to fetch 1-minute bars: %s", exc)
             self.db.add_log("ERROR", f"Bar fetch failed: {exc}")
             return {}
-
-        frames: Dict[str, pd.DataFrame] = {}
-        df = bars.df
-        if df is None or df.empty:
-            return frames
-        for symbol in targets:
-            try:
-                symbol_df = df.xs(symbol, level="symbol")
-            except KeyError:
-                continue
-            if not symbol_df.empty:
-                frames[symbol] = symbol_df.sort_index()
-        return frames
 
     async def evaluate_signal(
         self, symbol: str, bars: pd.DataFrame
@@ -389,11 +362,9 @@ class ArgusBot:
         # the latest trade immediately before submission; fall back to the
         # bar price if the live quote is unavailable.
         try:
-            latest_trade = await asyncio.to_thread(
-                self.data.get_stock_latest_trade,
-                StockLatestTradeRequest(symbol_or_symbols=symbol),
-            )
-            price = float(latest_trade[symbol].price)
+            fresh = await asyncio.to_thread(self.market.latest_price, symbol)
+            if fresh is not None:
+                price = fresh
         except Exception as exc:
             logger.warning(
                 "Latest-trade fetch failed for %s, using bar price: %s",
@@ -401,7 +372,7 @@ class ArgusBot:
                 exc,
             )
 
-        # Brackets scale with the symbol's own volatility (ATR multiples
+        # Stop/target scale with the symbol's own volatility (ATR multiples
         # tuned nightly by the optimizer, floored in indicators.py).
         stop_distance, target_distance = bracket_distances(
             price,
@@ -410,18 +381,16 @@ class ArgusBot:
             self.config["atr_target_mult"],
         )
 
-        # Volatility-scaled sizing: risk a roughly constant dollar amount
-        # per trade, capped by the notional position size. Wide stop on a
-        # volatile name → fewer shares; tight stop on a quiet name → more.
+        # Volatility-scaled sizing: risk a roughly constant dollar amount per
+        # trade, capped by the notional position size. Whole shares (equity) or
+        # fractional units (crypto) per the market adapter.
         pos_size = self.config.get("position_size_usd", 500.0)
         risk_per = self.config.get("risk_per_trade_usd", 20.0)
-        qty = int(pos_size // price)
-        if risk_per > 0:
-            qty = min(qty, int(risk_per // stop_distance))
-        if qty < 1:
+        qty = self.market.size_qty(symbol, pos_size, price, stop_distance, risk_per)
+        if qty <= 0:
             self.db.add_log(
                 "WARNING",
-                f"{symbol}: cannot size a whole share within notional "
+                f"{symbol}: cannot size a position within notional "
                 f"${pos_size:.0f} and risk ${risk_per:.0f} "
                 f"(price ${price:.2f}, stop distance ${stop_distance:.2f})",
             )
@@ -435,19 +404,13 @@ class ArgusBot:
         take_profit = max(take_profit, round(price + 0.02, 2))
         stop_loss = min(stop_loss, round(price - 0.02, 2))
 
-        # Extended hours forbids market and bracket orders, so enter with a
-        # marketable limit — priced entry_slip_pct through the last trade so it
-        # fills in a thin book — and enforce the stop/target as soft levels
+        # The market adapter builds the marketable-limit entry (equity:
+        # extended-hours DAY; crypto: GTC) priced entry_slip_pct through the
+        # last trade; the ATR stop/target above are enforced as soft levels
         # each cycle (see evaluate_and_close_stops).
-        slip = self.config.get("entry_slip_pct", 0.001)
-        limit_price = max(round(price * (1 + slip), 2), round(price + 0.02, 2))
-        order_request = LimitOrderRequest(
-            symbol=symbol,
-            qty=qty,
-            side=OrderSide.BUY,
-            time_in_force=TimeInForce.DAY,
-            extended_hours=True,
-            limit_price=limit_price,
+        order_request = self.market.build_entry_order(
+            symbol, OrderSide.BUY, qty, price,
+            self.config.get("entry_slip_pct", 0.001),
         )
         try:
             order = await asyncio.to_thread(self.trading.submit_order, order_request)
@@ -481,14 +444,14 @@ class ArgusBot:
         }
         self.db.add_log(
             "TRADE",
-            f"BUY {qty} {symbol} @ ~${price:.2f} | RSI {signal['rsi']:.1f} | "
+            f"BUY {qty:g} {symbol} @ ~${price:.2f} | RSI {signal['rsi']:.1f} | "
             f"VWAP ${signal['vwap']:.2f} | ATR ${signal['atr']:.3f} | "
             f"sentiment {signal['sentiment']:.2f} "
             f"({signal.get('sentiment_source', '?')}) | TP ${take_profit:.2f} | "
             f"SL ${stop_loss:.2f} | risk ~${qty * stop_distance:.0f} | "
             f"order {getattr(order, 'id', '?')}",
         )
-        logger.info("Submitted limit BUY for %s x%d @ ~%.2f", symbol, qty, price)
+        logger.info("Submitted limit BUY for %s x%g @ ~%.2f", symbol, qty, price)
 
     async def place_limit_short(self, signal: Dict[str, Any]) -> None:
         """Submit an extended-hours limit SELL (short) order. Take-profit sits
@@ -498,11 +461,9 @@ class ArgusBot:
         price = signal["price"]
 
         try:
-            latest_trade = await asyncio.to_thread(
-                self.data.get_stock_latest_trade,
-                StockLatestTradeRequest(symbol_or_symbols=symbol),
-            )
-            price = float(latest_trade[symbol].price)
+            fresh = await asyncio.to_thread(self.market.latest_price, symbol)
+            if fresh is not None:
+                price = fresh
         except Exception as exc:
             logger.warning(
                 "Latest-trade fetch failed for %s, using bar price: %s",
@@ -519,13 +480,11 @@ class ArgusBot:
 
         pos_size = self.config.get("position_size_usd", 500.0)
         risk_per = self.config.get("risk_per_trade_usd", 20.0)
-        qty = int(pos_size // price)
-        if risk_per > 0:
-            qty = min(qty, int(risk_per // stop_distance))
-        if qty < 1:
+        qty = self.market.size_qty(symbol, pos_size, price, stop_distance, risk_per)
+        if qty <= 0:
             self.db.add_log(
                 "WARNING",
-                f"{symbol}: cannot size a whole share within notional "
+                f"{symbol}: cannot size a position within notional "
                 f"${pos_size:.0f} and risk ${risk_per:.0f} "
                 f"(price ${price:.2f}, stop distance ${stop_distance:.2f})",
             )
@@ -538,17 +497,11 @@ class ArgusBot:
         take_profit = min(take_profit, round(price - 0.02, 2))
         stop_loss = max(stop_loss, round(price + 0.02, 2))
 
-        # Marketable limit priced entry_slip_pct BELOW the last trade so the
-        # short fills in a thin extended-hours book.
-        slip = self.config.get("entry_slip_pct", 0.001)
-        limit_price = min(round(price * (1 - slip), 2), round(price - 0.02, 2))
-        order_request = LimitOrderRequest(
-            symbol=symbol,
-            qty=qty,
-            side=OrderSide.SELL,
-            time_in_force=TimeInForce.DAY,
-            extended_hours=True,
-            limit_price=limit_price,
+        # Marketable limit priced entry_slip_pct BELOW the last trade (equity
+        # short entry; crypto never shorts — short_enabled is off in its config).
+        order_request = self.market.build_entry_order(
+            symbol, OrderSide.SELL, qty, price,
+            self.config.get("entry_slip_pct", 0.001),
         )
         try:
             order = await asyncio.to_thread(self.trading.submit_order, order_request)
@@ -583,14 +536,14 @@ class ArgusBot:
         }
         self.db.add_log(
             "TRADE",
-            f"SELL {qty} {symbol} @ ~${price:.2f} | RSI {signal['rsi']:.1f} | "
+            f"SELL {qty:g} {symbol} @ ~${price:.2f} | RSI {signal['rsi']:.1f} | "
             f"VWAP ${signal['vwap']:.2f} | ATR ${signal['atr']:.3f} | "
             f"sentiment {signal['sentiment']:.2f} "
             f"({signal.get('sentiment_source', '?')}) | TP ${take_profit:.2f} | "
             f"SL ${stop_loss:.2f} | risk ~${qty * stop_distance:.0f} | "
             f"order {getattr(order, 'id', '?')}",
         )
-        logger.info("Submitted limit SELL for %s x%d @ ~%.2f", symbol, qty, price)
+        logger.info("Submitted limit SELL for %s x%g @ ~%.2f", symbol, qty, price)
 
     # ------------------------------------------------------------------ #
     # signal-driven exits
@@ -634,11 +587,9 @@ class ArgusBot:
         if bars is not None and not bars.empty:
             return float(bars["close"].iloc[-1])
         try:
-            latest = await asyncio.to_thread(
-                self.data.get_stock_latest_trade,
-                StockLatestTradeRequest(symbol_or_symbols=symbol),
-            )
-            return float(latest[symbol].price)
+            price = await asyncio.to_thread(self.market.latest_price, symbol)
+            if price is not None:
+                return price
         except Exception as exc:
             logger.warning("Latest-price fetch failed for %s: %s", symbol, exc)
         current = position.get("current_price")
@@ -740,13 +691,14 @@ class ArgusBot:
     async def _limit_close(
         self, symbol: str, position: Dict[str, Any]
     ) -> Optional[Any]:
-        """Close a held position with an extended-hours limit order — market
-        and bracket closes are rejected outside the regular session. Cancels
-        any resting orders first, then submits a marketable limit (exit_slip_pct
-        through the last trade) on the opposite side for the full quantity, so
-        the close actually fills in a thin book. Returns the submitted order, or
-        None on failure. The fill is reconciled into a trade record on the next
-        cycle by sync_portfolio — the single trade-recording path."""
+        """Close a held position with a marketable limit order — market and
+        bracket closes are rejected outside the regular session (and for crypto
+        entirely). Cancels any resting orders first, then submits the market
+        adapter's close order (equity: extended-hours DAY; crypto: GTC),
+        exit_slip_pct through the last trade on the opposite side for the full
+        quantity, so the close actually fills in a thin book. Returns the
+        submitted order, or None on failure. The fill is reconciled into a trade
+        record on the next cycle by sync_portfolio — the single path."""
         self._closing.add(symbol)
         await self._cancel_symbol_orders(symbol)
         raw_qty = float(position.get("qty", 0.0))
@@ -755,33 +707,20 @@ class ArgusBot:
             self._closing.discard(symbol)
             return None
         is_long = raw_qty > 0
-        side = OrderSide.SELL if is_long else OrderSide.BUY
 
         price = position.get("current_price")
         try:
-            latest = await asyncio.to_thread(
-                self.data.get_stock_latest_trade,
-                StockLatestTradeRequest(symbol_or_symbols=symbol),
-            )
-            price = float(latest[symbol].price)
+            fresh = await asyncio.to_thread(self.market.latest_price, symbol)
+            if fresh is not None:
+                price = fresh
         except Exception as exc:
             logger.warning("Latest-trade fetch failed for %s close: %s", symbol, exc)
         if price is None:
             price = float(position.get("avg_entry_price", 0.0))
 
-        # Sell through the bid / buy through the ask so the close fills.
-        slip = self.config.get("exit_slip_pct", 0.002)
-        if is_long:
-            limit_price = max(round(price * (1 - slip), 2), 0.01)
-        else:
-            limit_price = round(price * (1 + slip), 2)
-        order_request = LimitOrderRequest(
-            symbol=symbol,
-            qty=qty,
-            side=side,
-            time_in_force=TimeInForce.DAY,
-            extended_hours=True,
-            limit_price=limit_price,
+        order_request = self.market.build_close_order(
+            symbol, is_long, qty, float(price),
+            self.config.get("exit_slip_pct", 0.002),
         )
         try:
             return await asyncio.to_thread(self.trading.submit_order, order_request)
@@ -841,6 +780,13 @@ class ArgusBot:
             self.db.add_log("ERROR", f"Portfolio sync failed: {exc}")
             return None
 
+        # One Alpaca account serves both the equity and crypto engines, so
+        # get_all_positions returns the blended book — keep only this market's
+        # own positions or the two engines would try to manage each other's.
+        live_positions = [
+            p for p in live_positions if self.market.owns_symbol(p.symbol)
+        ]
+
         snapshot = [
             {
                 "symbol": p.symbol,
@@ -887,7 +833,11 @@ class ArgusBot:
                 },
             )
 
-        equity = float(account.equity)
+        # Equity is per-market: equities use the real (blended) account equity;
+        # crypto uses a notional base + its own realized/unrealized PnL, so the
+        # two engines' daily-stop and equity curve stay independent on one
+        # shared account.
+        equity = self.market.compute_equity(account, snapshot, self.db)
         self.db.set_status(equity=equity)
         self.db.record_equity(equity)
         return {"equity": equity, "positions": snapshot}
@@ -1041,7 +991,8 @@ class ArgusBot:
             self.db.add_log("ERROR", f"EOD flatten position fetch failed: {exc}")
             return
         for p in positions:
-            await self._limit_close(p.symbol, self._position_dict(p))
+            if self.market.owns_symbol(p.symbol):
+                await self._limit_close(p.symbol, self._position_dict(p))
 
     async def kill_sequence(self, reason: str) -> None:
         """Emergency shutdown: flatten everything, persist KILLED, stop.
@@ -1050,16 +1001,27 @@ class ArgusBot:
         exit_slip_pct through the last trade) because market and
         close_all_positions liquidation are rejected outside regular hours."""
         self.db.add_log("CRITICAL", f"KILL SEQUENCE INITIATED: {reason}")
+        # Cancel only THIS market's open orders — cancel_orders() is
+        # account-wide and would kill the other engine's resting orders.
         try:
-            await asyncio.to_thread(self.trading.cancel_orders)
-            self.db.add_log("CRITICAL", "All open orders cancelled")
+            open_orders = await asyncio.to_thread(
+                self.trading.get_orders,
+                GetOrdersRequest(status=QueryOrderStatus.OPEN),
+            )
+            for order in open_orders:
+                if self.market.owns_symbol(order.symbol):
+                    await asyncio.to_thread(
+                        self.trading.cancel_order_by_id, order.id
+                    )
+            self.db.add_log("CRITICAL", "Open orders cancelled")
         except Exception as exc:
             logger.error("Cancel-all failed during kill sequence: %s", exc)
             self.db.add_log("ERROR", f"Cancel-all failed: {exc}")
         try:
             positions = await asyncio.to_thread(self.trading.get_all_positions)
             for p in positions:
-                await self._limit_close(p.symbol, self._position_dict(p))
+                if self.market.owns_symbol(p.symbol):
+                    await self._limit_close(p.symbol, self._position_dict(p))
             self.db.add_log("CRITICAL", "All positions liquidated")
         except Exception as exc:
             logger.error("Liquidation failed during kill sequence: %s", exc)
@@ -1092,73 +1054,6 @@ class ArgusBot:
         )
 
     # ------------------------------------------------------------------ #
-    # extended trading session (US-Eastern)
-    # ------------------------------------------------------------------ #
-
-    async def _extended_session_bounds(
-        self,
-    ) -> Optional[Tuple[datetime, datetime]]:
-        """(open_utc, close_utc) for today's extended session, or None when
-        today is not a trading day.
-
-        Pre-market always opens at 4:00 AM ET; after-hours always runs four
-        hours past the regular close (→ 8:00 PM on a normal day, 5:00 PM on a
-        half-day). Deriving the extended close from the regular close — which
-        alpaca-py's Calendar reliably exposes — keeps half-days correct without
-        depending on the optional session_open/session_close calendar fields.
-        Cached per US-Eastern calendar date; a fetch failure returns None
-        uncached so the next cycle retries."""
-        today_et = datetime.now(US_EASTERN).date()
-        cache_key = today_et.isoformat()
-        if self._session_cache is not None and self._session_cache[0] == cache_key:
-            return self._session_cache[1]
-
-        try:
-            calendars = await asyncio.to_thread(
-                self.trading.get_calendar,
-                GetCalendarRequest(start=today_et, end=today_et),
-            )
-        except Exception as exc:
-            logger.error("Calendar fetch failed: %s", exc)
-            self.db.add_log("ERROR", f"Calendar fetch failed: {exc}")
-            return None
-
-        bounds: Optional[Tuple[datetime, datetime]] = None
-        for cal in calendars:
-            if cal.date != today_et:
-                continue
-            # cal.close is the regular close. Across alpaca-py versions it is
-            # either a datetime.time or a datetime.datetime (naive ET wall time,
-            # or tz-aware) — normalise to an ET wall-clock time-of-day either
-            # way. Pre-market is fixed at 4:00 AM ET; after-hours runs 4h past
-            # the regular close (→ 8:00 PM normal, 5:00 PM on a half-day).
-            close_tod = self._et_time_of_day(cal.close)
-            open_et = datetime.combine(cal.date, dtime(4, 0), tzinfo=US_EASTERN)
-            close_et = (
-                datetime.combine(cal.date, close_tod, tzinfo=US_EASTERN)
-                + timedelta(hours=4)
-            )
-            bounds = (
-                open_et.astimezone(timezone.utc),
-                close_et.astimezone(timezone.utc),
-            )
-            break
-
-        self._session_cache = (cache_key, bounds)
-        return bounds
-
-    @staticmethod
-    def _et_time_of_day(value: Any) -> dtime:
-        """The US-Eastern wall-clock time-of-day of an Alpaca calendar field,
-        accepting a datetime.time, a naive datetime (already ET wall time), or a
-        tz-aware datetime (converted to ET first)."""
-        if isinstance(value, datetime):
-            if value.tzinfo is not None:
-                value = value.astimezone(US_EASTERN)
-            return value.time()
-        return value
-
-    # ------------------------------------------------------------------ #
     # main loop
     # ------------------------------------------------------------------ #
 
@@ -1175,21 +1070,26 @@ class ArgusBot:
         cfg = self.config
         self.db.add_log(
             "INFO",
-            f"Argus engine started (paper trading) — universe "
-            f"{universe.describe_mode()} | position size ${cfg.get('position_size_usd', 500):.0f} "
+            f"Argus engine started (paper trading) — {self.market.name} | universe "
+            f"{self.market.describe_mode()} | position size ${cfg.get('position_size_usd', 500):.0f} "
             f"| risk/trade ${cfg.get('risk_per_trade_usd', 20):.0f} | max positions "
             f"{cfg.get('max_positions', 5):.0f} | daily stop ${cfg.get('daily_stop_loss', 100):.0f} | loser "
             f"cooldown {cfg.get('cooldown_minutes', 30):.0f}m | regime filter on "
-            f"{regime.REGIME_SYMBOL}",
+            f"{self.market.regime_symbol}",
         )
-        logger.info("Argus engine started — universe %s", universe.describe_mode())
+        logger.info(
+            "Argus engine started — %s universe %s",
+            self.market.name,
+            self.market.describe_mode(),
+        )
 
         # Publish operational environment (no secrets) so the Settings tab
         # can display and edit them.
         self.db.set_state(
             "environment",
             {
-                "universe_mode": universe.describe_mode(),
+                "market": self.market.name,
+                "universe_mode": self.market.describe_mode(),
                 "watchlist_size": len(self.watchlist),
                 "position_size_usd": cfg.get("position_size_usd", 500),
                 "risk_per_trade_usd": cfg.get("risk_per_trade_usd", 20),
@@ -1201,7 +1101,7 @@ class ArgusBot:
                 "bar_lookback_minutes": cfg.get("bar_lookback_minutes", 180),
                 "entry_slip_pct": cfg.get("entry_slip_pct", 0.001),
                 "exit_slip_pct": cfg.get("exit_slip_pct", 0.002),
-                "regime_symbol": regime.REGIME_SYMBOL,
+                "regime_symbol": self.market.regime_symbol,
                 "paper_trading": True,
                 "engine_version": __version__,
                 "engine_started_at": datetime.now(timezone.utc).isoformat(
@@ -1264,9 +1164,9 @@ class ArgusBot:
             cycle["stage"] = "external-kill"
             return
 
-        # Refresh the trading universe (no-op in static mode, cached in
-        # dynamic whole-market mode).
-        self.watchlist = await asyncio.to_thread(universe.get_watchlist)
+        # Refresh the trading universe (most-actives for equities, the crypto
+        # asset list for crypto; cached inside the adapter).
+        self.watchlist = await asyncio.to_thread(self.market.get_watchlist)
         cycle["watchlist_size"] = len(self.watchlist)
 
         portfolio = await self.sync_portfolio()
@@ -1280,30 +1180,33 @@ class ArgusBot:
             cycle["stage"] = "risk-kill"
             return
 
-        # Trade the full extended session (4:00 AM – 8:00 PM ET). Alpaca's
-        # regular-hours clock (is_open) would gate us to 9:30–4:00 only, so we
-        # derive the extended window from the trading calendar instead.
-        session = await self._extended_session_bounds()
+        # Session gate — the adapter decides: equities trade the 4 AM–8 PM ET
+        # extended session (derived from the trading calendar); crypto is
+        # always open (24/7).
+        state = await asyncio.to_thread(self.market.session_state)
         now_utc = datetime.now(timezone.utc)
-        in_session = session is not None and session[0] <= now_utc < session[1]
-        cycle["market_open"] = in_session
-        if not in_session:
-            if session is None:
-                logger.info("Not a trading day — sitting out")
-                cycle["stage"] = "market-closed"
+        cycle["market_open"] = state.open
+        if not state.open:
+            if state.next_open is None:
+                logger.info("Market closed / not a trading day — sitting out")
             else:
-                logger.info("Outside extended session — next open %s", session[0])
-                cycle["stage"] = "market-closed"
-                cycle["next_open"] = str(session[0])
+                logger.info("Outside trading session — next open %s", state.next_open)
+                cycle["next_open"] = str(state.next_open)
+            cycle["stage"] = "market-closed"
             return
 
-        # End-of-day flatten: entries are DAY limit orders that expire at the
-        # extended close, which would leave any surviving position orphaned
-        # overnight. Flatten with a margin before 8:00 PM ET; no new entries
-        # are evaluated inside the window.
+        # End-of-day flatten (equities only): entries are DAY limit orders that
+        # expire at the extended close, which would leave a surviving position
+        # orphaned overnight. Flatten with a margin before the close. Crypto is
+        # 24/7 (flatten_before_close=False), so this is skipped and positions
+        # are held continuously under the soft stop/target.
         flatten_minutes = self.config.get("eod_flatten_minutes", 10.0)
-        if flatten_minutes > 0:
-            until_close = session[1] - now_utc
+        if (
+            self.market.flatten_before_close
+            and flatten_minutes > 0
+            and state.close_utc is not None
+        ):
+            until_close = state.close_utc - now_utc
             if until_close <= timedelta(minutes=flatten_minutes):
                 if portfolio["positions"]:
                     await self.flatten_all(
@@ -1336,7 +1239,7 @@ class ArgusBot:
         # 2026-07-08 session) halves the position cap instead of trading at
         # full throttle. Existing positions keep their soft stop/target and
         # the daily stop still guards them.
-        regime_info = await asyncio.to_thread(regime.get_regime)
+        regime_info = await asyncio.to_thread(self.market.regime)
         cycle["regime"] = regime_info
         regime_blocks = regime.blocks_new_entries(regime_info)
 
@@ -1661,7 +1564,11 @@ async def main() -> None:
     if not started:
         logger.critical("Engine not started: %s (API stays up for /reset)", message)
 
-    optimizer_task = asyncio.create_task(schedule_daily_optimization())
+    # The nightly optimizer's backtest is equity-bar based; it must not tune the
+    # crypto engine's params. Crypto runs on static/default params in v1.
+    optimizer_task: Optional[asyncio.Task] = None
+    if os.getenv("MARKET", "equity").strip().lower() != "crypto":
+        optimizer_task = asyncio.create_task(schedule_daily_optimization())
 
     # The debug API runs in the same event loop as the engine so it can
     # introspect live state. uvicorn owns SIGINT/SIGTERM: when the server
@@ -1678,7 +1585,8 @@ async def main() -> None:
     try:
         await server.serve()
     finally:
-        optimizer_task.cancel()
+        if optimizer_task is not None:
+            optimizer_task.cancel()
         if controller.bot is not None:
             controller.bot._shutdown.set()
         if controller.task is not None:

@@ -40,7 +40,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
+from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 from dotenv import load_dotenv
 
@@ -62,6 +62,8 @@ REGIME_CACHE_MINUTES = float(os.getenv("REGIME_CACHE_MINUTES", "5"))
 
 # Minutes in a US equity trading year, for annualizing 1-minute returns.
 _MINUTES_PER_YEAR = 252 * 390
+# Crypto trades 24/7, so a year is every minute of it.
+_CRYPTO_MINUTES_PER_YEAR = 365 * 24 * 60
 
 TREND_UP = "TREND_UP"
 CAUTION = "CAUTION"
@@ -82,20 +84,25 @@ def _get_client() -> StockHistoricalDataClient:
     return _client
 
 
-def _classify() -> Dict[str, Any]:
-    client = _get_client()
+def _classify(symbol: str, data_client: Any, crypto: bool) -> Dict[str, Any]:
     start = datetime.now(timezone.utc) - timedelta(minutes=REGIME_LOOKBACK_MINUTES)
-    request = StockBarsRequest(
-        symbol_or_symbols=REGIME_SYMBOL,
-        timeframe=TimeFrame.Minute,
-        start=start,
-    )
-    df = client.get_stock_bars(request).df
+    if crypto:
+        request = CryptoBarsRequest(
+            symbol_or_symbols=symbol, timeframe=TimeFrame.Minute, start=start
+        )
+        df = data_client.get_crypto_bars(request).df
+        minutes_per_year = _CRYPTO_MINUTES_PER_YEAR
+    else:
+        request = StockBarsRequest(
+            symbol_or_symbols=symbol, timeframe=TimeFrame.Minute, start=start
+        )
+        df = data_client.get_stock_bars(request).df
+        minutes_per_year = _MINUTES_PER_YEAR
     if df is None or df.empty:
-        raise RuntimeError(f"no {REGIME_SYMBOL} bars returned")
-    bars = df.xs(REGIME_SYMBOL, level="symbol").sort_index()
+        raise RuntimeError(f"no {symbol} bars returned")
+    bars = df.xs(symbol, level="symbol").sort_index()
     if len(bars) < max(REGIME_EMA_BARS, REGIME_VOL_BARS) + 2:
-        raise RuntimeError(f"only {len(bars)} {REGIME_SYMBOL} bars in window")
+        raise RuntimeError(f"only {len(bars)} {symbol} bars in window")
 
     closes = bars["close"]
     last_close = float(closes.iloc[-1])
@@ -103,7 +110,7 @@ def _classify() -> Dict[str, Any]:
     trend_down = last_close < ema
 
     returns = closes.pct_change().dropna().tail(REGIME_VOL_BARS)
-    ann_vol_pct = float(returns.std() * np.sqrt(_MINUTES_PER_YEAR) * 100.0)
+    ann_vol_pct = float(returns.std() * np.sqrt(minutes_per_year) * 100.0)
     stressed = ann_vol_pct > REGIME_MAX_ANN_VOL
 
     if trend_down and stressed:
@@ -115,7 +122,7 @@ def _classify() -> Dict[str, Any]:
 
     return {
         "regime": regime,
-        "symbol": REGIME_SYMBOL,
+        "symbol": symbol,
         "close": round(last_close, 2),
         "ema": round(ema, 2),
         "trend_down": trend_down,
@@ -126,24 +133,36 @@ def _classify() -> Dict[str, Any]:
     }
 
 
-def get_regime() -> Dict[str, Any]:
+def get_regime(
+    symbol: str = REGIME_SYMBOL,
+    data_client: Any = None,
+    crypto: bool = False,
+) -> Dict[str, Any]:
     """Current market regime, cached for REGIME_CACHE_MINUTES (thread-safe).
 
-    Fails open: when SPY data is unavailable the engine keeps trading
-    (regime UNKNOWN) rather than halting on a data hiccup — the bracket
-    stops and the daily loss limit remain the hard safety nets.
+    Defaults to the equity SPY proxy on the module's own stock client. The
+    crypto engine passes its BTC/USD proxy + CryptoHistoricalDataClient
+    (crypto=True) so 1-minute returns annualize on the 24/7 calendar.
+
+    Fails open: when the proxy's data is unavailable the engine keeps trading
+    (regime UNKNOWN) rather than halting on a data hiccup — the soft stops and
+    the daily loss limit remain the hard safety nets.
     """
     global _cached, _cached_at
     with _lock:
-        if _cached and time.monotonic() - _cached_at < REGIME_CACHE_MINUTES * 60:
+        if (
+            _cached
+            and _cached.get("symbol") == symbol
+            and time.monotonic() - _cached_at < REGIME_CACHE_MINUTES * 60
+        ):
             return dict(_cached)
         try:
-            result = _classify()
+            result = _classify(symbol, data_client or _get_client(), crypto)
         except Exception as exc:
             logger.error("Regime classification failed: %s", exc)
             result = {
                 "regime": UNKNOWN,
-                "symbol": REGIME_SYMBOL,
+                "symbol": symbol,
                 "error": str(exc),
                 "checked_at": datetime.now(timezone.utc).isoformat(
                     timespec="seconds"

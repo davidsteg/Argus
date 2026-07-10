@@ -61,6 +61,31 @@ ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
 # Actions that must reach the running engine (resume, optimize) go through
 # the backend debug API on the compose network. Data never does.
 BACKEND_API_URL = os.getenv("BACKEND_API_URL", "http://trading_backend:8000")
+# Crypto engine (optional): its own DB file in the shared volume + its own debug
+# API. When CRYPTO_DB_PATH is set, the dashboard shows an Equities ⇄ Crypto
+# switcher; otherwise it's equities-only exactly as before.
+CRYPTO_DB_PATH = os.getenv("CRYPTO_DB_PATH", "")
+CRYPTO_BACKEND_API_URL = os.getenv("CRYPTO_BACKEND_API_URL", "")
+MARKETS = ["equity", "crypto"] if CRYPTO_DB_PATH else ["equity"]
+
+
+def db_for(market: str):
+    """The Database for the selected market (crypto reads its own DB file)."""
+    if market == "crypto" and CRYPTO_DB_PATH:
+        return get_db(CRYPTO_DB_PATH)
+    return get_db()
+
+
+def api_for(market: str) -> str:
+    """The backend debug API base URL for the selected market."""
+    if market == "crypto" and CRYPTO_BACKEND_API_URL:
+        return CRYPTO_BACKEND_API_URL
+    return BACKEND_API_URL
+
+
+def market_owns(symbol: str, market: str) -> bool:
+    """Crypto symbols carry a slash (BTC/USD); equities never do."""
+    return ("/" in symbol) if market == "crypto" else ("/" not in symbol)
 
 DEFAULT_REFRESH_SECONDS = 2.0
 DEFAULT_LOG_ROWS = 50
@@ -304,9 +329,11 @@ EQUITY_RANGES: Dict[str, Optional[timedelta]] = {
 # ---------------------------------------------------------------------- #
 
 
-def fetch_snapshot(log_limit: int, equity_since: Optional[str]) -> Dict[str, Any]:
+def fetch_snapshot(
+    log_limit: int, equity_since: Optional[str], market: str = "equity"
+) -> Dict[str, Any]:
     """Blocking read of everything the dashboard shows (run via io_bound)."""
-    db = get_db()
+    db = db_for(market)
     status = db.get_status()
     local_midnight = (
         datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -335,13 +362,13 @@ def fetch_snapshot(log_limit: int, equity_since: Optional[str]) -> Dict[str, Any
     }
 
 
-def _limit_close_order(trading, position) -> None:
-    """Submit a marketable extended-hours limit close for one position.
+def _limit_close_order(trading, position, market: str = "equity") -> None:
+    """Submit a marketable limit close for one position.
 
-    Market orders and close_all_positions liquidation are rejected outside the
-    regular session, so the dashboard controls — like the engine — close with a
-    limit order priced exit_slip_pct through the position's current price so it
-    still fills in a thin pre/post-market book."""
+    Market/close_all_positions liquidation is rejected outside the regular
+    session (and for crypto entirely), so the dashboard controls — like the
+    engine — close with a limit priced exit_slip_pct through the position's
+    price. Equities: extended-hours DAY. Crypto: GTC, no extended_hours."""
     from alpaca.trading.enums import OrderSide, TimeInForce
     from alpaca.trading.requests import LimitOrderRequest
 
@@ -356,49 +383,60 @@ def _limit_close_order(trading, position) -> None:
         else position.avg_entry_price
     )
     price = float(ref)
-    slip = get_db().get_config().get("exit_slip_pct", 0.002)
+    slip = db_for(market).get_config().get("exit_slip_pct", 0.002)
+    is_crypto = market == "crypto"
     if is_long:
-        limit_price = max(round(price * (1 - slip), 2), 0.01)
+        limit_price = round(price * (1 - slip), 2)
+        if not is_crypto:
+            limit_price = max(limit_price, 0.01)
     else:
         limit_price = round(price * (1 + slip), 2)
-    trading.submit_order(
-        LimitOrderRequest(
-            symbol=position.symbol,
-            qty=qty,
-            side=OrderSide.SELL if is_long else OrderSide.BUY,
-            time_in_force=TimeInForce.DAY,
-            extended_hours=True,
-            limit_price=limit_price,
-        )
+    kwargs = dict(
+        symbol=position.symbol,
+        qty=qty,
+        side=OrderSide.SELL if is_long else OrderSide.BUY,
+        time_in_force=TimeInForce.GTC if is_crypto else TimeInForce.DAY,
+        limit_price=limit_price,
     )
+    if not is_crypto:
+        kwargs["extended_hours"] = True
+    trading.submit_order(LimitOrderRequest(**kwargs))
 
 
-def execute_hard_stop() -> Dict[str, Any]:
+def execute_hard_stop(market: str = "equity") -> Dict[str, Any]:
     """Blocking emergency intervention (run via io_bound).
 
-    Talks directly to Alpaca — cancel everything, flatten everything — and
-    persists KILLED so the backend engine stops itself on its next cycle
-    and refuses to restart.
+    Talks directly to Alpaca — cancel and flatten only THIS market's orders and
+    positions (one account serves both engines) — and persists KILLED to this
+    market's DB so its engine stops on the next cycle and refuses to restart.
     """
     from alpaca.trading.client import TradingClient
+    from alpaca.trading.enums import QueryOrderStatus
+    from alpaca.trading.requests import GetOrdersRequest
 
-    db = get_db()
+    db = db_for(market)
     db.add_log("CRITICAL", "EMERGENCY HARD STOP triggered from dashboard")
     errors = []
     try:
         trading = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
         try:
-            trading.cancel_orders()
-            db.add_log("CRITICAL", "All open orders cancelled (dashboard)")
+            # Cancel only this market's open orders — cancel_orders() is
+            # account-wide and would kill the other engine's orders too.
+            for order in trading.get_orders(
+                GetOrdersRequest(status=QueryOrderStatus.OPEN)
+            ):
+                if market_owns(order.symbol, market):
+                    trading.cancel_order_by_id(order.id)
+            db.add_log("CRITICAL", "Open orders cancelled (dashboard)")
         except Exception as exc:
             errors.append(f"cancel orders: {exc}")
             db.add_log("ERROR", f"Dashboard cancel-all failed: {exc}")
         try:
-            # Orders already cancelled above; close each position with an
-            # extended-hours limit order (market liquidation is rejected
-            # outside the regular session).
+            # Close each of this market's positions with a marketable limit
+            # order (market liquidation is rejected pre/post-market and crypto).
             for position in trading.get_all_positions():
-                _limit_close_order(trading, position)
+                if market_owns(position.symbol, market):
+                    _limit_close_order(trading, position, market)
             db.add_log("CRITICAL", "All positions liquidated (dashboard)")
         except Exception as exc:
             errors.append(f"liquidate: {exc}")
@@ -414,20 +452,20 @@ def execute_hard_stop() -> Dict[str, Any]:
     return {"errors": errors}
 
 
-def close_single_position(symbol: str) -> Optional[str]:
-    """Blocking extended-hours limit close of one position via the dashboard's
-    own Alpaca client (paper trading, like the hard stop). Returns an error
-    message or None on success."""
+def close_single_position(symbol: str, market: str = "equity") -> Optional[str]:
+    """Blocking marketable-limit close of one position via the dashboard's own
+    Alpaca client (paper trading, like the hard stop). Returns an error message
+    or None on success."""
     from alpaca.trading.client import TradingClient
     from alpaca.trading.enums import QueryOrderStatus
     from alpaca.trading.requests import GetOrdersRequest
 
-    db = get_db()
+    db = db_for(market)
     db.add_log("WARNING", f"{symbol}: manual close requested from dashboard")
     try:
         trading = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
         # Cancel any resting orders first (an unfilled entry limit would hold
-        # the shares), then submit an extended-hours limit close.
+        # the shares), then submit a marketable limit close.
         open_orders = trading.get_orders(
             GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])
         )
@@ -438,7 +476,7 @@ def close_single_position(symbol: str) -> Optional[str]:
         )
         if position is None:
             return f"{symbol}: no open position to close"
-        _limit_close_order(trading, position)
+        _limit_close_order(trading, position, market)
         db.add_log("TRADE", f"{symbol}: manual close submitted (dashboard)")
         return None
     except Exception as exc:
@@ -446,9 +484,10 @@ def close_single_position(symbol: str) -> Optional[str]:
         return str(exc)
 
 
-def call_backend(path: str, timeout: float) -> Dict[str, Any]:
-    """Blocking POST to the backend debug API (run via io_bound)."""
-    url = f"{BACKEND_API_URL.rstrip('/')}{path}"
+def call_backend(path: str, timeout: float, market: str = "equity") -> Dict[str, Any]:
+    """Blocking POST to the selected market's backend debug API (run via
+    io_bound)."""
+    url = f"{api_for(market).rstrip('/')}{path}"
     request = urllib.request.Request(url, data=b"", method="POST")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -465,10 +504,10 @@ def call_backend(path: str, timeout: float) -> Dict[str, Any]:
 
 
 def call_backend_json(
-    path: str, body: Dict[str, Any], timeout: float
+    path: str, body: Dict[str, Any], timeout: float, market: str = "equity"
 ) -> Dict[str, Any]:
-    """Blocking POST with JSON body to the backend debug API."""
-    url = f"{BACKEND_API_URL.rstrip('/')}{path}"
+    """Blocking POST with JSON body to the selected market's backend debug API."""
+    url = f"{api_for(market).rstrip('/')}{path}"
     data = json.dumps(body).encode()
     request = urllib.request.Request(
         url, data=data, method="POST",
@@ -845,8 +884,15 @@ def dashboard() -> None:
         "</style>"
     )
 
-    db = get_db()
-    initial_config = db.get_config()
+    # Active market for this browser session (equities by default). The header
+    # switcher flips it; every DB read/write and backend action below resolves
+    # through cur_db()/ui_state so the whole dashboard follows the selection.
+    ui_state = {"market": MARKETS[0]}
+
+    def cur_db():
+        return db_for(ui_state["market"])
+
+    initial_config = cur_db().get_config()
 
     # ------------------------------------------------------------------ #
     # small builders
@@ -977,6 +1023,19 @@ def dashboard() -> None:
                     f"text-xs {TEXT_MUTED}"
                 )
 
+        # Market switcher — only shown when a crypto engine is configured.
+        # Flips which engine's DB/API the whole dashboard reads and acts on.
+        if len(MARKETS) > 1:
+            async def on_market_change(event: Any) -> None:
+                ui_state["market"] = event.value or MARKETS[0]
+                await refresh()
+
+            ui.toggle(
+                {"equity": "Equities", "crypto": "Crypto"},
+                value=ui_state["market"],
+                on_change=on_market_change,
+            ).props("no-caps dense").classes("text-xs")
+
         # live condition chips: regime, market session, engine heartbeat
         with ui.row().classes("items-center gap-2 flex-wrap"):
             def chip() -> Dict[str, Any]:
@@ -1036,7 +1095,7 @@ def dashboard() -> None:
                     "EMERGENCY HARD STOP — cancelling orders and liquidating…",
                     type="warning",
                 )
-                result = await run.io_bound(execute_hard_stop)
+                result = await run.io_bound(execute_hard_stop, ui_state["market"])
                 if result["errors"]:
                     ui.notify(
                         "Hard stop finished with errors: "
@@ -1060,7 +1119,9 @@ def dashboard() -> None:
                     return
                 resume_button.disable()
                 ui.notify("Resuming engine…", type="info")
-                result = await run.io_bound(call_backend, "/reset", 15.0)
+                result = await run.io_bound(
+                    call_backend, "/reset", 15.0, ui_state["market"]
+                )
                 if result["ok"]:
                     ui.notify("Engine resumed — state RUNNING", type="positive")
                 else:
@@ -1403,7 +1464,8 @@ def dashboard() -> None:
                             ),
                         }
                         result = await run.io_bound(
-                            call_backend_json, "/analyst/config", updates, 10.0
+                            call_backend_json, "/analyst/config", updates, 10.0,
+                            ui_state["market"],
                         )
                         if result["ok"]:
                             ui.notify(
@@ -1474,7 +1536,8 @@ def dashboard() -> None:
                                         "Running trade review…", type="info"
                                     )
                                     result = await run.io_bound(
-                                        call_backend, "/analyst/review", 120.0
+                                        call_backend, "/analyst/review", 120.0,
+                                        ui_state["market"],
                                     )
                                     review_spinner.set_visibility(False)
                                     review_button.enable()
@@ -1620,9 +1683,9 @@ def dashboard() -> None:
                                     type="warning",
                                     timeout=8000,
                                 )
-                            await run.io_bound(db.set_config, updates)
+                            await run.io_bound(cur_db().set_config, updates)
                             await run.io_bound(
-                                db.add_log,
+                                cur_db().add_log,
                                 "WARNING",
                                 "Strategy parameters changed manually from the "
                                 "dashboard: "
@@ -1656,7 +1719,7 @@ def dashboard() -> None:
                             await apply_parameters()
 
                         def reload_from_db() -> None:
-                            live = db.get_config()
+                            live = cur_db().get_config()
                             for key, meta in PARAM_META.items():
                                 if meta.get("toggle"):
                                     param_inputs[key].value = bool(int(live.get(key, 0.0)))
@@ -1722,14 +1785,14 @@ def dashboard() -> None:
                                     min(float(meta["max"]), float(raw)),
                                 )
                                 updates[key] = float(int(value))
-                            await run.io_bound(db.set_config, updates)
+                            await run.io_bound(cur_db().set_config, updates)
                             ui.notify(
                                 "Watchlist settings applied",
                                 type="positive",
                             )
 
                         def reload_watchlist_from_db() -> None:
-                            live = db.get_config()
+                            live = cur_db().get_config()
                             for key in WATCHLIST_PARAM_META:
                                 watchlist_param_inputs[key].value = int(live[key])
                             ui.notify("Reloaded live values from the database")
@@ -1795,14 +1858,14 @@ def dashboard() -> None:
                                     min(float(meta["max"]), float(raw)),
                                 )
                                 updates[key] = float(int(value))
-                            await run.io_bound(db.set_config, updates)
+                            await run.io_bound(cur_db().set_config, updates)
                             ui.notify(
                                 "Screener settings applied",
                                 type="positive",
                             )
 
                         def reload_screener_from_db() -> None:
-                            live = db.get_config()
+                            live = cur_db().get_config()
                             for key in SCREENER_PARAM_META:
                                 screener_param_inputs[key].value = int(
                                     live.get(key, 0.0 if key == "screener_enabled" else 200.0)
@@ -1871,7 +1934,8 @@ def dashboard() -> None:
                                 type="info",
                             )
                             result = await run.io_bound(
-                                call_backend, "/optimize", 900.0
+                                call_backend, "/optimize", 900.0,
+                                ui_state["market"],
                             )
                             optimize_spinner.set_visibility(False)
                             optimize_button.enable()
@@ -1951,9 +2015,9 @@ def dashboard() -> None:
                                 if meta["int"]:
                                     value = float(int(value))
                                 updates[key] = value
-                            await run.io_bound(db.set_config, updates)
+                            await run.io_bound(cur_db().set_config, updates)
                             await run.io_bound(
-                                db.add_log,
+                                cur_db().add_log,
                                 "WARNING",
                                 "Operational environment changed from dashboard: "
                                 + ", ".join(f"{k}={v:g}" for k, v in updates.items()),
@@ -1965,7 +2029,7 @@ def dashboard() -> None:
                             )
 
                         def reload_operational_from_db() -> None:
-                            live = db.get_config()
+                            live = cur_db().get_config()
                             for key, meta in OPERATIONAL_PARAM_META.items():
                                 op_param_inputs[key].value = (
                                     int(live.get(key, meta["min"]))
@@ -2157,7 +2221,7 @@ def dashboard() -> None:
             return
         render_state["closing"].add(symbol)
         ui.notify(f"Closing {symbol}…", type="warning")
-        error = await run.io_bound(close_single_position, symbol)
+        error = await run.io_bound(close_single_position, symbol, ui_state["market"])
         render_state["closing"].discard(symbol)
         if error is None:
             ui.notify(f"{symbol} close submitted", type="positive")
@@ -3018,7 +3082,9 @@ def dashboard() -> None:
     async def on_analyst_toggle(value: bool) -> None:
         if getattr(analyst_toggle, "_suppress_change", False):
             return
-        result = await run.io_bound(call_backend, "/analyst/toggle", 10.0)
+        result = await run.io_bound(
+            call_backend, "/analyst/toggle", 10.0, ui_state["market"]
+        )
         if result["ok"]:
             state = "enabled" if result["data"].get("analyst_enabled") else "disabled"
             ui.notify(f"Analyst {state}", type="positive")
@@ -3081,7 +3147,10 @@ def dashboard() -> None:
         )
         try:
             snapshot = await run.io_bound(
-                fetch_snapshot, int(log_rows_select.value or DEFAULT_LOG_ROWS), since
+                fetch_snapshot,
+                int(log_rows_select.value or DEFAULT_LOG_ROWS),
+                since,
+                ui_state["market"],
             )
         except Exception as exc:
             logger.error("Dashboard refresh failed: %s", exc)

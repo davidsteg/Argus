@@ -9,6 +9,32 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.17.0] - 2026-07-10
+
+### Added
+- **Crypto trading — a second 24/7 engine alongside equities.** A new engine
+  (`MARKET=crypto`) trades all Alpaca-supported USD pairs spot, long-only, 24/7,
+  using the same RSI/VWAP dip strategy and polled soft stop/target as equities.
+  It runs as an independent container with its own SQLite DB
+  (`argus_crypto.db`), so the live equities engine is untouched.
+- **One dashboard, market switcher.** A header Equities ⇄ Crypto toggle points
+  every view, setting, and action (hard-stop, close, resume, optimize) at the
+  selected engine's DB/API.
+- New `backend/market.py` `MarketAdapter` (Equity/Crypto) encapsulates every
+  asset-class seam: data client, universe, session hours, order construction
+  (crypto = GTC limits + fractional sizing; equities = extended-hours DAY
+  limits), regime proxy (BTC/USD for crypto), position partitioning, and
+  per-market equity. Strategy/orchestration stay single-sourced.
+- `docker-compose.yml` gains a `trading_crypto_backend` service; the frontend
+  mounts both DBs and learns `CRYPTO_DB_PATH` / `CRYPTO_BACKEND_API_URL`.
+
+### Notes
+- Both engines share one Alpaca account, so each keeps only its own asset
+  class's positions/orders and computes its own equity (crypto: a notional base
+  + own realized/unrealized PnL), keeping the two daily-stops independent.
+- Crypto has no scheduled end-of-day flatten (24/7) and no nightly optimizer in
+  v1 (the backtest is equity-bar based) — it runs on static/default parameters.
+
 ## [v2.16.1] - 2026-07-10
 
 ### Fixed
