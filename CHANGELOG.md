@@ -9,6 +9,19 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.16.1] - 2026-07-10
+
+### Fixed
+- **Hotfix — the extended-hours session clock crashed every cycle.** v2.16.0
+  aborted every trading cycle with `combine() argument 2 must be datetime.time,
+  not datetime.datetime`; the engine stayed `RUNNING` but placed **zero orders**.
+  The new session-window code assumed Alpaca's calendar `close` field was a
+  `datetime.time`, but this alpaca-py version returns a `datetime.datetime`, so
+  `datetime.combine` raised before any signal was evaluated. The regular-close
+  field is now normalised to an ET wall-clock time-of-day whether Alpaca returns
+  a `time`, a naive `datetime`, or a tz-aware `datetime`, so the 4:00 AM / 8:00
+  PM ET (and half-day) bounds compute correctly regardless of the field's type.
+
 ## [v2.16.0] - 2026-07-10
 
 ### Changed

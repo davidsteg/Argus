@@ -1127,9 +1127,15 @@ class ArgusBot:
         for cal in calendars:
             if cal.date != today_et:
                 continue
+            # cal.close is the regular close. Across alpaca-py versions it is
+            # either a datetime.time or a datetime.datetime (naive ET wall time,
+            # or tz-aware) — normalise to an ET wall-clock time-of-day either
+            # way. Pre-market is fixed at 4:00 AM ET; after-hours runs 4h past
+            # the regular close (→ 8:00 PM normal, 5:00 PM on a half-day).
+            close_tod = self._et_time_of_day(cal.close)
             open_et = datetime.combine(cal.date, dtime(4, 0), tzinfo=US_EASTERN)
             close_et = (
-                datetime.combine(cal.date, cal.close, tzinfo=US_EASTERN)
+                datetime.combine(cal.date, close_tod, tzinfo=US_EASTERN)
                 + timedelta(hours=4)
             )
             bounds = (
@@ -1140,6 +1146,17 @@ class ArgusBot:
 
         self._session_cache = (cache_key, bounds)
         return bounds
+
+    @staticmethod
+    def _et_time_of_day(value: Any) -> dtime:
+        """The US-Eastern wall-clock time-of-day of an Alpaca calendar field,
+        accepting a datetime.time, a naive datetime (already ET wall time), or a
+        tz-aware datetime (converted to ET first)."""
+        if isinstance(value, datetime):
+            if value.tzinfo is not None:
+                value = value.astimezone(US_EASTERN)
+            return value.time()
+        return value
 
     # ------------------------------------------------------------------ #
     # main loop

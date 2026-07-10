@@ -10,9 +10,26 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.16.0"
+__version__ = "2.16.1"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.16.1",
+        "date": "2026-07-10",
+        "title": "Hotfix: extended-hours session clock crashed every cycle",
+        "notes": [
+            "v2.16.0 aborted every trading cycle with \"combine() argument 2 "
+            "must be datetime.time, not datetime.datetime\" — the engine stayed "
+            "RUNNING but placed zero orders. The new extended-session window "
+            "assumed Alpaca's calendar close field was a datetime.time, but this "
+            "alpaca-py version returns a datetime.datetime, so datetime.combine "
+            "raised on every cycle before any signal was evaluated.",
+            "The regular-close field is now normalised to an ET wall-clock "
+            "time-of-day whether Alpaca returns a time, a naive datetime, or a "
+            "tz-aware datetime — so the 4:00 AM / 8:00 PM ET (and half-day) "
+            "bounds are computed correctly regardless of the field's type.",
+        ],
+    },
     {
         "version": "2.16.0",
         "date": "2026-07-10",
