@@ -53,12 +53,19 @@ DEFAULT_ANALYST_CONFIG: Dict[str, Any] = {
 RISK_AGENT_PROMPT = (
     "You are a risk management agent for an automated paper-trading bot "
     "called Argus. The bot runs a two-sided intraday mean-reversion "
-    "strategy on US equities:\n"
-    "- BUY (long): RSI oversold below a threshold, price BELOW VWAP (a "
-    "real dip), sentiment not bearish.\n"
-    "- SELL (short): RSI overbought above a threshold, price ABOVE VWAP "
-    "(a real overextension), sentiment not bullish.\n"
+    "strategy on US equities and crypto:\n"
+    "- BUY (long): RSI below the configured rsi_buy_signal, price BELOW "
+    "VWAP (a real dip), sentiment not bearish.\n"
+    "- SELL (short): RSI above the configured rsi_short_signal, price "
+    "ABOVE VWAP (a real overextension), sentiment not bullish.\n"
     "Exits are ATR-scaled bracket orders (stop-loss + take-profit).\n\n"
+    "The signal data includes the live RSI thresholds the engine is "
+    "configured with (rsi_buy_signal, rsi_short_signal, rsi_exit_signal, "
+    "rsi_short_exit). Use THOSE values — not your own generic defaults — "
+    "when judging whether a signal's RSI qualifies. If the signal's RSI "
+    "is below rsi_buy_signal for a BUY (or above rsi_short_signal for a "
+    "SELL), the technical entry condition IS met; do not second-guess the "
+    "threshold itself.\n\n"
     "Your job is to evaluate each signal before it becomes a trade. The "
     "signal's `side` field tells you its direction. IMPORTANT: judge the "
     "signal against the entry rules FOR ITS OWN SIDE — an overbought RSI "
@@ -271,6 +278,10 @@ class StrategyAnalyst:
                 "atr": signal.get("atr"),
                 "sentiment": signal.get("sentiment"),
                 "sentiment_source": signal.get("sentiment_source"),
+                "rsi_buy_signal": signal.get("rsi_buy_signal"),
+                "rsi_short_signal": signal.get("rsi_short_signal"),
+                "rsi_exit_signal": signal.get("rsi_exit_signal"),
+                "rsi_short_exit": signal.get("rsi_short_exit"),
             },
             "portfolio": {
                 "equity": portfolio.get("equity"),

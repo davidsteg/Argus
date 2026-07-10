@@ -10,9 +10,27 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.19.0"
+__version__ = "2.19.1"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.19.1",
+        "date": "2026-07-10",
+        "title": "Fix risk agent rejecting valid signals with wrong RSI threshold",
+        "notes": [
+            "The risk agent's system prompt never told the LLM what the "
+            "configured rsi_buy_signal threshold was, so the model defaulted "
+            "to its own generic 'RSI < 30 = oversold' rule and rejected every "
+            "signal in the 30-35 range — the crypto engine's configured "
+            "threshold is 35, so most valid BUY signals were blocked.",
+            "RISK_AGENT_PROMPT now instructs the LLM to use the live "
+            "thresholds from the signal data (rsi_buy_signal, rsi_short_signal, "
+            "rsi_exit_signal, rsi_short_exit) instead of its own defaults.",
+            "BUY and SELL signal dicts in bot.py now carry all four RSI "
+            "thresholds from live config, and evaluate_signal_risk passes them "
+            "through in prompt_data so the risk agent sees them.",
+        ],
+    },
     {
         "version": "2.19.0",
         "date": "2026-07-10",

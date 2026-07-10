@@ -262,6 +262,10 @@ class ArgusBot:
                 "atr": atr,
                 "sentiment": sentiment,
                 "sentiment_source": source,
+                "rsi_buy_signal": self.config["rsi_buy_signal"],
+                "rsi_exit_signal": self.config["rsi_exit_signal"],
+                "rsi_short_signal": self.config.get("rsi_short_signal", 80.0),
+                "rsi_short_exit": self.config.get("rsi_short_exit", 20.0),
             }
 
         # --- SHORT signal: RSI overbought + price above VWAP (overextended) ---
@@ -317,6 +321,10 @@ class ArgusBot:
                 "atr": atr,
                 "sentiment": sentiment,
                 "sentiment_source": source,
+                "rsi_buy_signal": self.config["rsi_buy_signal"],
+                "rsi_exit_signal": self.config["rsi_exit_signal"],
+                "rsi_short_signal": self.config.get("rsi_short_signal", 80.0),
+                "rsi_short_exit": self.config.get("rsi_short_exit", 20.0),
             }
 
         return None

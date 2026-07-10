@@ -9,6 +9,18 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.19.1] - 2026-07-10
+
+### Fixed
+- **Risk agent rejecting valid signals with wrong RSI threshold.** The risk
+  agent's system prompt never told the LLM what the configured `rsi_buy_signal`
+  threshold was, so the model defaulted to its own generic "RSI < 30 =
+  oversold" rule and rejected every signal in the 30-35 range. The crypto
+  engine's configured threshold is 35, so most valid BUY signals were blocked.
+  `RISK_AGENT_PROMPT` now instructs the LLM to use the live thresholds from the
+  signal data instead of its own defaults, and BUY/SELL signal dicts now carry
+  all four RSI thresholds from live config through to `evaluate_signal_risk`.
+
 ## [v2.19.0] - 2026-07-10
 
 ### Added
