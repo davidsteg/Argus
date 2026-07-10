@@ -45,8 +45,10 @@ from alpaca.data.historical import (
 )
 from alpaca.data.requests import (
     CryptoBarsRequest,
+    CryptoLatestQuoteRequest,
     CryptoLatestTradeRequest,
     StockBarsRequest,
+    StockLatestQuoteRequest,
     StockLatestTradeRequest,
 )
 from alpaca.data.timeframe import TimeFrame
@@ -63,6 +65,25 @@ US_EASTERN = ZoneInfo("America/New_York")
 
 EQUITY = "equity"
 CRYPTO = "crypto"
+
+# Fiat/stable quote currencies of the crypto pairs this account trades. Used to
+# recognise a crypto symbol regardless of which Alpaca API surfaced it: the
+# positions API returns the compact form ("PAXGUSD") while the orders API, the
+# universe and our own signals use the slashed form ("PAXG/USD"). Longest first
+# so "USDT"/"USDC" match before the "USD" substring.
+_CRYPTO_QUOTES = ("USDT", "USDC", "USDG", "USD")
+
+
+def _is_crypto_symbol(symbol: str) -> bool:
+    """True for a crypto symbol in either form (slashed "BTC/USD" or the
+    slashless "BTCUSD" Alpaca returns for positions). Equities never carry a
+    slash and are not USD-quoted pairs, so the two engines partition one shared
+    account cleanly. The length guard keeps a real equity ticker like "USD"
+    (ProShares Ultra Semiconductors) on the equity side."""
+    s = symbol.upper()
+    if "/" in s:
+        return True
+    return any(s.endswith(q) and len(s) > len(q) for q in _CRYPTO_QUOTES)
 
 
 @dataclass
@@ -81,6 +102,10 @@ class MarketAdapter(ABC):
     name: str
     #: True when this market's positions must be flattened before close_utc.
     flatten_before_close: bool
+    #: True for a screener-driven universe (equities); False for a fixed asset
+    #: list (crypto). Gates LLM watchlist curation and the equity opportunity
+    #: screener, neither of which applies to the static crypto USD-pair set.
+    dynamic_watchlist: bool = True
 
     def __init__(self, trading: TradingClient, api_key: str, secret_key: str) -> None:
         self.trading = trading
@@ -96,6 +121,13 @@ class MarketAdapter(ABC):
 
     @abstractmethod
     def latest_price(self, symbol: str) -> Optional[float]:
+        ...
+
+    @abstractmethod
+    def latest_quote(self, symbol: str) -> Optional[Tuple[float, float]]:
+        """Live (bid, ask), or None when unavailable. Fresher than the last
+        trade on a thin book, so entries/exits can price a marketable limit
+        that actually crosses the spread."""
         ...
 
     # -- universe / ownership -------------------------------------------- #
@@ -166,6 +198,21 @@ class MarketAdapter(ABC):
     ) -> float:
         ...
 
+    # -- symbol / price conventions -------------------------------------- #
+    def normalize_symbol(self, symbol: str) -> str:
+        """Canonical form of a symbol as this engine tracks it. Equities pass
+        through; the crypto adapter restores the slash Alpaca strips from
+        position symbols so a held position matches the order that opened it."""
+        return symbol.upper()
+
+    def round_price(self, symbol: str, price: float) -> float:
+        """Snap a price to the market's tick. Equity default: whole cents."""
+        return round(price, 2)
+
+    def min_tick(self, symbol: str) -> float:
+        """Smallest meaningful price increment for the symbol (equity: 1¢)."""
+        return 0.01
+
 
 # ---------------------------------------------------------------------- #
 # Equities — reproduces the pre-adapter behavior exactly.
@@ -198,12 +245,26 @@ class EquityAdapter(MarketAdapter):
         )
         return float(latest[symbol].price)
 
+    def latest_quote(self, symbol: str) -> Optional[Tuple[float, float]]:
+        try:
+            quote = self.data.get_stock_latest_quote(
+                StockLatestQuoteRequest(symbol_or_symbols=symbol)
+            )[symbol]
+            bid = float(quote.bid_price or 0.0)
+            ask = float(quote.ask_price or 0.0)
+        except Exception as exc:
+            logger.warning("Stock quote fetch failed for %s: %s", symbol, exc)
+            return None
+        return (bid, ask) if bid > 0 and ask > 0 else None
+
     def get_watchlist(self) -> List[str]:
         return universe.get_watchlist()
 
     def owns_symbol(self, symbol: str) -> bool:
-        # Crypto symbols carry a slash (BTC/USD); equities never do.
-        return "/" not in symbol
+        # One Alpaca account trades both markets; the equity engine keeps
+        # everything that is NOT a crypto symbol (crypto positions come back
+        # slashless as "PAXGUSD", which a bare '/' test used to misclassify).
+        return not _is_crypto_symbol(symbol)
 
     def session_state(self) -> SessionState:
         bounds = self._extended_session_bounds()
@@ -329,6 +390,7 @@ class EquityAdapter(MarketAdapter):
 class CryptoAdapter(MarketAdapter):
     name = CRYPTO
     flatten_before_close = False  # 24/7: never a scheduled flatten
+    dynamic_watchlist = False     # fixed USD-pair universe, no screener/curation
 
     def __init__(self, trading: TradingClient, api_key: str, secret_key: str) -> None:
         super().__init__(trading, api_key, secret_key)
@@ -355,6 +417,18 @@ class CryptoAdapter(MarketAdapter):
             CryptoLatestTradeRequest(symbol_or_symbols=symbol)
         )
         return float(latest[symbol].price)
+
+    def latest_quote(self, symbol: str) -> Optional[Tuple[float, float]]:
+        try:
+            quote = self.data.get_crypto_latest_quote(
+                CryptoLatestQuoteRequest(symbol_or_symbols=symbol)
+            )[symbol]
+            bid = float(quote.bid_price or 0.0)
+            ask = float(quote.ask_price or 0.0)
+        except Exception as exc:
+            logger.warning("Crypto quote fetch failed for %s: %s", symbol, exc)
+            return None
+        return (bid, ask) if bid > 0 and ask > 0 else None
 
     def get_watchlist(self) -> List[str]:
         # All tradable USD crypto pairs, cached ~15 min. Also builds the
@@ -389,7 +463,29 @@ class CryptoAdapter(MarketAdapter):
         return list(self._universe)
 
     def owns_symbol(self, symbol: str) -> bool:
-        return "/" in symbol
+        # Matches both the slashed form ("BTC/USD") and the slashless form
+        # Alpaca returns for positions ("BTCUSD").
+        return _is_crypto_symbol(symbol)
+
+    def normalize_symbol(self, symbol: str) -> str:
+        """Restore the slash Alpaca strips from crypto position symbols
+        ("PAXGUSD" → "PAXG/USD") so a held position matches the slashed symbol
+        the entry order was placed with. Prefer an exact universe match; fall
+        back to splitting on the known quote currency."""
+        s = symbol.upper()
+        if "/" in s:
+            return s
+        for candidate in self._universe:
+            if candidate.replace("/", "") == s:
+                return candidate
+        for quote in _CRYPTO_QUOTES:
+            if s.endswith(quote) and len(s) > len(quote):
+                return f"{s[:-len(quote)]}/{quote}"
+        return s
+
+    def min_tick(self, symbol: str) -> float:
+        inc = self._assets.get(symbol, {}).get("price_increment", 0.0)
+        return inc if inc > 0 else 0.01
 
     def session_state(self) -> SessionState:
         # Always open; no close boundary → no scheduled flatten.

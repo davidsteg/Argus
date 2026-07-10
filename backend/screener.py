@@ -3,9 +3,9 @@ Argus — opportunity screener: find CRINX-like setups across a wide universe.
 
 Scans a much larger pool of symbols (e.g. top 200 most active) for the same
 RSI-oversold + VWAP-dip + bullish-sentiment pattern the engine trades, then
-ranks candidates by dip depth and publishes them. The engine can pull the
-top N into its watchlist each cycle, or the dashboard can display them for
-manual review.
+ranks candidates by dip depth and publishes them to the runtime_state table
+for the dashboard to display. This is advisory only — the live engine does not
+currently pull screener candidates into its watchlist.
 
 This is a *candidate generator*, not a trading engine — it never places
 orders. It reuses the exact same indicator code (indicators.py) and

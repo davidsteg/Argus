@@ -67,7 +67,7 @@ OPTIMIZER_MAX_SYMBOLS = int(os.getenv("OPTIMIZER_MAX_SYMBOLS", "10"))
 # Chronological share of each symbol's bars used for parameter selection;
 # the remainder is the untouched validation window.
 TRAIN_FRACTION = float(os.getenv("OPTIMIZER_TRAIN_FRACTION", "0.75"))
-# Post-loss re-entry bench, mirrored from the live engine (1 bar ≈ 1 min).
+# Post-close re-entry bench, mirrored from the live engine (1 bar ≈ 1 min).
 # Read from bot_config at runtime so it's tunable from the dashboard.
 
 # Trading friction applied to every simulated trade. Without it the
@@ -181,7 +181,7 @@ def backtest(
     sustained oversold stretch, matching the live engine which is blocked
     from re-entry while it already holds the symbol. Price must also sit
     at or below the session VWAP (the live dip-confirmation gate), and the
-    symbol must be past its post-loss cooldown. The live sentiment and
+    symbol must be past its post-close cooldown. The live sentiment and
     regime gates cannot be replayed from bars alone and stay out.
 
     Short entry: RSI crosses above the short signal level (previous bar
@@ -243,13 +243,10 @@ def backtest(
         peak_pnl = max(peak_pnl, cash_pnl)
         max_drawdown = max(max_drawdown, (peak_pnl - cash_pnl) / account_equity)
         in_position = False
-        # Post-loss bench, mirrored from the live engine. A loss is exit
-        # below entry for a long, above entry for a short.
-        loss = (
-            exit_price < entry_price if position_side == "BUY"
-            else exit_price > entry_price
-        )
-        if loss and cooldown_bars > 0:
+        # Post-close bench, mirrored from the live engine (v2.18.3+): a symbol
+        # is benched after EVERY close, not just losses, so a quiet asset whose
+        # RSI oscillates around the thresholds cannot churn every cycle.
+        if cooldown_bars > 0:
             cooldown_until = bar + cooldown_bars
 
     for i in range(1, len(closes)):

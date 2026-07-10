@@ -54,7 +54,6 @@ from alpaca.trading.requests import GetOrdersRequest
 from dotenv import load_dotenv
 
 import regime
-import universe
 from analyst import get_analyst
 from indicators import (
     bracket_distances,
@@ -358,27 +357,101 @@ class ArgusBot:
     # order placement
     # ------------------------------------------------------------------ #
 
+    async def _entry_reference_price(
+        self, symbol: str, side: OrderSide, fallback: float
+    ) -> float:
+        """Marketable reference price for an entry/close limit: the opposite
+        side of the live quote (ask to buy, bid to sell) so the limit crosses
+        the spread and fills. The last *trade* can be minutes stale on a thin
+        book — that left GTC crypto entries resting unfilled. Falls back to the
+        latest trade, then the caller's bar price, when no quote is available."""
+        try:
+            quote = await asyncio.to_thread(self.market.latest_quote, symbol)
+        except Exception as exc:
+            logger.warning("Quote fetch failed for %s: %s", symbol, exc)
+            quote = None
+        if quote is not None:
+            bid, ask = quote
+            px = ask if side == OrderSide.BUY else bid
+            if px and px > 0:
+                return float(px)
+        try:
+            fresh = await asyncio.to_thread(self.market.latest_price, symbol)
+            if fresh is not None:
+                return float(fresh)
+        except Exception as exc:
+            logger.warning(
+                "Latest-trade fetch failed for %s, using bar price: %s",
+                symbol, exc,
+            )
+        return fallback
+
+    def _bracket_levels(
+        self,
+        symbol: str,
+        price: float,
+        stop_distance: float,
+        target_distance: float,
+        is_long: bool,
+    ) -> Tuple[float, float]:
+        """Round the soft take-profit / stop-loss to the market's own price
+        tick (cents for equities, the pair's price increment for crypto) and
+        guarantee rounding never collapses a level onto the entry price. A flat
+        round(2) / 2¢ floor put a sub-dollar crypto stop dollars from the entry.
+        Returns (take_profit, stop_loss)."""
+        tick = self.market.min_tick(symbol)
+        if is_long:
+            take_profit = self.market.round_price(symbol, price + target_distance)
+            stop_loss = self.market.round_price(symbol, price - stop_distance)
+            take_profit = max(
+                take_profit, self.market.round_price(symbol, price + 2 * tick)
+            )
+            stop_loss = min(
+                stop_loss, self.market.round_price(symbol, price - 2 * tick)
+            )
+        else:
+            take_profit = self.market.round_price(symbol, price - target_distance)
+            stop_loss = self.market.round_price(symbol, price + stop_distance)
+            take_profit = min(
+                take_profit, self.market.round_price(symbol, price - 2 * tick)
+            )
+            stop_loss = max(
+                stop_loss, self.market.round_price(symbol, price + 2 * tick)
+            )
+        return take_profit, stop_loss
+
+    async def _entry_filled_qty(
+        self, symbol: str, entry: Dict[str, Any]
+    ) -> float:
+        """Filled quantity of a tracked entry's own order (0.0 when it never
+        filled or the status can't be fetched) — the test for whether a vanished
+        tracked symbol was ever a real position or just an unfilled order."""
+        order_id = entry.get("_entry_order_id")
+        if not order_id:
+            return 0.0
+        try:
+            order = await asyncio.to_thread(self.trading.get_order_by_id, order_id)
+        except Exception as exc:
+            logger.warning(
+                "Entry-order status fetch failed for %s: %s", symbol, exc
+            )
+            return 0.0
+        try:
+            return float(order.filled_qty or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
     async def place_limit_buy(self, signal: Dict[str, Any]) -> None:
         symbol = signal["symbol"]
         price = signal["price"]
 
         # The signal price comes from the last completed 1-minute bar, which
-        # can be up to poll_interval_seconds stale. On cheap, low-volatility
-        # tickers the ATR-scaled stop distance is only a few cents, so a
-        # bracket priced off a stale bar routinely landed on the wrong side
-        # of Alpaca's live quote and was rejected outright. Re-price against
-        # the latest trade immediately before submission; fall back to the
-        # bar price if the live quote is unavailable.
-        try:
-            fresh = await asyncio.to_thread(self.market.latest_price, symbol)
-            if fresh is not None:
-                price = fresh
-        except Exception as exc:
-            logger.warning(
-                "Latest-trade fetch failed for %s, using bar price: %s",
-                symbol,
-                exc,
-            )
+        # can be up to poll_interval_seconds stale. Re-price against the live
+        # quote (the ask a buy would cross) immediately before submission so
+        # the marketable limit actually fills — the last *trade* can be minutes
+        # old on a thin book, which left GTC crypto entries resting unfilled and
+        # stacking duplicates every cycle.
+        price = await self._entry_reference_price(symbol, OrderSide.BUY, price)
 
         # Stop/target scale with the symbol's own volatility (ATR multiples
         # tuned nightly by the optimizer, floored in indicators.py).
@@ -404,13 +477,9 @@ class ArgusBot:
             )
             return
 
-        take_profit = round(price + target_distance, 2)
-        stop_loss = round(price - stop_distance, 2)
-        # Penny rounding must never collapse a level onto the entry price.
-        # The 2-cent floor (not Alpaca's bare 1-cent minimum) leaves a little
-        # slack for the price to keep moving between this quote and the fill.
-        take_profit = max(take_profit, round(price + 0.02, 2))
-        stop_loss = min(stop_loss, round(price - 0.02, 2))
+        take_profit, stop_loss = self._bracket_levels(
+            symbol, price, stop_distance, target_distance, is_long=True
+        )
 
         # The market adapter builds the marketable-limit entry (equity:
         # extended-hours DAY; crypto: GTC) priced entry_slip_pct through the
@@ -431,6 +500,7 @@ class ArgusBot:
             "qty": float(qty),
             "entry_price": price,
             "side": "BUY",
+            "_entry_order_id": getattr(order, "id", None),
             "entry_time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "entry_rsi": signal["rsi"],
             "entry_vwap": signal["vwap"],
@@ -468,16 +538,9 @@ class ArgusBot:
         symbol = signal["symbol"]
         price = signal["price"]
 
-        try:
-            fresh = await asyncio.to_thread(self.market.latest_price, symbol)
-            if fresh is not None:
-                price = fresh
-        except Exception as exc:
-            logger.warning(
-                "Latest-trade fetch failed for %s, using bar price: %s",
-                symbol,
-                exc,
-            )
+        # Re-price against the live bid a short sells into, so the marketable
+        # limit crosses and fills (see place_limit_buy).
+        price = await self._entry_reference_price(symbol, OrderSide.SELL, price)
 
         stop_distance, target_distance = bracket_distances(
             price,
@@ -498,12 +561,11 @@ class ArgusBot:
             )
             return
 
-        # Short: take-profit is BELOW entry, stop-loss is ABOVE entry (soft
-        # levels enforced by evaluate_and_close_stops).
-        take_profit = round(price - target_distance, 2)
-        stop_loss = round(price + stop_distance, 2)
-        take_profit = min(take_profit, round(price - 0.02, 2))
-        stop_loss = max(stop_loss, round(price + 0.02, 2))
+        # Short: take-profit BELOW entry, stop-loss ABOVE (soft levels enforced
+        # by evaluate_and_close_stops), rounded to the market's own tick.
+        take_profit, stop_loss = self._bracket_levels(
+            symbol, price, stop_distance, target_distance, is_long=False
+        )
 
         # Marketable limit priced entry_slip_pct BELOW the last trade (equity
         # short entry; crypto never shorts — short_enabled is off in its config).
@@ -522,6 +584,7 @@ class ArgusBot:
             "qty": float(qty),
             "entry_price": price,
             "side": "SELL",
+            "_entry_order_id": getattr(order, "id", None),
             "entry_time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "entry_rsi": signal["rsi"],
             "entry_vwap": signal["vwap"],
@@ -683,12 +746,13 @@ class ArgusBot:
                 )
                 self.db.add_log("ERROR", f"{symbol}: order cancel failed: {exc}")
 
-    @staticmethod
-    def _position_dict(p: Any) -> Dict[str, Any]:
+    def _position_dict(self, p: Any) -> Dict[str, Any]:
         """Minimal position dict (the fields _limit_close needs) from a live
-        Alpaca position object."""
+        Alpaca position object, with the symbol canonicalized — Alpaca returns
+        crypto positions slashless ("PAXGUSD") but orders need the slashed
+        form, and tracking keys must match the entry."""
         return {
-            "symbol": p.symbol,
+            "symbol": self.market.normalize_symbol(p.symbol),
             "qty": float(p.qty),
             "current_price": (
                 None if p.current_price is None else float(p.current_price)
@@ -716,15 +780,14 @@ class ArgusBot:
             return None
         is_long = raw_qty > 0
 
-        price = position.get("current_price")
-        try:
-            fresh = await asyncio.to_thread(self.market.latest_price, symbol)
-            if fresh is not None:
-                price = fresh
-        except Exception as exc:
-            logger.warning("Latest-trade fetch failed for %s close: %s", symbol, exc)
-        if price is None:
-            price = float(position.get("avg_entry_price", 0.0))
+        # Price the close off the live quote we'd hit (the bid to sell a long,
+        # the ask to buy back a short) so the marketable limit fills in a thin
+        # book; fall back to the last synced price, then the average entry.
+        fallback = position.get("current_price")
+        if fallback is None:
+            fallback = float(position.get("avg_entry_price", 0.0))
+        close_side = OrderSide.SELL if is_long else OrderSide.BUY
+        price = await self._entry_reference_price(symbol, close_side, float(fallback))
 
         order_request = self.market.build_close_order(
             symbol, is_long, qty, float(price),
@@ -803,7 +866,7 @@ class ArgusBot:
 
         snapshot = [
             {
-                "symbol": p.symbol,
+                "symbol": self.market.normalize_symbol(p.symbol),
                 "qty": float(p.qty),
                 "avg_entry_price": float(p.avg_entry_price),
                 "current_price": (
@@ -827,12 +890,38 @@ class ArgusBot:
         self._closing.intersection_update(live_symbols)
         for symbol, entry in list(self._open_entries.items()):
             if symbol in live_symbols:
+                entry["opened"] = True  # confirmed a live position at least once
                 continue
-            await self.reconcile_closed_trade(symbol, entry)
+            # A tracked symbol with no live position is EITHER a position that
+            # opened and has since closed, OR an entry order that never filled.
+            # Only the former is a real trade — recording the latter fabricated
+            # phantom trades and left the unfilled GTC entry resting, stacking a
+            # fresh duplicate every cycle.
+            if entry.get("opened") or entry.get("_close_order_id"):
+                await self.reconcile_closed_trade(symbol, entry)
+                del self._open_entries[symbol]
+                continue
+            if await self._entry_filled_qty(symbol, entry) > 0:
+                # Filled then vanished between two syncs — a genuine fast trade.
+                entry["opened"] = True
+                await self.reconcile_closed_trade(symbol, entry)
+            else:
+                # Never opened a position: cancel the resting entry order and
+                # drop it WITHOUT recording a trade. Bench the symbol briefly so
+                # an unfillable book is not hammered every cycle.
+                await self._cancel_symbol_orders(symbol)
+                self.db.add_log(
+                    "INFO",
+                    f"{symbol}: entry order did not fill within a cycle — "
+                    f"cancelled, no position opened",
+                )
+                self.start_cooldown(symbol)
             del self._open_entries[symbol]
 
         # Adopt positions opened outside this process (e.g. before a restart)
-        # so their eventual close still produces a trade record.
+        # so their eventual close still produces a trade record. These are
+        # confirmed-live positions, so mark them opened immediately — otherwise
+        # a fast close would be mistaken for an unfilled entry and dropped.
         for pos in snapshot:
             qty = pos["qty"]
             self._open_entries.setdefault(
@@ -841,6 +930,7 @@ class ArgusBot:
                     "qty": abs(qty),
                     "entry_price": pos["avg_entry_price"],
                     "side": "BUY" if qty > 0 else "SELL",
+                    "opened": True,
                     "entry_time": datetime.now(timezone.utc).isoformat(
                         timespec="seconds"
                     ),
@@ -1013,7 +1103,8 @@ class ArgusBot:
             return
         for p in positions:
             if self.market.owns_symbol(p.symbol):
-                await self._limit_close(p.symbol, self._position_dict(p))
+                pos = self._position_dict(p)
+                await self._limit_close(pos["symbol"], pos)
 
     async def kill_sequence(self, reason: str) -> None:
         """Emergency shutdown: flatten everything, persist KILLED, stop.
@@ -1042,7 +1133,8 @@ class ArgusBot:
             positions = await asyncio.to_thread(self.trading.get_all_positions)
             for p in positions:
                 if self.market.owns_symbol(p.symbol):
-                    await self._limit_close(p.symbol, self._position_dict(p))
+                    pos = self._position_dict(p)
+                    await self._limit_close(pos["symbol"], pos)
             self.db.add_log("CRITICAL", "All positions liquidated")
         except Exception as exc:
             logger.error("Liquidation failed during kill sequence: %s", exc)
@@ -1425,8 +1517,11 @@ class ArgusBot:
                 self._run_periodic_reviews(regime_info, self._cycle_count)
             )
 
-        # Periodic opportunity screener runs in the background.
-        if self._screener_task is None or self._screener_task.done():
+        # Periodic opportunity screener runs in the background — equities only:
+        # it scans the equity most-actives pool, which has no crypto analogue.
+        if self.market.dynamic_watchlist and (
+            self._screener_task is None or self._screener_task.done()
+        ):
             self._screener_task = asyncio.create_task(
                 self._run_screener()
             )
@@ -1455,10 +1550,11 @@ class ArgusBot:
         except Exception as exc:
             logger.error("Trade review failed: %s", exc)
 
-        # Periodic LLM watchlist curation (if analyst is enabled). The
-        # override carries a timestamp so universe.py can expire it.
+        # Periodic LLM watchlist curation (equities only — the crypto universe
+        # is a fixed USD-pair list the adapter never overrides). The override
+        # carries a timestamp so universe.py can expire it.
         try:
-            if analyst.should_review_watchlist():
+            if self.market.dynamic_watchlist and analyst.should_review_watchlist():
                 current_symbols = list(self.watchlist)
                 new_symbols = await asyncio.to_thread(
                     analyst.review_watchlist,

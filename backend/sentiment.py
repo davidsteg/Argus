@@ -98,7 +98,14 @@ class SentimentProvider:
             if stored and isinstance(stored, dict):
                 base_url = str(stored.get("base_url", base_url))
                 api_key = str(stored.get("api_key", api_key))
-                self._model = str(stored.get("sentiment_model", stored.get("model", self._model)))
+                # `or` (not dict.get defaults): a key present but set to an
+                # empty string must fall through, else the LLM is called with
+                # model="" and every request 404s.
+                self._model = str(
+                    stored.get("sentiment_model")
+                    or stored.get("model")
+                    or self._model
+                )
         except Exception:
             pass
         if not base_url:
@@ -117,6 +124,13 @@ class SentimentProvider:
             )
         except Exception as exc:
             logger.error("OpenAI client unavailable for sentiment: %s", exc)
+
+    def reload_config(self) -> None:
+        """Re-read analyst config from the DB and rebuild the LLM client, so a
+        base-URL / model change from the dashboard takes effect for sentiment
+        without a process restart (the client is otherwise built once at init)."""
+        with self._lock:
+            self._rebuild_client()
 
     # ------------------------------------------------------------------ #
     # public API (blocking — call via asyncio.to_thread from the engine)

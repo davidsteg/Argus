@@ -10,9 +10,41 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.19.2"
+__version__ = "2.20.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.20.0",
+        "date": "2026-07-10",
+        "title": "Crypto engine: stop fabricating phantom trades, fix fills and brackets",
+        "notes": [
+            "Root cause of the crypto engine's phantom trades: Alpaca returns "
+            "crypto POSITIONS slashless ('PAXGUSD') but orders, the universe "
+            "and our signals use the slashed form ('PAXG/USD'). owns_symbol "
+            "tested for a bare '/', so the crypto engine couldn't see its own "
+            "fills and the equity engine adopted them. Ownership now recognises "
+            "both forms and positions are normalised to the slashed symbol.",
+            "sync_portfolio recorded a 'closed trade' for any tracked symbol "
+            "with no live position — including entry orders that never filled — "
+            "fabricating trades (10 identical fake PAXG/USD wins in 12 minutes) "
+            "and leaving unfilled GTC orders resting, stacking a duplicate every "
+            "cycle. Reconciliation now records a trade only for positions that "
+            "actually opened, and cancels unfilled entry orders instead.",
+            "Entries/exits now price their marketable limit off the live quote "
+            "(ask to buy, bid to sell) instead of the last trade, which could be "
+            "minutes stale on a thin book and never fill.",
+            "Soft stop/target are rounded to the market's own price tick, not a "
+            "flat 2-decimal / 2-cent floor that put a sub-dollar crypto stop "
+            "dollars away from the entry.",
+            "Secondary fixes: crypto sentiment no longer 404s on an empty model "
+            "string; watchlist curation and the equity opportunity screener are "
+            "skipped on the crypto engine; POST /optimize is rejected on crypto; "
+            "the /signals dry-run replays the floored-stop and VWAP-dislocation "
+            "gates; the nightly backtest benches after every close to match the "
+            "live engine; dashboard analyst-config changes now reload the "
+            "sentiment client without a restart.",
+        ],
+    },
     {
         "version": "2.19.2",
         "date": "2026-07-10",

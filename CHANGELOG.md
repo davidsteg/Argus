@@ -9,6 +9,41 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.20.0] - 2026-07-10
+
+### Fixed
+- **Crypto engine fabricated phantom trades.** Alpaca returns crypto *positions*
+  slashless (`PAXGUSD`) but orders, the universe and our own signals use the
+  slashed form (`PAXG/USD`). `owns_symbol` tested for a bare `/`, so the crypto
+  engine could not see its own filled positions and the equity engine adopted
+  them (its trades table filled with `AAVEUSD`/`PAXGUSD` rows). Ownership now
+  recognises both forms via a shared `_is_crypto_symbol` helper, and positions
+  are normalised to the slashed symbol so tracking keys and close orders match.
+- **Unfilled entry orders were recorded as closed trades.** `sync_portfolio`
+  treated any tracked symbol with no live position as "closed", so an entry
+  order that never filled produced a fake trade (10 identical +$0.55 PAXG/USD
+  wins in 12 minutes) *and* left the GTC order resting, stacking a fresh
+  duplicate every cycle. Reconciliation now records a trade only for positions
+  that actually opened (tracked via the entry order id / a confirmed-live flag)
+  and cancels unfilled entry orders, benching the symbol briefly.
+- **Marketable limits priced off a stale last trade.** Entries and closes now
+  price off the live quote (ask to buy, bid to sell) rather than the last
+  trade, which could be minutes old on a thin book and never cross.
+- **Sub-dollar bracket rounding.** The soft stop/target used a flat
+  `round(2)` / 2¢ floor, which on a $0.056 pair produced a −29% / +42% bracket.
+  Levels are now rounded to the market's own price increment via the adapter.
+
+### Changed
+- Crypto sentiment no longer 404s on an empty configured model string (falls
+  through to the main model), and dashboard analyst-config changes reload the
+  sentiment client without a restart.
+- LLM watchlist curation and the equity opportunity screener are skipped on the
+  crypto engine (fixed USD-pair universe); `POST /optimize` is rejected on the
+  crypto engine (its backtester replays equity bars).
+- The `/signals` dry-run now replays the floored-stop and VWAP-dislocation
+  gates, and the nightly backtest benches after every close (not just losses)
+  to match the live engine.
+
 ## [v2.19.2] - 2026-07-10
 
 ### Fixed

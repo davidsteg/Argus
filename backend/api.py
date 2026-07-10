@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict
 
@@ -37,7 +38,7 @@ from fastapi import Body, FastAPI, HTTPException, Query
 
 import regime as regime_module
 import universe
-from indicators import compute_atr, compute_rsi, compute_vwap
+from indicators import compute_atr, compute_rsi, compute_vwap, stop_is_floored
 from sentiment import get_sentiment_provider
 from shared.database import get_db
 from shared.version import RELEASES, __version__
@@ -244,6 +245,30 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
                 )
                 evaluation[symbol] = entry
                 continue
+            if not np.isnan(atr) and stop_is_floored(
+                close, atr, probe_config["atr_stop_mult"]
+            ):
+                entry.update(
+                    {
+                        "decision": "SKIP",
+                        "reason": "ATR-scaled stop sits inside the % floor — "
+                        "too quiet for a meaningful bracket",
+                    }
+                )
+                evaluation[symbol] = entry
+                continue
+            dislocation = (vwap - close) / vwap if vwap > 0 else 0.0
+            max_disloc = probe_config.get("max_vwap_dislocation_pct", 0.15)
+            if dislocation > max_disloc:
+                entry.update(
+                    {
+                        "decision": "BLOCKED",
+                        "reason": f"price {dislocation * 100:.0f}% below VWAP "
+                        f"(> {max_disloc * 100:.0f}% cap) — falling knife",
+                    }
+                )
+                evaluation[symbol] = entry
+                continue
             # Sentiment is fetched only for RSI-triggered symbols — mirrors
             # the live engine and keeps LLM cost bounded.
             sentiment = await asyncio.to_thread(provider.score, symbol)
@@ -322,6 +347,14 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
     async def optimize() -> Dict[str, Any]:
         from optimizer import run_optimization
 
+        # The optimizer's backtester replays equity bars and writes equity-tuned
+        # parameters; running it against the crypto engine's config is invalid.
+        if os.getenv("MARKET", "equity").strip().lower() == "crypto":
+            raise HTTPException(
+                status_code=400,
+                detail="Optimizer is equity-only; the crypto engine runs on "
+                "static parameters.",
+            )
         db.add_log("OPTIMIZER", "Manual optimization triggered via API")
         best = await asyncio.to_thread(run_optimization, "manual")
         if best is None:
@@ -428,6 +461,12 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
             )
         analyst = get_analyst()
         new_config = analyst.configure(filtered, db)
+        # The sentiment provider caches its own LLM client — refresh it so a
+        # base-URL / model change from the dashboard takes effect immediately.
+        try:
+            get_sentiment_provider().reload_config()
+        except Exception as exc:
+            logger.warning("Sentiment client reload failed: %s", exc)
         db.add_log(
             "INFO",
             "Analyst config updated: "
