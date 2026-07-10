@@ -10,9 +10,29 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.20.0"
+__version__ = "2.20.1"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.20.1",
+        "date": "2026-07-10",
+        "title": "Fix equity engine mis-killing on the crypto engine's position value",
+        "notes": [
+            "v2.20.0 let the crypto engine hold real positions for the first "
+            "time, which exposed a latent bug in the equity engine's per-market "
+            "equity isolation: EquityAdapter.compute_equity subtracted the "
+            "crypto positions' full MARKET VALUE from the shared account equity, "
+            "but the cash that bought them had already left the shared pool — so "
+            "it double-counted the cost basis. A ~$220 crypto position read as a "
+            "~$220 equity-engine loss and tripped the $100 daily stop, killing "
+            "the engine (which then re-killed on every reset).",
+            "compute_equity now subtracts only the crypto positions' UNREALIZED "
+            "P&L, so a crypto position's cost basis no longer registers as an "
+            "equity-engine loss. Residual: a crypto trade's realized P&L briefly "
+            "touches the figure until the next daily anchor — dollars, not the "
+            "hundreds the old bug injected.",
+        ],
+    },
     {
         "version": "2.20.0",
         "date": "2026-07-10",

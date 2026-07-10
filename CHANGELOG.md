@@ -9,6 +9,20 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.20.1] - 2026-07-10
+
+### Fixed
+- **Equity engine mis-killed on the crypto engine's position value.** v2.20.0
+  let the crypto engine hold real positions for the first time, exposing a
+  latent bug in the per-market equity isolation: `EquityAdapter.compute_equity`
+  subtracted the crypto positions' full *market value* from the shared account
+  equity, but the cash that bought them had already left the shared pool — so it
+  double-counted the cost basis. A ~$220 crypto position read as a ~$220
+  equity-engine loss, tripped the $100 daily stop, and the engine re-killed on
+  every reset. `compute_equity` now subtracts only the crypto positions'
+  *unrealized* P&L. (Residual: a crypto trade's realized P&L briefly touches the
+  figure until the next daily anchor — dollars, not hundreds.)
+
 ## [v2.20.0] - 2026-07-10
 
 ### Fixed

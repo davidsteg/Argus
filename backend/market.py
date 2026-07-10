@@ -365,16 +365,24 @@ class EquityAdapter(MarketAdapter):
         self, account: Any, own_positions: List[Dict[str, Any]], db: Any,
         all_positions: Optional[List[Any]] = None,
     ) -> float:
-        # Subtract the market value of non-equity (crypto) positions so the
-        # equity engine's daily stop-loss and equity curve are isolated from
-        # the crypto engine's activity on the same shared Alpaca account.
-        crypto_mv = 0.0
+        # Isolate the equity engine's equity from the crypto engine on the
+        # shared Alpaca account. Subtract only the crypto positions' UNREALIZED
+        # P&L, not their full market value: the cash that bought a crypto
+        # position already left the shared pool, so account.equity only reflects
+        # that position through its unrealized P&L. Subtracting the whole market
+        # value double-counted the cost basis — a $200 crypto position looked
+        # like a $200 equity-engine loss and tripped the daily stop (v2.20.0
+        # exposed this once crypto could actually hold positions). Residual: a
+        # crypto trade's realized P&L briefly touches this figure until the next
+        # daily anchor; that is dollars, not the hundreds the old bug injected.
+        crypto_upnl = 0.0
         if all_positions:
-            crypto_mv = sum(
-                float(p.market_value or 0) for p in all_positions
+            crypto_upnl = sum(
+                float(getattr(p, "unrealized_pl", 0.0) or 0.0)
+                for p in all_positions
                 if not self.owns_symbol(p.symbol)
             )
-        return float(account.equity) - crypto_mv
+        return float(account.equity) - crypto_upnl
 
     def describe_mode(self) -> str:
         return universe.describe_mode()
