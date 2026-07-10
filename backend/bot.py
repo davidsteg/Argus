@@ -441,6 +441,71 @@ class ArgusBot:
         except (TypeError, ValueError):
             return 0.0
 
+    def _vwap_revalidate(
+        self, signal: Dict[str, Any], live_price: float
+    ) -> bool:
+        """Re-check the VWAP direction and dislocation gates against the
+        live-repriced entry price. evaluate_signal's VWAP gate ran on the
+        last completed 1-minute bar close, but place_limit_buy re-prices
+        off the live quote (ask to buy, bid to sell) — on a volatile
+        symbol that ask can be several percent above the bar close by the
+        time the order is built, so a dip that passed the gate can already
+        be above VWAP at the actual entry (see the 2026-07-10 entry that
+        passed at $62.50 bar close but filled at $66.41 ask, 6% above
+        VWAP, then stopped out instantly). Aborts the entry (returns
+        False, with a diagnostic log) when the live price no longer
+        satisfies the same direction + falling-knife/parabolic gates the
+        bar close passed. Session VWAP drifts slowly (volume-weighted over
+        the whole day), so re-checking against the signal's VWAP is
+        sufficient — the failure mode is the price moving, not the VWAP."""
+        symbol = signal["symbol"]
+        side = signal["side"]
+        vwap = signal["vwap"]
+        bar_close = signal["price"]
+        max_dislocation = self.config.get("max_vwap_dislocation_pct", 0.15)
+
+        if side == "BUY":
+            if live_price >= vwap:
+                self.db.add_log(
+                    "INFO",
+                    f"{symbol}: VWAP re-check aborted BUY — live ask "
+                    f"${live_price:.2f} is at/above VWAP ${vwap:.2f} "
+                    f"(gate passed on bar close ${bar_close:.2f}); the dip "
+                    f"has reverted, skipping entry",
+                )
+                return False
+            dislocation = (vwap - live_price) / vwap
+            if dislocation > max_dislocation:
+                self.db.add_log(
+                    "INFO",
+                    f"{symbol}: VWAP re-check aborted BUY — live ask "
+                    f"${live_price:.2f} is {dislocation * 100:.0f}% below "
+                    f"VWAP ${vwap:.2f} (>{max_dislocation * 100:.0f}% cap) "
+                    f"— falling knife on re-pricing, skipping entry",
+                )
+                return False
+        else:  # SELL
+            if live_price <= vwap:
+                self.db.add_log(
+                    "INFO",
+                    f"{symbol}: VWAP re-check aborted SELL — live bid "
+                    f"${live_price:.2f} is at/below VWAP ${vwap:.2f} "
+                    f"(gate passed on bar close ${bar_close:.2f}); the "
+                    f"overextension has reverted, skipping entry",
+                )
+                return False
+            dislocation = (live_price - vwap) / vwap
+            if dislocation > max_dislocation:
+                self.db.add_log(
+                    "INFO",
+                    f"{symbol}: VWAP re-check aborted SELL — live bid "
+                    f"${live_price:.2f} is {dislocation * 100:.0f}% above "
+                    f"VWAP ${vwap:.2f} (>{max_dislocation * 100:.0f}% cap) "
+                    f"— parabolic on re-pricing, skipping entry",
+                )
+                return False
+        return True
+
     async def place_limit_buy(self, signal: Dict[str, Any]) -> None:
         symbol = signal["symbol"]
         price = signal["price"]
@@ -452,6 +517,15 @@ class ArgusBot:
         # old on a thin book, which left GTC crypto entries resting unfilled and
         # stacking duplicates every cycle.
         price = await self._entry_reference_price(symbol, OrderSide.BUY, price)
+
+        # Re-validate the VWAP gate against the live-repriced price before
+        # building the order: evaluate_signal's VWAP check ran on the bar
+        # close, but the ask can be materially higher by submission time on
+        # a volatile symbol, so a "dip below VWAP" that passed on stale bar
+        # data can already be above VWAP at the actual entry (see
+        # 2026-07-10: passed at $62.50 bar close, filled at $66.41 ask).
+        if not self._vwap_revalidate(signal, price):
+            return
 
         # Stop/target scale with the symbol's own volatility (ATR multiples
         # tuned nightly by the optimizer, floored in indicators.py).
@@ -511,12 +585,17 @@ class ArgusBot:
             "take_profit": take_profit,
             "entry_reason": (
                 f"RSI {signal['rsi']:.1f} was oversold (below the "
-                f"{self.config['rsi_buy_signal']:.0f} buy level) while price "
-                f"${price:.2f} sat below VWAP ${signal['vwap']:.2f} — a genuine "
-                f"mean-reversion dip, not a falling knife. News sentiment "
-                f"{signal['sentiment']:.2f} ({signal.get('sentiment_source', '?')}) "
-                f"cleared the {self.config['news_cutoff']:.2f} cutoff, so a long "
-                f"was opened with a {self.config['atr_stop_mult']:.1f}×ATR stop "
+                f"{self.config['rsi_buy_signal']:.0f} buy level) while the "
+                f"live ask ${price:.2f} sat "
+                f"{(signal['vwap'] - price) / signal['vwap'] * 100:.1f}% below "
+                f"VWAP ${signal['vwap']:.2f} — a genuine mean-reversion dip, "
+                f"not a falling knife (the bar close ${signal['price']:.2f} "
+                f"that first triggered the gate was "
+                f"{(signal['vwap'] - signal['price']) / signal['vwap'] * 100:.1f}% "
+                f"below VWAP). News sentiment {signal['sentiment']:.2f} "
+                f"({signal.get('sentiment_source', '?')}) cleared the "
+                f"{self.config['news_cutoff']:.2f} cutoff, so a long was "
+                f"opened with a {self.config['atr_stop_mult']:.1f}×ATR stop "
                 f"and {self.config['atr_target_mult']:.1f}×ATR target."
             ),
         }
@@ -541,6 +620,11 @@ class ArgusBot:
         # Re-price against the live bid a short sells into, so the marketable
         # limit crosses and fills (see place_limit_buy).
         price = await self._entry_reference_price(symbol, OrderSide.SELL, price)
+
+        # Re-validate the VWAP gate against the live-repriced price (mirror
+        # of the long-side re-check in place_limit_buy).
+        if not self._vwap_revalidate(signal, price):
+            return
 
         stop_distance, target_distance = bracket_distances(
             price,
@@ -595,12 +679,17 @@ class ArgusBot:
             "take_profit": take_profit,
             "entry_reason": (
                 f"RSI {signal['rsi']:.1f} was overbought (above the "
-                f"{self.config['rsi_short_signal']:.0f} short level) while price "
-                f"${price:.2f} sat above VWAP ${signal['vwap']:.2f} — an orderly "
-                f"overextension, not a parabolic squeeze. News sentiment "
-                f"{signal['sentiment']:.2f} ({signal.get('sentiment_source', '?')}) "
-                f"stayed below the {1.0 - self.config['news_cutoff']:.2f} short "
-                f"cutoff (not too bullish to fade), so a short was opened with a "
+                f"{self.config['rsi_short_signal']:.0f} short level) while "
+                f"the live bid ${price:.2f} sat "
+                f"{(price - signal['vwap']) / signal['vwap'] * 100:.1f}% above "
+                f"VWAP ${signal['vwap']:.2f} — an orderly overextension, not "
+                f"a parabolic squeeze (the bar close ${signal['price']:.2f} "
+                f"that first triggered the gate was "
+                f"{(signal['price'] - signal['vwap']) / signal['vwap'] * 100:.1f}% "
+                f"above VWAP). News sentiment {signal['sentiment']:.2f} "
+                f"({signal.get('sentiment_source', '?')}) stayed below the "
+                f"{1.0 - self.config['news_cutoff']:.2f} short cutoff (not "
+                f"too bullish to fade), so a short was opened with a "
                 f"{self.config['atr_stop_mult']:.1f}×ATR stop and "
                 f"{self.config['atr_target_mult']:.1f}×ATR target."
             ),

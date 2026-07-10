@@ -10,9 +10,42 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.20.1"
+__version__ = "2.20.2"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.20.2",
+        "date": "2026-07-10",
+        "title": "Re-validate VWAP gate against the live-repriced entry price",
+        "notes": [
+            "evaluate_signal's VWAP gate ran on the last 1-minute bar close, "
+            "but place_limit_buy re-prices the entry off the live ask (and "
+            "place_limit_short off the live bid) immediately before "
+            "submission. On a volatile symbol that ask can be several "
+            "percent above the bar close by the time the order is built, so "
+            "a dip that passed the gate on stale bar data can already be "
+            "above VWAP at the actual entry (the 2026-07-10 entry passed "
+            "the gate at $62.50 bar close, then re-priced to $66.41 ask — "
+            "6% above VWAP — and stopped out instantly when price reverted "
+            "to $62.12).",
+            "New _vwap_revalidate re-checks the same VWAP direction and "
+            "max_vwap_dislocation_pct gates against the live-repriced "
+            "price in both place_limit_buy and place_limit_short, aborting "
+            "the entry with a diagnostic log when the dip/overextension "
+            "has reverted or turned into a knife/squeeze between the gate "
+            "and the order. Session VWAP drifts slowly (volume-weighted "
+            "over the whole day), so re-checking against the signal's VWAP "
+            "is sufficient — the failure mode is the price moving, not the "
+            "VWAP.",
+            "The entry_reason template no longer hardcodes 'sat below "
+            "VWAP' / 'sat above VWAP' for every BUY/SELL. It now reports "
+            "the actual percentage the live ask/bid sits below/above VWAP, "
+            "and includes the bar-close dislocation that first triggered "
+            "the gate, so the per-trade rationale reflects the real "
+            "entry — not a template that was a lie whenever the live "
+            "price had drifted from the bar close.",
+        ],
+    },
     {
         "version": "2.20.1",
         "date": "2026-07-10",

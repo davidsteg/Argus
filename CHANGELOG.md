@@ -9,6 +9,30 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.20.2] - 2026-07-10
+
+### Fixed
+- **VWAP gate passed on stale bar data, then entry re-priced off the live
+  quote.** `evaluate_signal` checked `latest_close > vwap` using the last
+  1-minute bar close, but `place_limit_buy` re-prices the entry off the live
+  ask (`_entry_reference_price`) immediately before submission. On a volatile
+  symbol the ask can be several percent above the bar close by the time the
+  order is built, so a dip that passed the gate can already be above VWAP at
+  the actual entry. The 2026-07-10 loss passed the gate at $62.50 bar close
+  (below VWAP $62.60), then re-priced to $66.41 ask — 6% above VWAP — and
+  stopped out instantly when price reverted to $62.12. New
+  `_vwap_revalidate` re-checks the same VWAP direction and
+  `max_vwap_dislocation_pct` gates against the live-repriced price in both
+  `place_limit_buy` and `place_limit_short`, aborting the entry with a
+  diagnostic log when the dip/overextension has reverted or turned into a
+  knife/squeeze between the gate and the order.
+- **`entry_reason` was a hardcoded lie.** The per-trade rationale template
+  always said "sat below VWAP" for BUY signals and "sat above VWAP" for SELL
+  signals, regardless of the actual re-priced price's relationship to VWAP.
+  It now reports the actual percentage the live ask/bid sits below/above VWAP
+  and includes the bar-close dislocation that first triggered the gate, so
+  the rationale reflects the real entry.
+
 ## [v2.20.1] - 2026-07-10
 
 ### Fixed
