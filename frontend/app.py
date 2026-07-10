@@ -537,6 +537,7 @@ def fetch_trade_bars(
     info chart, padded a few minutes either side so the entry and exit sit
     inside the frame. Any failure (no data, feed hiccup) returns an empty list
     and the dialog falls back to a 'chart unavailable' note."""
+    from alpaca.data.enums import DataFeed
     from alpaca.data.historical import (
         CryptoHistoricalDataClient,
         StockHistoricalDataClient,
@@ -568,6 +569,7 @@ def fetch_trade_bars(
                 timeframe=TimeFrame.Minute,
                 start=(start - pad).astimezone(timezone.utc),
                 end=(end + pad).astimezone(timezone.utc),
+                feed=DataFeed.IEX,
             )
             bars = client.get_stock_bars(request)
     except Exception as exc:  # noqa: BLE001 — best-effort, chart is optional

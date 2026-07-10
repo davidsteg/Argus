@@ -10,9 +10,22 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.20.2"
+__version__ = "2.20.3"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.20.3",
+        "date": "2026-07-10",
+        "title": "Fix trade info chart: SIP data feed rejected by paper subscription",
+        "notes": [
+            "The per-trade info popup's price chart failed for equity trades "
+            "with 'subscription does not permit querying recent SIP data' "
+            "because fetch_trade_bars didn't specify a data feed, defaulting "
+            "to SIP which the paper trading subscription doesn't include.",
+            "Fix: StockBarsRequest now passes feed=DataFeed.IEX, the free "
+            "feed available on every Alpaca paper account.",
+        ],
+    },
     {
         "version": "2.20.2",
         "date": "2026-07-10",

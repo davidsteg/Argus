@@ -9,6 +9,16 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.20.3] - 2026-07-10
+
+### Fixed
+- **Trade info chart: SIP data feed rejected by paper subscription.** The
+  per-trade info popup's price chart failed for equity trades with
+  "subscription does not permit querying recent SIP data" because
+  `fetch_trade_bars` didn't specify a data feed, defaulting to SIP which the
+  paper trading subscription doesn't include. `StockBarsRequest` now passes
+  `feed=DataFeed.IEX`, the free feed available on every Alpaca paper account.
+
 ## [v2.20.2] - 2026-07-10
 
 ### Fixed
@@ -81,6 +91,16 @@ serves them at `GET /version`. Keep both in sync.
 - The `/signals` dry-run now replays the floored-stop and VWAP-dislocation
   gates, and the nightly backtest benches after every close (not just losses)
   to match the live engine.
+
+## [v2.19.3] - 2026-07-10
+
+### Fixed
+- **Trade info chart: SIP data feed rejected by paper subscription.** The
+  per-trade info popup's price chart failed for equity trades with
+  "subscription does not permit querying recent SIP data" because
+  `fetch_trade_bars` didn't specify a data feed, defaulting to SIP which the
+  paper trading subscription doesn't include. `StockBarsRequest` now passes
+  `feed=DataFeed.IEX`, the free feed available on every Alpaca paper account.
 
 ## [v2.19.2] - 2026-07-10
 
