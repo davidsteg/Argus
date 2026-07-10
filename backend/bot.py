@@ -786,6 +786,9 @@ class ArgusBot:
         # One Alpaca account serves both the equity and crypto engines, so
         # get_all_positions returns the blended book — keep only this market's
         # own positions or the two engines would try to manage each other's.
+        # Save the full list before filtering so compute_equity can subtract
+        # the other market's market value from the blended account equity.
+        all_positions = list(live_positions)
         live_positions = [
             p for p in live_positions if self.market.owns_symbol(p.symbol)
         ]
@@ -836,11 +839,11 @@ class ArgusBot:
                 },
             )
 
-        # Equity is per-market: equities use the real (blended) account equity;
-        # crypto uses a notional base + its own realized/unrealized PnL, so the
-        # two engines' daily-stop and equity curve stay independent on one
-        # shared account.
-        equity = self.market.compute_equity(account, snapshot, self.db)
+        # Per-market equity: crypto uses a notional base + its own PnL; equity
+        # subtracts the other market's market value from the blended account
+        # equity. Both engines' daily-stop and equity curve stay independent
+        # on one shared account.
+        equity = self.market.compute_equity(account, snapshot, self.db, all_positions)
         self.db.set_status(equity=equity)
         self.db.record_equity(equity)
         return {"equity": equity, "positions": snapshot}

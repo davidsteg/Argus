@@ -9,6 +9,18 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.17.4] - 2026-07-10
+
+### Fixed
+- **Equity engine's daily stop-loss and equity curve contaminated by crypto
+  activity.** Both engines share one Alpaca account, and the equity engine's
+  `compute_equity` returned the blended `account.equity` — so crypto PnL
+  could trigger the equity engine's daily stop-loss and distort its equity
+  curve. The equity engine now subtracts the market value of non-equity
+  (crypto) positions from the blended account equity, isolating its risk
+  checks and dashboard display from the crypto engine's activity — matching
+  the crypto engine's existing per-market equity computation.
+
 ## [v2.17.3] - 2026-07-10
 
 ### Fixed

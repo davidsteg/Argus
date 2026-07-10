@@ -10,9 +10,25 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.17.3"
+__version__ = "2.17.4"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.17.4",
+        "date": "2026-07-10",
+        "title": "Per-market equity isolation: equity engine no longer contaminated by crypto PnL",
+        "notes": [
+            "Both engines share one Alpaca account, and the equity engine's "
+            "compute_equity returned the blended account.equity — so crypto "
+            "PnL could trigger the equity engine's daily stop-loss and distort "
+            "its equity curve.",
+            "The equity engine now subtracts the market value of non-equity "
+            "(crypto) positions from the blended account equity, isolating its "
+            "risk checks and dashboard display from the crypto engine's "
+            "activity — matching the crypto engine's existing per-market "
+            "equity computation.",
+        ],
+    },
     {
         "version": "2.17.3",
         "date": "2026-07-10",

@@ -161,7 +161,8 @@ class MarketAdapter(ABC):
     # -- equity ---------------------------------------------------------- #
     @abstractmethod
     def compute_equity(
-        self, account: Any, own_positions: List[Dict[str, Any]], db: Any
+        self, account: Any, own_positions: List[Dict[str, Any]], db: Any,
+        all_positions: Optional[List[Any]] = None,
     ) -> float:
         ...
 
@@ -300,10 +301,19 @@ class EquityAdapter(MarketAdapter):
         return regime.get_regime()
 
     def compute_equity(
-        self, account: Any, own_positions: List[Dict[str, Any]], db: Any
+        self, account: Any, own_positions: List[Dict[str, Any]], db: Any,
+        all_positions: Optional[List[Any]] = None,
     ) -> float:
-        # Unchanged: the equities engine uses the real account equity.
-        return float(account.equity)
+        # Subtract the market value of non-equity (crypto) positions so the
+        # equity engine's daily stop-loss and equity curve are isolated from
+        # the crypto engine's activity on the same shared Alpaca account.
+        crypto_mv = 0.0
+        if all_positions:
+            crypto_mv = sum(
+                float(p.market_value or 0) for p in all_positions
+                if not self.owns_symbol(p.symbol)
+            )
+        return float(account.equity) - crypto_mv
 
     def describe_mode(self) -> str:
         return universe.describe_mode()
@@ -456,7 +466,8 @@ class CryptoAdapter(MarketAdapter):
         )
 
     def compute_equity(
-        self, account: Any, own_positions: List[Dict[str, Any]], db: Any
+        self, account: Any, own_positions: List[Dict[str, Any]], db: Any,
+        all_positions: Optional[List[Any]] = None,
     ) -> float:
         # Per-market equity, independent of the shared account cash: a notional
         # base + realized PnL of this DB's own (crypto) trades + unrealized PnL
