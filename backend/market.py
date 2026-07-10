@@ -53,8 +53,19 @@ from alpaca.data.requests import (
 )
 from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import AssetClass, AssetStatus, OrderSide, TimeInForce
-from alpaca.trading.requests import GetAssetsRequest, LimitOrderRequest
+from alpaca.trading.enums import (
+    AssetClass,
+    AssetStatus,
+    OrderClass,
+    OrderSide,
+    TimeInForce,
+)
+from alpaca.trading.requests import (
+    GetAssetsRequest,
+    LimitOrderRequest,
+    StopLossRequest,
+    TakeProfitRequest,
+)
 
 import regime
 import universe
@@ -185,6 +196,30 @@ class MarketAdapter(ABC):
         """Marketable-limit close of the full held qty on the opposite side."""
         ...
 
+    def bracket_entry_allowed(self) -> bool:
+        """True when an entry submitted right now may carry exchange-side
+        bracket legs. Alpaca rejects bracket orders outside the regular
+        equity session and for crypto entirely, so the default is False —
+        the engine then records soft stop/target levels and enforces them
+        itself each cycle."""
+        return False
+
+    def build_bracket_entry_order(
+        self,
+        symbol: str,
+        side: OrderSide,
+        qty: float,
+        ref_price: float,
+        slip_pct: float,
+        take_profit: float,
+        stop_loss: float,
+    ) -> LimitOrderRequest:
+        """Marketable-limit entry with resting OCO take-profit/stop legs.
+        Only callable when bracket_entry_allowed() is True."""
+        raise NotImplementedError(
+            f"{self.name} market does not support native bracket orders"
+        )
+
     # -- regime ---------------------------------------------------------- #
     @abstractmethod
     def regime(self) -> Dict[str, Any]:
@@ -224,10 +259,10 @@ class EquityAdapter(MarketAdapter):
     def __init__(self, trading: TradingClient, api_key: str, secret_key: str) -> None:
         super().__init__(trading, api_key, secret_key)
         self.data = StockHistoricalDataClient(api_key, secret_key)
-        # (ET-date -> (open_utc, close_utc) | None) — Alpaca's calendar hit
-        # once a day, not per poll (moved verbatim from bot.py).
+        # (ET-date -> {"regular": (open_utc, close_utc), "extended": (...)}
+        # | None) — Alpaca's calendar hit once a day, not per poll.
         self._session_cache: Optional[
-            Tuple[str, Optional[Tuple[datetime, datetime]]]
+            Tuple[str, Optional[Dict[str, Tuple[datetime, datetime]]]]
         ] = None
 
     def fetch_bars(
@@ -281,6 +316,18 @@ class EquityAdapter(MarketAdapter):
     def _extended_session_bounds(self) -> Optional[Tuple[datetime, datetime]]:
         """(open_utc, close_utc) for today's extended session (4 AM–8 PM ET,
         earlier on half-days), or None when today is not a trading day."""
+        bounds = self._session_bounds()
+        return None if bounds is None else bounds["extended"]
+
+    def _session_bounds(
+        self,
+    ) -> Optional[Dict[str, Tuple[datetime, datetime]]]:
+        """Today's session boundaries from Alpaca's calendar, cached per ET
+        date: "regular" is the exchange's own open/close (the only window in
+        which Alpaca accepts bracket orders), "extended" is 4 AM ET through
+        4 hours past the regular close (the engine's trading window, earlier
+        on half-days). None when today is not a trading day; a failed
+        calendar fetch is not cached, so the next cycle retries."""
         from alpaca.trading.requests import GetCalendarRequest
 
         today_et = datetime.now(US_EASTERN).date()
@@ -296,24 +343,39 @@ class EquityAdapter(MarketAdapter):
             logger.error("Calendar fetch failed: %s", exc)
             return None
 
-        bounds: Optional[Tuple[datetime, datetime]] = None
+        bounds: Optional[Dict[str, Tuple[datetime, datetime]]] = None
         for cal in calendars:
             if cal.date != today_et:
                 continue
+            open_tod = _et_time_of_day(cal.open)
             close_tod = _et_time_of_day(cal.close)
-            open_et = datetime.combine(cal.date, dtime(4, 0), tzinfo=US_EASTERN)
-            close_et = (
-                datetime.combine(cal.date, close_tod, tzinfo=US_EASTERN)
-                + timedelta(hours=4)
-            )
-            bounds = (
-                open_et.astimezone(timezone.utc),
-                close_et.astimezone(timezone.utc),
-            )
+            regular_open = datetime.combine(cal.date, open_tod, tzinfo=US_EASTERN)
+            regular_close = datetime.combine(cal.date, close_tod, tzinfo=US_EASTERN)
+            ext_open = datetime.combine(cal.date, dtime(4, 0), tzinfo=US_EASTERN)
+            ext_close = regular_close + timedelta(hours=4)
+            bounds = {
+                "regular": (
+                    regular_open.astimezone(timezone.utc),
+                    regular_close.astimezone(timezone.utc),
+                ),
+                "extended": (
+                    ext_open.astimezone(timezone.utc),
+                    ext_close.astimezone(timezone.utc),
+                ),
+            }
             break
 
         self._session_cache = (cache_key, bounds)
         return bounds
+
+    def bracket_entry_allowed(self) -> bool:
+        # Bracket legs are only accepted (and only rest) during the regular
+        # session; outside it the engine falls back to soft enforcement.
+        bounds = self._session_bounds()
+        if bounds is None:
+            return False
+        open_utc, close_utc = bounds["regular"]
+        return open_utc <= datetime.now(timezone.utc) < close_utc
 
     def size_qty(
         self, symbol, pos_size, price, stop_distance, risk_per
@@ -356,6 +418,42 @@ class EquityAdapter(MarketAdapter):
             time_in_force=TimeInForce.DAY,
             extended_hours=True,
             limit_price=limit,
+        )
+
+    def build_bracket_entry_order(
+        self, symbol, side, qty, ref_price, slip_pct, take_profit, stop_loss
+    ) -> LimitOrderRequest:
+        """Regular-session entry whose stop/target rest ON the exchange.
+
+        The parent is the same marketable limit as build_entry_order (minus
+        extended_hours, which Alpaca rejects on brackets); the take-profit
+        rests as a limit and the stop-loss as a stop-market, held OCO by
+        Alpaca — a breach fills immediately instead of waiting out the
+        engine's poll cycle, which is where the Jul 8–10 soft stops lost
+        2–4× their designed risk. Alpaca requires each leg strictly beyond
+        the parent limit, so both are clamped at least a cent past it —
+        callers must record the clamped leg prices, not their inputs."""
+        if side == OrderSide.BUY:
+            limit = max(
+                round(ref_price * (1 + slip_pct), 2), round(ref_price + 0.02, 2)
+            )
+            take_profit = max(round(take_profit, 2), round(limit + 0.01, 2))
+            stop_loss = min(round(stop_loss, 2), round(limit - 0.01, 2))
+        else:
+            limit = min(
+                round(ref_price * (1 - slip_pct), 2), round(ref_price - 0.02, 2)
+            )
+            take_profit = min(round(take_profit, 2), round(limit - 0.01, 2))
+            stop_loss = max(round(stop_loss, 2), round(limit + 0.01, 2))
+        return LimitOrderRequest(
+            symbol=symbol,
+            qty=int(qty),
+            side=side,
+            time_in_force=TimeInForce.DAY,
+            limit_price=limit,
+            order_class=OrderClass.BRACKET,
+            take_profit=TakeProfitRequest(limit_price=take_profit),
+            stop_loss=StopLossRequest(stop_price=stop_loss),
         )
 
     def regime(self) -> Dict[str, Any]:

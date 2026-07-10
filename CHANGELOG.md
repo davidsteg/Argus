@@ -9,6 +9,33 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.23.0] - 2026-07-11
+
+### Changed
+- **Regular-session equity entries use native exchange-side brackets.** The
+  entry is submitted as an Alpaca bracket order: an OCO take-profit limit and
+  stop-market leg rest on the exchange, so a breached level fills immediately
+  instead of waiting out the engine's 60-second poll. The Jul 8–10 trade review
+  showed polled soft stops filling 2–4× past their level on thin movers (NVVE:
+  $16 designed risk, $61.54 realized loss); 13 such exits accounted for
+  -$145.73 of -$152.94 total. Outside regular hours and for crypto — where
+  Alpaca rejects bracket orders — entries keep the existing marketable-limit +
+  soft-level path.
+- **Soft stop/target checks are quote-first and side-aware.** The check now
+  prices off the live quote's exit side (the bid a long sells into, the ask a
+  short buys back), falling back to the 1-minute bar close, the latest trade,
+  then the position's last synced price. Bar closes can be tens of seconds
+  stale on a thin book, which is how breaches were detected far past the level.
+- **Bracket legs are DAY orders that expire at the regular close.**
+  `evaluate_and_close_stops` skips natively-bracketed positions only while the
+  regular session is open; after the close it automatically resumes soft
+  enforcement for them. Signal exits and the EOD flatten cancel resting legs
+  before closing (existing `_cancel_symbol_orders` path), so no orphaned leg
+  can double-sell.
+- **Trade records and the position info popup carry a `native_bracket` flag**
+  and the entry rationale now states whether the stop/target rest on the
+  exchange or are enforced as soft levels each cycle.
+
 ## [v2.22.0] - 2026-07-10
 
 ### Added

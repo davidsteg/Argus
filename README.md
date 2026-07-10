@@ -52,14 +52,18 @@ active US equities, refreshed every 15 minutes):
 5. **News sentiment** — Alpaca headlines scored by Claude (keyword
    heuristic without an `ANTHROPIC_API_KEY`); bearish news blocks the
    trade.
-6. **Adaptive exit & sizing** — bracket stop/target distances are ATR
-   multiples (a quiet megacap gets a tight bracket, a high-beta mover a
-   wide one), and share count is chosen so hitting the stop loses about
-   `RISK_PER_TRADE_USD`, capped by `POSITION_SIZE_USD` notional.
-7. **Signal exit** — on top of the resting bracket, a held long is closed
-   early at market when RSI recovers past `rsi_exit_signal` (the mirror of
-   the entry trigger): the mean reversion has played out, so bank the
-   bounce instead of waiting for the take-profit. The bracket's stop still
+6. **Adaptive exit & sizing** — stop/target distances are ATR multiples
+   (a quiet megacap gets a tight bracket, a high-beta mover a wide one),
+   and share count is chosen so hitting the stop loses about
+   `RISK_PER_TRADE_USD`, capped by `POSITION_SIZE_USD` notional. During
+   the regular session the levels rest on the exchange as native bracket
+   legs (OCO take-profit + stop-market); pre/post-market — where Alpaca
+   rejects brackets — they are soft levels enforced by the engine each
+   poll cycle against the live quote.
+7. **Signal exit** — on top of the stop/target, a held long is closed
+   early when RSI recovers past `rsi_exit_signal` (the mirror of the
+   entry trigger): the mean reversion has played out, so bank the
+   bounce instead of waiting for the take-profit. The stop still
    guards the downside independently.
 
 ### Safety nets
@@ -67,10 +71,12 @@ active US equities, refreshed every 15 minutes):
   everything, persist `KILLED`.
 - Dashboard **EMERGENCY HARD STOP** talks directly to Alpaca,
   independent of the engine.
-- Bracket orders mean every position always has a stop and a target.
-- **End-of-day flatten** — bracket legs are DAY orders that expire at the
-  bell, so everything is closed `eod_flatten_minutes` (default 10) before
-  the close; no position is ever held overnight without a stop.
+- Every position always has a stop and a target — resting on the exchange
+  during regular hours, engine-enforced soft levels otherwise.
+- **End-of-day flatten** — entries and bracket legs are DAY orders that
+  expire at the (extended) close, so everything is closed
+  `eod_flatten_minutes` (default 10) before it; no position is ever held
+  overnight without a stop.
 - **Too-quiet gate** — symbols whose ATR-scaled stop would collapse onto
   the percentage floor are skipped: a stop inside bar noise is a coin
   flip that loses the spread.

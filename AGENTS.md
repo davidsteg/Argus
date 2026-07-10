@@ -13,13 +13,18 @@ release pipeline, and mistakes already made and fixed once.
   is ever genuinely wanted, that is a deliberate, reviewed, standalone
   change — not a side effect of something else.
 - **Every entry records a stop_loss and take_profit** on `_open_entries` at
-  submission, and `evaluate_and_close_stops` enforces them every cycle. Since
-  v2.16.0 the bot trades the full extended session (4 AM–8 PM ET), where Alpaca
-  forbids bracket/market orders — so entries and exits are `extended_hours`
-  limit orders and the stop/target are SOFT (polled, not resting on the
-  exchange). Never submit an entry without computing and recording both levels,
-  and never route a close through a market order or `close_all_positions`
-  (rejected pre/post-market) — use the limit-close path.
+  submission. Enforcement is hybrid since v2.23.0: regular-session equity
+  entries carry native exchange-side bracket legs (OCO take-profit +
+  stop-market, `build_bracket_entry_order`), while pre/post-market and crypto
+  entries — where Alpaca rejects brackets — are `extended_hours`/GTC limit
+  orders whose levels are SOFT, enforced by `evaluate_and_close_stops` each
+  cycle against the live quote. Bracket legs are DAY orders that die at the
+  regular close; the soft path automatically resumes covering those positions
+  (`native_bracket` + `bracket_entry_allowed()` gate the skip). Never submit
+  an entry without computing and recording both levels, never weaken the
+  soft-enforcement fallback, and never route a close through a market order
+  or `close_all_positions` (rejected pre/post-market) — use the limit-close
+  path.
 - **The daily kill-sequence and dashboard EMERGENCY HARD STOP must always
   work independently of engine state** — `EngineController.kill()` and
   the frontend's `execute_hard_stop()` both construct their own

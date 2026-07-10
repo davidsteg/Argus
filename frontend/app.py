@@ -2961,15 +2961,21 @@ def dashboard() -> None:
                     "decision capture, or its entry metadata is unavailable."
                 ).classes("text-sm text-gray-300 leading-relaxed")
 
-            # Soft stop/target status — the levels the bot is enforcing each
-            # cycle, with the current price so you can see how close it is.
+            # Stop/target status — resting exchange-side bracket legs for
+            # regular-session entries, engine-polled soft levels otherwise —
+            # with the current price so you can see how close it is.
             tp = entry.get("take_profit")
             sl = entry.get("stop_loss")
             current = pos.get("current_price")
+            levels_label = (
+                "🎯 Stop / target (resting on the exchange)"
+                if entry.get("native_bracket")
+                else "🎯 Soft stop / target (polled each cycle)"
+            )
             with ui.column().classes(
                 f"w-full gap-1 {BG_APP} rounded-lg p-3 border border-[#222938]"
             ):
-                ui.label("🎯 Soft stop / target (polled each cycle)").classes(
+                ui.label(levels_label).classes(
                     "text-sm font-semibold text-white"
                 )
                 with ui.row().classes("w-full justify-between py-1 gap-3"):

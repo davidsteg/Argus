@@ -15,11 +15,15 @@ shared bot_config table, which this engine re-reads on every cycle so
 new parameters are absorbed seamlessly without a restart.
 
 Trading window: the full extended-hours session, 4:00 AM – 8:00 PM ET
-(pre-market + regular + after-hours). Alpaca forbids bracket and market
-orders outside the regular session, so every entry and exit is a plain
-extended_hours limit order and the stop/target are SOFT: enforced by the
-engine each poll cycle rather than resting on the exchange. Between polls
-(poll_interval_seconds) price can gap through a level — the accepted
+(pre-market + regular + after-hours). Stop/target enforcement is hybrid:
+entries during the REGULAR session carry native exchange-side bracket legs
+(OCO take-profit limit + stop-market), so a breach fills immediately;
+Alpaca forbids brackets outside the regular session, so pre/after-market
+entries are plain extended_hours limit orders whose stop/target are SOFT —
+enforced by the engine each poll cycle against the live quote. Bracket
+legs are DAY orders that die at the regular close, after which the soft
+enforcement covers those positions too. Between polls
+(poll_interval_seconds) price can gap through a soft level — the accepted
 tradeoff for trading the widest possible window.
 
 Safety:
@@ -555,14 +559,30 @@ class ArgusBot:
             symbol, price, stop_distance, target_distance, is_long=True
         )
 
-        # The market adapter builds the marketable-limit entry (equity:
-        # extended-hours DAY; crypto: GTC) priced entry_slip_pct through the
-        # last trade; the ATR stop/target above are enforced as soft levels
-        # each cycle (see evaluate_and_close_stops).
-        order_request = self.market.build_entry_order(
-            symbol, OrderSide.BUY, qty, price,
-            self.config.get("entry_slip_pct", 0.001),
-        )
+        # Regular session: the stop/target rest ON the exchange as OCO
+        # bracket legs, so a breach fills immediately instead of waiting out
+        # the poll cycle (Jul 8–10: polled soft stops slipped 2–4× their
+        # designed risk). Outside the regular session (or crypto) Alpaca
+        # rejects brackets, so the marketable-limit entry stands alone and
+        # the levels are enforced as soft checks each cycle
+        # (see evaluate_and_close_stops).
+        native_bracket = self.market.bracket_entry_allowed()
+        if native_bracket:
+            order_request = self.market.build_bracket_entry_order(
+                symbol, OrderSide.BUY, qty, price,
+                self.config.get("entry_slip_pct", 0.001),
+                take_profit, stop_loss,
+            )
+            # Record the exact resting-leg prices (clamped a tick past the
+            # parent limit) so trade records and the soft-stop fallback that
+            # takes over after the legs expire match the exchange.
+            take_profit = float(order_request.take_profit.limit_price)
+            stop_loss = float(order_request.stop_loss.stop_price)
+        else:
+            order_request = self.market.build_entry_order(
+                symbol, OrderSide.BUY, qty, price,
+                self.config.get("entry_slip_pct", 0.001),
+            )
         try:
             order = await asyncio.to_thread(self.trading.submit_order, order_request)
         except Exception as exc:
@@ -583,6 +603,7 @@ class ArgusBot:
             "sentiment_source": signal.get("sentiment_source"),
             "stop_loss": stop_loss,
             "take_profit": take_profit,
+            "native_bracket": native_bracket,
             "entry_reason": (
                 f"RSI {signal['rsi']:.1f} was oversold (below the "
                 f"{self.config['rsi_buy_signal']:.0f} buy level) while the "
@@ -596,7 +617,12 @@ class ArgusBot:
                 f"({signal.get('sentiment_source', '?')}) cleared the "
                 f"{self.config['news_cutoff']:.2f} cutoff, so a long was "
                 f"opened with a {self.config['atr_stop_mult']:.1f}×ATR stop "
-                f"and {self.config['atr_target_mult']:.1f}×ATR target."
+                f"and {self.config['atr_target_mult']:.1f}×ATR target"
+                + (
+                    " resting on the exchange as bracket legs."
+                    if native_bracket
+                    else " enforced as soft levels each cycle."
+                )
             ),
         }
         self.db.add_log(
@@ -605,7 +631,9 @@ class ArgusBot:
             f"VWAP ${signal['vwap']:.2f} | ATR ${signal['atr']:.3f} | "
             f"sentiment {signal['sentiment']:.2f} "
             f"({signal.get('sentiment_source', '?')}) | TP ${take_profit:.2f} | "
-            f"SL ${stop_loss:.2f} | risk ~${qty * stop_distance:.0f} | "
+            f"SL ${stop_loss:.2f} "
+            f"({'exchange bracket' if native_bracket else 'soft levels'}) | "
+            f"risk ~${qty * stop_distance:.0f} | "
             f"order {getattr(order, 'id', '?')}",
         )
         logger.info("Submitted limit BUY for %s x%g @ ~%.2f", symbol, qty, price)
@@ -645,18 +673,29 @@ class ArgusBot:
             )
             return
 
-        # Short: take-profit BELOW entry, stop-loss ABOVE (soft levels enforced
-        # by evaluate_and_close_stops), rounded to the market's own tick.
+        # Short: take-profit BELOW entry, stop-loss ABOVE, rounded to the
+        # market's own tick.
         take_profit, stop_loss = self._bracket_levels(
             symbol, price, stop_distance, target_distance, is_long=False
         )
 
-        # Marketable limit priced entry_slip_pct BELOW the last trade (equity
-        # short entry; crypto never shorts — short_enabled is off in its config).
-        order_request = self.market.build_entry_order(
-            symbol, OrderSide.SELL, qty, price,
-            self.config.get("entry_slip_pct", 0.001),
-        )
+        # Regular session: exchange-side OCO bracket legs; otherwise a plain
+        # marketable limit with soft-level enforcement (see place_limit_buy).
+        # Crypto never shorts — short_enabled is off in its config.
+        native_bracket = self.market.bracket_entry_allowed()
+        if native_bracket:
+            order_request = self.market.build_bracket_entry_order(
+                symbol, OrderSide.SELL, qty, price,
+                self.config.get("entry_slip_pct", 0.001),
+                take_profit, stop_loss,
+            )
+            take_profit = float(order_request.take_profit.limit_price)
+            stop_loss = float(order_request.stop_loss.stop_price)
+        else:
+            order_request = self.market.build_entry_order(
+                symbol, OrderSide.SELL, qty, price,
+                self.config.get("entry_slip_pct", 0.001),
+            )
         try:
             order = await asyncio.to_thread(self.trading.submit_order, order_request)
         except Exception as exc:
@@ -677,6 +716,7 @@ class ArgusBot:
             "sentiment_source": signal.get("sentiment_source"),
             "stop_loss": stop_loss,
             "take_profit": take_profit,
+            "native_bracket": native_bracket,
             "entry_reason": (
                 f"RSI {signal['rsi']:.1f} was overbought (above the "
                 f"{self.config['rsi_short_signal']:.0f} short level) while "
@@ -691,7 +731,12 @@ class ArgusBot:
                 f"{1.0 - self.config['news_cutoff']:.2f} short cutoff (not "
                 f"too bullish to fade), so a short was opened with a "
                 f"{self.config['atr_stop_mult']:.1f}×ATR stop and "
-                f"{self.config['atr_target_mult']:.1f}×ATR target."
+                f"{self.config['atr_target_mult']:.1f}×ATR target"
+                + (
+                    " resting on the exchange as bracket legs."
+                    if native_bracket
+                    else " enforced as soft levels each cycle."
+                )
             ),
         }
         self.db.add_log(
@@ -700,7 +745,9 @@ class ArgusBot:
             f"VWAP ${signal['vwap']:.2f} | ATR ${signal['atr']:.3f} | "
             f"sentiment {signal['sentiment']:.2f} "
             f"({signal.get('sentiment_source', '?')}) | TP ${take_profit:.2f} | "
-            f"SL ${stop_loss:.2f} | risk ~${qty * stop_distance:.0f} | "
+            f"SL ${stop_loss:.2f} "
+            f"({'exchange bracket' if native_bracket else 'soft levels'}) | "
+            f"risk ~${qty * stop_distance:.0f} | "
             f"order {getattr(order, 'id', '?')}",
         )
         logger.info("Submitted limit SELL for %s x%g @ ~%.2f", symbol, qty, price)
@@ -741,8 +788,24 @@ class ArgusBot:
         frames: Dict[str, pd.DataFrame],
         position: Dict[str, Any],
     ) -> Optional[float]:
-        """Best available current price: freshest 1-minute bar close, else the
-        latest trade, else the position's last synced price."""
+        """Best available current price for stop/target checks, freshest
+        source first: the live quote's exit side (the bid a long would sell
+        into, the ask a short must buy back). The 1-minute bar close can be
+        tens of seconds stale on a thin book — exactly when a breached stop
+        most needs catching (Jul 8–10: soft stops detected 2–4× past their
+        level off stale bar closes). Falls back to the bar close, then the
+        latest trade, then the position's last synced price."""
+        is_long = float(position.get("qty", 0.0)) > 0
+        try:
+            quote = await asyncio.to_thread(self.market.latest_quote, symbol)
+        except Exception as exc:
+            logger.warning("Quote fetch failed for %s: %s", symbol, exc)
+            quote = None
+        if quote is not None:
+            bid, ask = quote
+            price = bid if is_long else ask
+            if price and price > 0:
+                return float(price)
         bars = frames.get(symbol)
         if bars is not None and not bars.empty:
             return float(bars["close"].iloc[-1])
@@ -758,15 +821,21 @@ class ArgusBot:
     async def evaluate_and_close_stops(
         self, portfolio: Dict[str, Any], frames: Dict[str, pd.DataFrame]
     ) -> Dict[str, str]:
-        """Protective soft stop/target for held positions — the replacement for
-        the exchange-side bracket, which Alpaca forbids in extended hours.
+        """Protective soft stop/target for held positions — the fallback for
+        the exchange-side bracket, which Alpaca forbids outside the regular
+        session.
 
         Each cycle, compare the latest price against the stop_loss/take_profit
         recorded at entry and close the position when a level is breached. This
         is polled every poll_interval_seconds, so price can gap through a level
         between checks — the accepted tradeoff for trading the extended
-        session. Runs before the entry gates so a stop is always honoured."""
+        session. Positions entered with a native bracket are skipped while
+        their legs rest on the exchange (regular session); the DAY legs die at
+        the regular close, after which this soft enforcement resumes for them
+        automatically. Runs before the entry gates so a stop is always
+        honoured."""
         exits: Dict[str, str] = {}
+        native_bracket_resting = self.market.bracket_entry_allowed()
         for position in portfolio["positions"]:
             symbol = position["symbol"]
             if symbol in self._closing:
@@ -779,6 +848,12 @@ class ArgusBot:
             take_profit = entry.get("take_profit")
             if stop_loss is None and take_profit is None:
                 continue  # adopted/legacy position with no recorded levels
+            if entry.get("native_bracket") and native_bracket_resting:
+                # The exchange enforces this position's stop/target via its
+                # resting OCO legs; racing them with a soft close would
+                # double-sell. (Once the regular session ends the legs have
+                # expired and the skip stops applying.)
+                continue
             price = await self._latest_price(symbol, frames, position)
             if price is None:
                 continue

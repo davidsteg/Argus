@@ -10,9 +10,37 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.22.0"
+__version__ = "2.23.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.23.0",
+        "date": "2026-07-11",
+        "title": "Exchange-side brackets in regular hours + quote-first soft stops",
+        "notes": [
+            "Regular-session equity entries now carry native exchange-side "
+            "bracket legs (OCO take-profit limit + stop-market) instead of "
+            "relying on the engine's 60-second poll. The Jul 8–10 review "
+            "showed polled soft stops filling 2–4× past their level on thin "
+            "movers (NVVE: $16 designed risk, $61.54 realized) — with resting "
+            "legs the exchange fills the breach immediately. Outside regular "
+            "hours and for crypto, where Alpaca rejects brackets, the "
+            "soft-level path is unchanged.",
+            "Soft stop/target checks now price off the live quote's exit side "
+            "(the bid a long sells into, the ask a short buys back) before "
+            "falling back to the 1-minute bar close, which can be tens of "
+            "seconds stale on a thin book — late detection was the other half "
+            "of the stop slippage.",
+            "Bracket legs are DAY orders that expire at the regular close; "
+            "evaluate_and_close_stops automatically resumes soft enforcement "
+            "for those positions in after-hours. Signal exits and the EOD "
+            "flatten cancel resting legs before closing, so no orphaned leg "
+            "can double-sell.",
+            "Trade records and the position info popup now say whether a "
+            "position's levels rest on the exchange (native_bracket) or are "
+            "enforced as soft levels each cycle.",
+        ],
+    },
     {
         "version": "2.22.0",
         "date": "2026-07-10",
