@@ -9,6 +9,22 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.18.3] - 2026-07-10
+
+### Fixed
+- **Crypto churn: cooldown after every close, not just losses.** Cooldown
+  only triggered on losing trades — a winning exit left the symbol immediately
+  eligible for re-entry. On low-volatility crypto pairs (PAXG/USD being the
+  live example), RSI oscillates around the buy/exit thresholds so the bot
+  churned every minute: buy → RSI recovers → signal-exit for a tiny profit →
+  no cooldown → re-buy next cycle, dozens of times in a row.
+  `reconcile_closed_trade` now starts a cooldown on every close regardless of
+  PnL sign.
+- **Dashboard cross-market leak guard.** The positions and trade history
+  render functions now filter by `market_owns` (crypto symbols carry a `/`,
+  equities never do) before displaying, so a cross-market leak in the DB can
+  never surface in the wrong market's tab.
+
 ## [v2.18.2] - 2026-07-10
 
 ### Fixed

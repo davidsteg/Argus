@@ -10,9 +10,30 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.18.2"
+__version__ = "2.18.3"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.18.3",
+        "date": "2026-07-10",
+        "title": "Fix crypto churn: cooldown after every close, not just losses",
+        "notes": [
+            "Cooldown only triggered on losing trades — a winning exit left "
+            "the symbol immediately eligible for re-entry. On low-volatility "
+            "crypto pairs (PAXG/USD being the live example), RSI oscillates "
+            "around the buy/exit thresholds so the bot churned every minute: "
+            "buy → RSI recovers → signal-exit for a tiny profit → no "
+            "cooldown → re-buy next cycle, dozens of times in a row.",
+            "reconcile_closed_trade now starts a cooldown on every close "
+            "regardless of PnL sign. The RSI oscillation that caused the churn "
+            "now hits a cooldown wall and the bot sits out for "
+            "cooldown_minutes before re-evaluating the symbol.",
+            "Defense-in-depth: the dashboard's positions and trade history "
+            "render functions now filter by market_owns (crypto symbols carry "
+            "a /, equities never do) before displaying, so a cross-market "
+            "leak in the DB can never surface in the wrong market's tab.",
+        ],
+    },
     {
         "version": "2.18.2",
         "date": "2026-07-10",

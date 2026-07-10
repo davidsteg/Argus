@@ -2284,7 +2284,11 @@ def dashboard() -> None:
                       timeout=10000)
 
     def render_positions(snapshot: Dict[str, Any]) -> None:
-        positions = snapshot["positions"]
+        market = ui_state["market"]
+        positions = [
+            p for p in snapshot["positions"]
+            if market_owns(p["symbol"], market)
+        ]
         positions_empty.set_visibility(not positions)
         positions_container.clear()
         with positions_container:
@@ -2455,7 +2459,11 @@ def dashboard() -> None:
                         )
 
     def render_trades(snapshot: Dict[str, Any]) -> None:
-        trades = snapshot["trades"]
+        market = ui_state["market"]
+        trades = [
+            t for t in snapshot["trades"]
+            if market_owns(t["symbol"], market)
+        ]
         stats = snapshot["trade_stats"]
         key = (len(trades), trades[0]["id"] if trades else None,
                round(snapshot["realized_today"], 4))

@@ -957,11 +957,13 @@ class ArgusBot:
         except Exception as exc:
             logger.error("Decision memory update failed for %s: %s", symbol, exc)
 
-        # Bench losers: an unknown exit price is treated as a loss too —
-        # the conservative assumption when reconciliation could not find
-        # the fill.
-        if realized is None or realized < 0:
-            self.start_cooldown(symbol)
+        # Cooldown after every close, not just losses. Without this a winning
+        # trade on a low-volatility symbol (e.g. PAXG/USD) churns every minute:
+        # buy → RSI recovers → signal-exit for a tiny profit → no cooldown →
+        # re-buy next cycle. The RSI oscillates around the buy/exit thresholds
+        # on quiet assets, so the bot must sit out a cooldown regardless of
+        # the PnL sign. An unknown exit price is still treated conservatively.
+        self.start_cooldown(symbol)
 
     # ------------------------------------------------------------------ #
     # risk management
