@@ -92,6 +92,7 @@ _MARKET_DEFAULT_OVERRIDES: Dict[str, Dict[str, float]] = {
     "crypto": {
         "min_price_usd": 0.0,
         "eod_flatten_minutes": 0.0,
+        "short_enabled": 0.0,  # crypto is spot-only — shorts are impossible
     },
 }
 
@@ -288,6 +289,10 @@ class Database:
                 if row["key"] in DEFAULT_CONFIG
             }
         )
+        # Hard invariants that must never be weakened by the optimizer or
+        # dashboard, regardless of what sits in the DB.
+        if os.getenv("MARKET", "equity").strip().lower() == "crypto":
+            config["short_enabled"] = 0.0  # crypto is spot-only
         return config
 
     def set_config(self, updates: Dict[str, float]) -> None:

@@ -9,6 +9,18 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.17.2] - 2026-07-10
+
+### Fixed
+- **Crypto engine: hard-disable shorts — spot-only, can't borrow.** The crypto
+  engine's `MARKET=crypto` default overrides didn't force `short_enabled=0`, so
+  the optimizer or dashboard could flip it on. The engine then submitted SELL
+  orders for crypto pairs, which Alpaca rejected with "insufficient balance"
+  (spot-only — you can't short what you don't own). Two-layer fix: the crypto
+  seed defaults now include `short_enabled=0.0`, and `get_config()` enforces it
+  as a hard invariant when `MARKET=crypto` — same pattern as `paper=True` — so
+  no code path (optimizer, dashboard, manual DB edit) can weaken it.
+
 ## [v2.17.1] - 2026-07-10
 
 ### Fixed
