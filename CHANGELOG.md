@@ -9,6 +9,17 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.19.2] - 2026-07-10
+
+### Fixed
+- **Trade info chart: stale markers bleeding between trades (real fix).** The
+  v2.18.1 fix (setting `markLine=None`, `markArea=None`) didn't work because
+  NiceGUI's JSON serializer strips `None` values — they never reached the
+  ECharts client, so the old markers survived the merge. The chart reset now
+  calls `run_chart_method('setOption', options, ':true')` which invokes
+  ECharts' `setOption` with `notMerge: true` on the client, completely
+  replacing the chart state instead of merging into it.
+
 ## [v2.19.1] - 2026-07-10
 
 ### Fixed

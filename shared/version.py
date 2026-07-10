@@ -10,9 +10,24 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.19.1"
+__version__ = "2.19.2"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.19.2",
+        "date": "2026-07-10",
+        "title": "Fix trade info chart: stale markers bleeding between trades (real fix)",
+        "notes": [
+            "The v2.18.1 fix (setting markLine=None, markArea=None) didn't "
+            "work because NiceGUI's JSON serializer strips None values — they "
+            "never reached the ECharts client, so the old markers survived "
+            "the merge.",
+            "Real fix: the chart reset now calls run_chart_method('setOption', "
+            "options, ':true') which invokes ECharts' setOption with "
+            "notMerge: true on the client, completely replacing the chart "
+            "state instead of merging into it.",
+        ],
+    },
     {
         "version": "2.19.1",
         "date": "2026-07-10",
