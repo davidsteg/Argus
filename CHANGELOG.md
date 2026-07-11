@@ -9,6 +9,31 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.25.0] - 2026-07-11
+
+### Changed
+- **Mobile-first dashboard.** On screens ≤640 px the six tabs move into a
+  fixed bottom navigation bar (thumb-reach, safe-area aware, frosted-glass
+  backdrop) and the header collapses to a compact banner: subtitle hidden,
+  smaller balance/PnL/status figures, and icon-only RESUME / EMERGENCY HARD
+  STOP buttons with tooltips. The header is no longer sticky on phones —
+  the bottom nav owns navigation, so content gets the full viewport.
+- **No more sideways table scrolling on phones.** Active Positions collapses
+  to Symbol / Side / PnL + action buttons, Trade History to Closed / Symbol /
+  PnL / PnL% + ℹ; the hidden columns (qty, entry, exit, value, hold time)
+  remain one ℹ tap away in the existing info popup. Desktop layouts are
+  unchanged.
+
+### Added
+- **Home-screen app support.** `theme-color`, `mobile-web-app-capable` /
+  `apple-mobile-web-app-capable` and `viewport-fit=cover` meta tags — added
+  to the home screen, the dashboard now launches standalone with dark chrome
+  and respects notch safe areas.
+- **Visual polish.** Brand-gold active-tab indicator matching the Argus mark,
+  hover highlight on position/trade rows, slim dark scrollbars, and a live
+  browser-tab title (`▲ +$123.45 · Argus`) so today's PnL is readable from a
+  pinned tab.
+
 ## [v2.24.0] - 2026-07-11
 
 ### Added

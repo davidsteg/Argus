@@ -880,30 +880,75 @@ def cumulative_pnl_chart_options() -> Dict[str, Any]:
 def dashboard() -> None:
     ui.dark_mode().enable()
     ui.query("body").classes(f"{BG_APP}")
+    # Home-screen/app-shell hints: dark browser chrome, safe-area support on
+    # notched phones, standalone mode when added to the home screen.
     ui.add_head_html(
-        "<style>"
-        ".nicegui-content { padding: 0 !important; }"
-        ".pnl-pos { color: #34d399 !important; }"
-        ".pnl-neg { color: #f87171 !important; }"
-        ".pos-grid { display: grid;"
-        " grid-template-columns: 1.1fr 0.5fr 0.7fr 1fr 1fr 1.1fr 1.5fr 2.75rem 2.75rem;"
-        " column-gap: 0.5rem; align-items: center; width: 100%; }"
-        # Trade-history grid: a hand-built grid (not aggrid) so it lives inside
-        # the card cleanly and carries a per-row info button. A trailing fixed
-        # slot holds the ℹ action; the body scrolls vertically past ~32rem.
-        ".trades-grid { display: grid;"
-        " grid-template-columns:"
-        " 1.3fr 0.9fr 0.55fr 0.55fr 0.85fr 0.85fr 1.1fr 0.85fr 0.8fr 2.5rem;"
-        " column-gap: 0.5rem; align-items: center; width: 100%; }"
-        ".trades-scroll { max-height: 32rem; overflow-y: auto; }"
-        # On narrow screens the multi-column grids can't shrink to fit — give
-        # them a floor width and let the wrapper scroll sideways instead of
-        # squashing every column into unreadable slivers.
-        " @media (max-width: 640px) {"
-        " .pos-grid { min-width: 34rem; }"
-        " .trades-grid { min-width: 46rem; }"
-        " .scroll-x-mobile { overflow-x: auto; -webkit-overflow-scrolling: touch; } }"
-        "</style>"
+        '<meta name="viewport" content="width=device-width, initial-scale=1,'
+        ' viewport-fit=cover"/>'
+        '<meta name="theme-color" content="#0e1117"/>'
+        '<meta name="mobile-web-app-capable" content="yes"/>'
+        '<meta name="apple-mobile-web-app-capable" content="yes"/>'
+        '<meta name="apple-mobile-web-app-status-bar-style"'
+        ' content="black-translucent"/>'
+    )
+    ui.add_head_html(
+        """<style>
+        .nicegui-content { padding: 0 !important; }
+        .pnl-pos { color: #34d399 !important; }
+        .pnl-neg { color: #f87171 !important; }
+        .pos-grid { display: grid;
+          grid-template-columns: 1.1fr 0.5fr 0.7fr 1fr 1fr 1.1fr 1.5fr 2.75rem 2.75rem;
+          column-gap: 0.5rem; align-items: center; width: 100%; }
+        /* Trade-history grid: a hand-built grid (not aggrid) so it lives inside
+           the card cleanly and carries a per-row info button. A trailing fixed
+           slot holds the ℹ action; the body scrolls vertically past ~32rem. */
+        .trades-grid { display: grid;
+          grid-template-columns:
+            1.3fr 0.9fr 0.55fr 0.55fr 0.85fr 0.85fr 1.1fr 0.85fr 0.8fr 2.5rem;
+          column-gap: 0.5rem; align-items: center; width: 100%; }
+        .trades-scroll { max-height: 32rem; overflow-y: auto; }
+        .row-hover { transition: background-color .15s; }
+        .row-hover:hover { background: rgba(57, 135, 229, .07); }
+        /* Brand-gold active tab — ties the nav to the Argus mark. */
+        .argus-tabs .q-tab__indicator { background: #d4a94a; }
+        .argus-tabs .q-tab--active { color: #eecf7a; }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-thumb { background: #2a3140; border-radius: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+
+        @media (max-width: 640px) {
+          /* The bottom nav owns navigation on phones — the header can scroll
+             away instead of eating a third of the viewport. */
+          .argus-header { position: static !important; }
+          /* Compact header actions (RESUME / HARD STOP) on phones — the
+             label element inside hides itself via Tailwind (hidden sm:block). */
+          .btn-compact { padding: 6px 10px !important; }
+          /* Positions collapse to Symbol / Side / PnL + actions; Qty, Entry,
+             Now and Value live in the ℹ popup. No sideways scrolling. */
+          .pos-grid { grid-template-columns: 1.2fr 0.7fr 1.8fr 2.4rem 2.4rem; }
+          .pos-grid > :nth-child(3), .pos-grid > :nth-child(4),
+          .pos-grid > :nth-child(5), .pos-grid > :nth-child(6) { display: none; }
+          /* Trades collapse to Closed / Symbol / PnL / PnL% + ℹ. */
+          .trades-grid { grid-template-columns: 1.1fr 0.9fr 1.1fr 0.9fr 2.2rem; }
+          .trades-grid > :nth-child(3), .trades-grid > :nth-child(4),
+          .trades-grid > :nth-child(5), .trades-grid > :nth-child(6),
+          .trades-grid > :nth-child(9) { display: none; }
+          .scroll-x-mobile { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+          /* Tabs become a fixed bottom navigation bar — thumb reach. */
+          .argus-tabs {
+            position: fixed; bottom: 0; left: 0; right: 0; z-index: 60;
+            background: rgba(19, 23, 34, .92);
+            -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+            border-top: 1px solid #2a3140; border-bottom: none !important;
+            padding-bottom: env(safe-area-inset-bottom);
+          }
+          .argus-tabs .q-tab { min-width: 0; padding: 0 2px; }
+          .argus-tabs .q-tab__label { font-size: 10px; }
+          .argus-tabs .q-tab__icon { font-size: 22px; }
+          /* Keep the last card clear of the bottom nav. */
+          .q-tab-panel { padding-bottom: calc(64px + env(safe-area-inset-bottom)) !important; }
+        }
+        </style>"""
     )
 
     # Active market for this browser session (equities by default). The header
@@ -1039,8 +1084,8 @@ def dashboard() -> None:
     # header banner
     # ------------------------------------------------------------------ #
     with ui.row().classes(
-        "w-full items-center justify-between gap-y-3 flex-wrap "
-        "px-4 sm:px-6 py-4 "
+        "argus-header w-full items-center justify-between gap-y-2 sm:gap-y-3 "
+        "flex-wrap px-3 sm:px-6 py-2.5 sm:py-4 "
         "bg-gradient-to-r from-[#131722] to-[#1a2030] "
         "border-b border-[#2a3140] sticky top-0 z-50"
     ):
@@ -1049,7 +1094,7 @@ def dashboard() -> None:
             with ui.column().classes("gap-0"):
                 with ui.row().classes("items-center gap-2"):
                     ui.label("ARGUS").classes(
-                        "text-2xl font-bold tracking-widest text-white"
+                        "text-xl sm:text-2xl font-bold tracking-widest text-white"
                     )
                     ui.button(f"v{__version__}", on_click=release_dialog.open).props(
                         "flat dense no-caps"
@@ -1057,8 +1102,11 @@ def dashboard() -> None:
                         "text-xs font-mono text-emerald-400 bg-[#1d2432] "
                         "px-2 py-0.5 rounded border border-[#2a3140]"
                     ).tooltip("Release notes")
+                # max-sm:hidden, not `hidden sm:block`: Quasar's own .hidden
+                # is !important in an earlier cascade layer and would keep
+                # the element hidden at every width.
                 ui.label("Short-Term Algorithmic Trading — Paper").classes(
-                    f"text-xs {TEXT_MUTED}"
+                    f"text-xs {TEXT_MUTED} max-sm:hidden"
                 )
 
         # Market switcher — only shown when a crypto engine is configured.
@@ -1104,22 +1152,25 @@ def dashboard() -> None:
                 "traces keep arriving within 3× the poll interval"
             )
 
-        with ui.row().classes("items-center gap-4 sm:gap-8 flex-wrap"):
-            with ui.column().classes("gap-0 items-end"):
+        with ui.row().classes(
+            "items-center gap-2 sm:gap-8 flex-wrap "
+            "w-full sm:w-auto justify-between sm:justify-end"
+        ):
+            with ui.column().classes("gap-0 items-start sm:items-end"):
                 ui.label("TOTAL BALANCE").classes(f"text-xs {TEXT_MUTED}")
                 balance_label = ui.label("$0.00").classes(
-                    "text-xl font-semibold text-white"
+                    "text-lg sm:text-xl font-semibold text-white"
                 )
-            with ui.column().classes("gap-0 items-end"):
+            with ui.column().classes("gap-0 items-start sm:items-end"):
                 ui.label("DAILY PNL").classes(f"text-xs {TEXT_MUTED}")
                 pnl_label = ui.label("$0.00").classes(
-                    "text-xl font-semibold text-green-400"
+                    "text-lg sm:text-xl font-semibold text-green-400"
                 )
                 pnl_pct_label = ui.label("").classes(f"text-xs {TEXT_MUTED}")
-            with ui.column().classes("gap-0 items-end"):
+            with ui.column().classes("gap-0 items-start sm:items-end"):
                 ui.label("STATUS").classes(f"text-xs {TEXT_MUTED}")
                 status_label = ui.label("● …").classes(
-                    "text-xl font-semibold text-green-400"
+                    "text-lg sm:text-xl font-semibold text-green-400"
                 )
 
             async def on_emergency_click() -> None:
@@ -1173,24 +1224,38 @@ def dashboard() -> None:
                     )
                     resume_button.enable()
 
-            resume_button = ui.button("RESUME", on_click=on_resume_click).classes(
-                "bg-emerald-700 hover:bg-emerald-600 text-white font-bold "
-                "px-5 py-3 rounded-lg shadow-lg shadow-emerald-900/40"
-            ).props("color=green-10 push")
+            # The label lives inside the button as a Tailwind-responsive
+            # element so phones get an icon-only button (the icon + tooltip
+            # carry the meaning) while desktop keeps the full wording.
+            resume_button = ui.button(
+                icon="play_arrow", on_click=on_resume_click
+            ).classes(
+                "btn-compact bg-emerald-700 hover:bg-emerald-600 text-white "
+                "font-bold px-3 sm:px-5 py-2 sm:py-3 rounded-lg shadow-lg "
+                "shadow-emerald-900/40"
+            ).props("color=green-10 push").tooltip("Resume the trading engine")
+            with resume_button:
+                ui.label("RESUME").classes("max-sm:hidden ml-2")
             resume_button.set_visibility(False)
 
             emergency_button = ui.button(
-                "EMERGENCY HARD STOP", on_click=on_emergency_click
+                icon="dangerous", on_click=on_emergency_click
             ).classes(
-                "bg-red-700 hover:bg-red-600 text-white font-bold "
-                "px-5 py-3 rounded-lg shadow-lg shadow-red-900/40"
-            ).props("color=red-10 push")
+                "btn-compact bg-red-700 hover:bg-red-600 text-white font-bold "
+                "px-3 sm:px-5 py-2 sm:py-3 rounded-lg shadow-lg "
+                "shadow-red-900/40"
+            ).props("color=red-10 push").tooltip(
+                "Cancel all orders, liquidate everything, stop the engine"
+            )
+            with emergency_button:
+                ui.label("EMERGENCY HARD STOP").classes("max-sm:hidden ml-2")
 
     # ------------------------------------------------------------------ #
     # tabs
     # ------------------------------------------------------------------ #
     with ui.tabs().classes(
-        "w-full px-2 sm:px-6 bg-[#131722] border-b border-[#2a3140] text-gray-300"
+        "argus-tabs w-full px-2 sm:px-6 bg-[#131722] "
+        "border-b border-[#2a3140] text-gray-300"
     ) as tabs:
         overview_tab = ui.tab("Overview", icon="dashboard")
         trades_tab = ui.tab("Trades", icon="receipt_long")
@@ -1211,7 +1276,8 @@ def dashboard() -> None:
                 with ui.column().classes("gap-4 grow-[3] basis-0 min-w-0"):
                     with card():
                         with ui.row().classes(
-                            "w-full items-center justify-between"
+                            "w-full items-center justify-between "
+                            "flex-wrap gap-y-2"
                         ):
                             ui.label("📈 Equity Curve").classes(
                                 "text-lg font-semibold text-white"
@@ -2258,7 +2324,7 @@ def dashboard() -> None:
         daily_pnl = snapshot["daily_pnl"]
         pnl_label.set_text(money(daily_pnl, signed=True))
         pnl_label.classes(
-            replace="text-xl font-semibold "
+            replace="text-lg sm:text-xl font-semibold "
             + ("text-green-400" if daily_pnl >= 0 else "text-red-400")
         )
         baseline = status["daily_start_balance"]
@@ -2266,10 +2332,21 @@ def dashboard() -> None:
             f"{daily_pnl / baseline * 100.0:+.2f}% today" if baseline > 0 else ""
         )
 
+        # Browser-tab ticker: today's PnL readable from a pinned/backgrounded
+        # tab without opening the dashboard.
+        try:
+            arrow = "▲" if daily_pnl >= 0 else "▼"
+            ui.run_javascript(
+                "document.title = "
+                + json.dumps(f"{arrow} {money(daily_pnl, signed=True)} · Argus")
+            )
+        except Exception:
+            pass
+
         running = status["status"] == STATUS_RUNNING
         status_label.set_text(f"● {status['status']}")
         status_label.classes(
-            replace="text-xl font-semibold "
+            replace="text-lg sm:text-xl font-semibold "
             + ("text-green-400" if running else "text-red-500")
         )
         killed = status["status"] == STATUS_KILLED
@@ -2403,7 +2480,7 @@ def dashboard() -> None:
                     else None
                 )
                 with ui.element("div").classes(
-                    "pos-grid py-1.5 border-b border-[#222938] text-sm"
+                    "pos-grid row-hover py-1.5 border-b border-[#222938] text-sm"
                 ):
                     ui.label(pos["symbol"]).classes("font-bold text-white")
                     side_color = "text-green-400" if side == "BUY" else "text-red-400"
@@ -2674,7 +2751,8 @@ def dashboard() -> None:
                     else None
                 )
                 with ui.element("div").classes(
-                    "trades-grid py-1.5 border-b border-[#222938] text-sm"
+                    "trades-grid row-hover py-1.5 border-b border-[#222938] "
+                    "text-sm"
                 ):
                     ui.label(fmt_short(trade["exit_time"])).classes(
                         "font-mono text-gray-300"

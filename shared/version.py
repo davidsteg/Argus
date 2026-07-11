@@ -10,9 +10,30 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.24.0"
+__version__ = "2.25.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.25.0",
+        "date": "2026-07-11",
+        "title": "Mobile-first dashboard: bottom tab bar, compact header, no sideways tables",
+        "notes": [
+            "On phones the six tabs move into a fixed bottom navigation bar "
+            "(thumb reach, app-style, safe-area aware) and the header "
+            "collapses to a compact banner with icon-only RESUME / HARD STOP "
+            "buttons — the controls no longer eat half the viewport.",
+            "Active Positions and Trade History no longer scroll sideways on "
+            "small screens: they collapse to the columns that matter (symbol, "
+            "side, PnL) and the full detail stays one ℹ tap away.",
+            "Added home-screen app support (theme-color, standalone mode, "
+            "viewport-fit) so the dashboard installs like an app on iOS and "
+            "Android.",
+            "Polish everywhere: brand-gold active-tab accent matching the "
+            "Argus mark, row hover highlights, slim dark scrollbars, and a "
+            "live browser-tab title that shows today's PnL from a "
+            "backgrounded tab.",
+        ],
+    },
     {
         "version": "2.24.0",
         "date": "2026-07-11",
