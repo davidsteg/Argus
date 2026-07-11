@@ -324,6 +324,13 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
     async def trades(limit: int = Query(50, ge=1, le=1000)) -> Dict[str, Any]:
         return {"trades": db.get_trades(limit)}
 
+    @app.get("/vetoes")
+    async def vetoes(limit: int = Query(50, ge=1, le=500)) -> Dict[str, Any]:
+        """Shadow ledger of gate-blocked signals (sentiment, VWAP re-check,
+        risk agent, portfolio manager) with each veto's resolved hypothetical
+        P&L — the evidence for whether a gate saves money or costs it."""
+        return {"stats": db.get_veto_stats(), "vetoes": db.get_vetoes(limit)}
+
     @app.get("/logs")
     async def logs(limit: int = Query(20, ge=1, le=500)) -> Dict[str, Any]:
         return {"logs": db.get_logs(limit)}

@@ -38,6 +38,8 @@ from dotenv import load_dotenv
 
 import universe
 from indicators import (
+    COST_PER_TRADE_PCT,
+    STOP_SLIPPAGE_PCT,
     bracket_distances,
     compute_atr,
     compute_rsi,
@@ -70,15 +72,12 @@ TRAIN_FRACTION = float(os.getenv("OPTIMIZER_TRAIN_FRACTION", "0.75"))
 # Post-close re-entry bench, mirrored from the live engine (1 bar ≈ 1 min).
 # Read from bot_config at runtime so it's tunable from the dashboard.
 
-# Trading friction applied to every simulated trade. Without it the
-# optimizer reliably promotes floor-tight brackets that backtest
-# beautifully and bleed the spread live (see 2026-07-08: +103% "train
-# return" selecting parameters that lost money the same afternoon).
-# COST is a round-trip fraction of notional (half-spread in and out);
-# stops additionally slip against the trade because they trigger market
-# orders.
-COST_PER_TRADE_PCT = float(os.getenv("OPTIMIZER_COST_PCT", "0.10")) / 100.0
-STOP_SLIPPAGE_PCT = float(os.getenv("OPTIMIZER_STOP_SLIP_PCT", "0.05")) / 100.0
+# Trading friction (COST_PER_TRADE_PCT / STOP_SLIPPAGE_PCT) is imported from
+# indicators.py — shared with the shadow-veto resolver so "what a vetoed
+# trade would have made" uses the same fill model as the backtest. Without
+# friction the optimizer reliably promotes floor-tight brackets that
+# backtest beautifully and bleed the spread live (see 2026-07-08: +103%
+# "train return" selecting parameters that lost money the same afternoon).
 
 
 def _publish_status(db, status: Dict[str, Any]) -> None:

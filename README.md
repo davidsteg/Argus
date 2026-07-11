@@ -145,6 +145,7 @@ the backend API.
 | `GET /regime` | current market regime (SPY trend + realized vol) |
 | `GET /signals` | dry-run of the full decision pipeline per symbol |
 | `GET /positions` `/trades` `/logs` `/version` | state snapshots |
+| `GET /vetoes` | shadow ledger of gate-blocked signals + per-gate hypothetical P&L |
 | `GET /optimizer/status` | live progress of a running grid search (phase, combinations, elapsed) |
 | `POST /optimize` | start the walk-forward grid search in the background |
 | `POST /kill` | emergency kill-sequence |

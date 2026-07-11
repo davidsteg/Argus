@@ -11,6 +11,8 @@ backtesting (bracket floors, ATR period) live here as well.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pandas as pd
 
@@ -23,6 +25,17 @@ ATR_PERIOD = 14
 # pure noise. Both live orders and backtest fills apply the same floors.
 MIN_STOP_PCT = 0.0035    # stop never tighter than 0.35 % of price
 MIN_TARGET_PCT = 0.0050  # target never tighter than 0.50 % of price
+
+# Trading friction applied to every SIMULATED trade — the optimizer's
+# backtest fills and the shadow ledger's vetoed-signal resolution. Shared
+# here so "what a vetoed trade would have made" and "what the optimizer
+# thinks a trade makes" can never drift apart. COST is a round-trip
+# fraction of notional (half-spread in and out); stops additionally slip
+# against the trade because a breached stop fills through the level.
+# NOTE: measured live stop slippage (Jul 8–10) ran far above this default —
+# calibrating these from realized fills is an open backlog item.
+COST_PER_TRADE_PCT = float(os.getenv("OPTIMIZER_COST_PCT", "0.10")) / 100.0
+STOP_SLIPPAGE_PCT = float(os.getenv("OPTIMIZER_STOP_SLIP_PCT", "0.05")) / 100.0
 
 
 def compute_rsi(closes: pd.Series, period: int) -> pd.Series:

@@ -60,13 +60,15 @@ from dotenv import load_dotenv
 import regime
 from analyst import get_analyst
 from indicators import (
+    COST_PER_TRADE_PCT,
+    STOP_SLIPPAGE_PCT,
     bracket_distances,
     compute_atr,
     compute_rsi,
     compute_vwap,
     stop_is_floored,
 )
-from market import make_adapter
+from market import US_EASTERN, make_adapter
 from sentiment import get_sentiment_provider
 from shared.database import STATUS_KILLED, STATUS_RUNNING, get_db
 from shared.version import __version__
@@ -121,6 +123,10 @@ class ArgusBot:
         self._cycle_count: int = 0
         self._review_task: Optional[asyncio.Task] = None
         self._screener_task: Optional[asyncio.Task] = None
+        # Shadow-veto resolution: background task + rate limiter (monotonic
+        # deadline of the earliest next run).
+        self._veto_task: Optional[asyncio.Task] = None
+        self._last_veto_resolution: float = 0.0
 
     # ------------------------------------------------------------------ #
     # loser cooldown
@@ -141,6 +147,178 @@ class ArgusBot:
         cd = self.config.get("cooldown_minutes", 30.0)
         if cd > 0:
             self._cooldowns[symbol] = time.monotonic() + cd * 60.0
+
+    # ------------------------------------------------------------------ #
+    # shadow tracking of vetoed signals
+    # ------------------------------------------------------------------ #
+
+    def _record_veto(
+        self,
+        signal: Dict[str, Any],
+        gate: str,
+        reason: str,
+        price: Optional[float] = None,
+    ) -> None:
+        """Shadow-record a signal a gate blocked, with the exact bracket and
+        size the engine would have traded, so the gate's hypothetical P&L is
+        measurable (see _resolve_vetoes). Without this ledger the sentiment /
+        VWAP-recheck / risk-agent / portfolio-manager gates run blind — no
+        way to tell whether their vetoes save money or cost it. Never raises:
+        losing a shadow record must not affect live trading."""
+        try:
+            entry_price = float(price if price is not None else signal["price"])
+            stop_distance, target_distance = bracket_distances(
+                entry_price,
+                float(signal["atr"]),
+                self.config["atr_stop_mult"],
+                self.config["atr_target_mult"],
+            )
+            qty = self.market.size_qty(
+                signal["symbol"],
+                self.config.get("position_size_usd", 500.0),
+                entry_price,
+                stop_distance,
+                self.config.get("risk_per_trade_usd", 20.0),
+            )
+            if qty <= 0:
+                return  # unsizeable — this trade could never have happened
+            if signal.get("side", "BUY") == "BUY":
+                stop_loss = entry_price - stop_distance
+                take_profit = entry_price + target_distance
+            else:
+                stop_loss = entry_price + stop_distance
+                take_profit = entry_price - target_distance
+            self.db.record_veto(
+                symbol=signal["symbol"],
+                side=signal.get("side", "BUY"),
+                gate=gate,
+                reason=str(reason)[:300],
+                price=entry_price,
+                qty=qty,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                dedupe_minutes=self.config.get("cooldown_minutes", 30.0),
+            )
+        except Exception as exc:
+            logger.error(
+                "Veto recording failed for %s: %s", signal.get("symbol"), exc
+            )
+
+    async def _resolve_vetoes(self) -> None:
+        """Resolve shadow-tracked vetoed signals against market data.
+
+        Replays each unresolved veto's bracket over the minute bars after
+        its timestamp: pessimistic first-touch (a bar that spans both levels
+        counts as a stop), the same friction model as the optimizer backtest
+        (COST_PER_TRADE_PCT round-trip, stops slip STOP_SLIPPAGE_PCT), an
+        end-of-day close for equities (the live engine never holds
+        overnight) and a 24-hour horizon for crypto. Deliberately simpler
+        than the live exit stack — no RSI signal exit — so a resolved
+        outcome means "what the bracket would have done", which if anything
+        FLATTERS the veto: the live engine banks winners early."""
+        try:
+            vetoes = self.db.get_unresolved_vetoes()
+            if not vetoes:
+                return
+            symbols = sorted({v["symbol"] for v in vetoes})
+            earliest = min(
+                datetime.fromisoformat(v["ts"]) for v in vetoes
+            ) - timedelta(minutes=1)
+            frames = await asyncio.to_thread(
+                self.market.fetch_bars, symbols, earliest
+            )
+            now = datetime.now(timezone.utc)
+            for veto in vetoes:
+                resolution = self._resolve_one_veto(
+                    veto, frames.get(veto["symbol"]), now
+                )
+                if resolution is not None:
+                    outcome, exit_price, hypo_pnl = resolution
+                    self.db.resolve_veto(
+                        veto["id"], outcome, exit_price, hypo_pnl
+                    )
+        except Exception as exc:
+            logger.error("Veto resolution failed: %s", exc)
+
+    def _resolve_one_veto(
+        self,
+        veto: Dict[str, Any],
+        bars: Optional[pd.DataFrame],
+        now: datetime,
+    ) -> Optional[Tuple[str, Optional[float], Optional[float]]]:
+        """(outcome, exit_price, hypo_pnl) for one veto, or None to retry
+        later (its trading horizon is still open)."""
+        entry_ts = datetime.fromisoformat(veto["ts"])
+        is_long = veto["side"] == "BUY"
+        entry = float(veto["price"])
+        qty = float(veto["qty"])
+        stop = float(veto["stop_loss"])
+        target = float(veto["take_profit"])
+
+        # Horizon: equities are flattened at the end of the entry's ET day;
+        # crypto positions are held at most 24 hours for this simulation.
+        if self.market.flatten_before_close:
+            entry_et = entry_ts.astimezone(US_EASTERN)
+            now_et = now.astimezone(US_EASTERN)
+            horizon_over = now_et.date() > entry_et.date() or (
+                now_et.date() == entry_et.date() and now_et.hour >= 20
+            )
+        else:
+            horizon_over = now - entry_ts >= timedelta(hours=24)
+
+        if bars is None or bars.empty:
+            return ("no_data", None, None) if horizon_over else None
+        index = bars.index
+        if getattr(index, "tz", None) is None:
+            index = index.tz_localize(timezone.utc)
+            bars = bars.set_axis(index)
+        window = bars[index > entry_ts]
+        if self.market.flatten_before_close and not window.empty:
+            # The live engine never holds overnight — only the entry's own
+            # ET session day counts.
+            et_dates = window.index.tz_convert("America/New_York").date
+            window = window[et_dates == entry_ts.astimezone(US_EASTERN).date()]
+        elif not window.empty:
+            window = window[window.index <= entry_ts + timedelta(hours=24)]
+        if window.empty:
+            return ("no_data", None, None) if horizon_over else None
+
+        exit_price: Optional[float] = None
+        outcome: Optional[str] = None
+        for high, low in zip(window["high"], window["low"]):
+            if is_long:
+                if low <= stop:  # pessimistic: stop before target intra-bar
+                    outcome, exit_price = "stop", stop
+                    break
+                if high >= target:
+                    outcome, exit_price = "target", target
+                    break
+            else:
+                if high >= stop:
+                    outcome, exit_price = "stop", stop
+                    break
+                if low <= target:
+                    outcome, exit_price = "target", target
+                    break
+        if outcome is None:
+            if not horizon_over:
+                return None
+            outcome = "eod" if self.market.flatten_before_close else "timeout"
+            exit_price = float(window["close"].iloc[-1])
+
+        # Same friction model as the optimizer backtest: round-trip cost on
+        # notional, and stop fills slip through the level against the trade.
+        if outcome == "stop":
+            exit_price = (
+                exit_price * (1.0 - STOP_SLIPPAGE_PCT)
+                if is_long
+                else exit_price * (1.0 + STOP_SLIPPAGE_PCT)
+            )
+        gross = (
+            (exit_price - entry) * qty if is_long else (entry - exit_price) * qty
+        )
+        hypo_pnl = gross - COST_PER_TRADE_PCT * entry * qty
+        return (outcome, exit_price, hypo_pnl)
 
     # ------------------------------------------------------------------ #
     # sentiment filter
@@ -254,6 +432,13 @@ class ArgusBot:
                     f"{sentiment:.2f} ({source}) <= cutoff "
                     f"{self.config['news_cutoff']:.2f} — skipped",
                 )
+                self._record_veto(
+                    {"symbol": symbol, "side": "BUY",
+                     "price": latest_close, "atr": atr},
+                    "sentiment",
+                    f"sentiment {sentiment:.2f} ({source}) <= cutoff "
+                    f"{self.config['news_cutoff']:.2f}",
+                )
                 return None
 
             return {
@@ -312,6 +497,13 @@ class ArgusBot:
                     f"{symbol}: RSI {latest_rsi:.1f} triggered SELL but sentiment "
                     f"{sentiment:.2f} ({source}) >= short cutoff "
                     f"{short_cutoff:.2f} — too bullish to short, skipped",
+                )
+                self._record_veto(
+                    {"symbol": symbol, "side": "SELL",
+                     "price": latest_close, "atr": atr},
+                    "sentiment",
+                    f"sentiment {sentiment:.2f} ({source}) >= short cutoff "
+                    f"{short_cutoff:.2f}",
                 )
                 return None
 
@@ -529,6 +721,13 @@ class ArgusBot:
         # data can already be above VWAP at the actual entry (see
         # 2026-07-10: passed at $62.50 bar close, filled at $66.41 ask).
         if not self._vwap_revalidate(signal, price):
+            self._record_veto(
+                signal,
+                "vwap_recheck",
+                f"live ask ${price:.2f} failed the VWAP gate the bar close "
+                f"${signal['price']:.2f} passed (VWAP ${signal['vwap']:.2f})",
+                price=price,
+            )
             return
 
         # Stop/target scale with the symbol's own volatility (ATR multiples
@@ -652,6 +851,13 @@ class ArgusBot:
         # Re-validate the VWAP gate against the live-repriced price (mirror
         # of the long-side re-check in place_limit_buy).
         if not self._vwap_revalidate(signal, price):
+            self._record_veto(
+                signal,
+                "vwap_recheck",
+                f"live bid ${price:.2f} failed the VWAP gate the bar close "
+                f"${signal['price']:.2f} passed (VWAP ${signal['vwap']:.2f})",
+                price=price,
+            )
             return
 
         stop_distance, target_distance = bracket_distances(
@@ -1474,6 +1680,16 @@ class ArgusBot:
             cycle["stage"] = "risk-kill"
             return
 
+        # Shadow-veto resolution, in the background every ~10 minutes.
+        # Scheduled BEFORE the session gate on purpose: equity vetoes only
+        # resolve (as end-of-day closes) once the market has closed, which
+        # is exactly when the later stages of this cycle never run.
+        if (
+            self._veto_task is None or self._veto_task.done()
+        ) and time.monotonic() - self._last_veto_resolution >= 600:
+            self._last_veto_resolution = time.monotonic()
+            self._veto_task = asyncio.create_task(self._resolve_vetoes())
+
         # Session gate — the adapter decides: equities trade the 4 AM–8 PM ET
         # extended session (derived from the trading calendar); crypto is
         # always open (24/7).
@@ -1634,6 +1850,9 @@ class ArgusBot:
                         "ANALYST",
                         f"Risk agent rejected {s['symbol']}: {risk.get('reason', 'no reason')}",
                     )
+                    self._record_veto(
+                        s, "risk_agent", risk.get("reason", "no reason")
+                    )
             pending_signals = filtered_signals
 
             # Phase 3: portfolio manager decides execution order. Silence is
@@ -1653,10 +1872,18 @@ class ArgusBot:
                         "ANALYST",
                         f"Portfolio manager rejected {s['symbol']}: {pm_result.get('reason', 'no reason')}",
                     )
+                    self._record_veto(
+                        s, "portfolio_manager",
+                        pm_result.get("reason", "no reason"),
+                    )
                 elif s["symbol"] not in approved:
                     self.db.add_log(
                         "ANALYST",
                         f"Portfolio manager did not approve {s['symbol']} — skipped",
+                    )
+                    self._record_veto(
+                        s, "portfolio_manager",
+                        "not approved (silence is not consent)",
                     )
                 else:
                     kept.append(s)

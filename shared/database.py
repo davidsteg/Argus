@@ -18,6 +18,10 @@ bot_config      dynamic strategy parameters (rewritten nightly by the optimizer)
 bot_status      single-row state machine: RUNNING / KILLED, equity, day anchor
 positions       active tickers with entry price, live price and unrealized PnL
 trades          historical executions with entry/exit timestamps and realized PnL
+vetoed_signals  shadow ledger of signals a gate blocked (sentiment, VWAP
+                re-check, risk agent, portfolio manager) with the bracket they
+                would have traded; resolved later against market data so each
+                gate's hypothetical P&L is measurable instead of guesswork
 logs            system event log with strict UTC ISO-8601 timestamps
 equity_history  periodic account-equity snapshots powering the dashboard curve
 runtime_state   JSON key/value blobs the engine publishes for the dashboard
@@ -32,7 +36,7 @@ import json
 import os
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -137,6 +141,26 @@ CREATE TABLE IF NOT EXISTS trades (
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_exit_time ON trades (exit_time);
+
+CREATE TABLE IF NOT EXISTS vetoed_signals (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           TEXT NOT NULL,
+    symbol       TEXT NOT NULL,
+    side         TEXT NOT NULL,
+    gate         TEXT NOT NULL,
+    reason       TEXT,
+    price        REAL NOT NULL,
+    qty          REAL NOT NULL,
+    stop_loss    REAL NOT NULL,
+    take_profit  REAL NOT NULL,
+    resolved     INTEGER NOT NULL DEFAULT 0,
+    outcome      TEXT,
+    exit_price   REAL,
+    hypo_pnl     REAL,
+    resolved_at  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_vetoed_signals_resolved ON vetoed_signals (resolved);
 
 CREATE TABLE IF NOT EXISTS logs (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -510,6 +534,127 @@ class Database:
             "gross_loss": float(row["gross_loss"]),
             "best": _optional_float(row["best"]),
             "worst": _optional_float(row["worst"]),
+        }
+
+    # ------------------------------------------------------------------ #
+    # vetoed signals (shadow tracking)
+    # ------------------------------------------------------------------ #
+
+    def record_veto(
+        self,
+        symbol: str,
+        side: str,
+        gate: str,
+        reason: str,
+        price: float,
+        qty: float,
+        stop_loss: float,
+        take_profit: float,
+        dedupe_minutes: float = 30.0,
+    ) -> bool:
+        """Shadow-record a signal a gate blocked, with the bracket it would
+        have traded, so the gate's hypothetical P&L can be resolved later
+        from market data. Returns False (no row) when the same symbol+gate
+        was already recorded within ``dedupe_minutes`` — the entry gates
+        re-fire every poll cycle, and counting each re-fire as a fresh
+        vetoed trade would inflate the ledger the way the live engine's
+        cooldown prevents for real trades."""
+        now = datetime.now(timezone.utc)
+        cutoff = (
+            now - timedelta(minutes=max(dedupe_minutes, 0.0))
+        ).isoformat(timespec="seconds")
+        with self._lock:
+            duplicate = self._conn.execute(
+                "SELECT 1 FROM vetoed_signals "
+                "WHERE symbol = ? AND gate = ? AND ts >= ? LIMIT 1",
+                (symbol, gate, cutoff),
+            ).fetchone()
+            if duplicate is not None:
+                return False
+            self._conn.execute(
+                "INSERT INTO vetoed_signals "
+                "(ts, symbol, side, gate, reason, price, qty, "
+                " stop_loss, take_profit) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    now.isoformat(timespec="seconds"),
+                    symbol,
+                    side,
+                    gate,
+                    reason,
+                    float(price),
+                    float(qty),
+                    float(stop_loss),
+                    float(take_profit),
+                ),
+            )
+            self._conn.commit()
+            return True
+
+    def get_unresolved_vetoes(self, limit: int = 200) -> List[Dict[str, Any]]:
+        rows = self._query(
+            "SELECT * FROM vetoed_signals WHERE resolved = 0 "
+            "ORDER BY id ASC LIMIT ?",
+            (limit,),
+        )
+        return [dict(row) for row in rows]
+
+    def resolve_veto(
+        self,
+        veto_id: int,
+        outcome: str,
+        exit_price: Optional[float],
+        hypo_pnl: Optional[float],
+    ) -> None:
+        self._execute(
+            "UPDATE vetoed_signals SET resolved = 1, outcome = ?, "
+            "exit_price = ?, hypo_pnl = ?, resolved_at = ? WHERE id = ?",
+            (
+                outcome,
+                _optional_float(exit_price),
+                _optional_float(hypo_pnl),
+                _utcnow(),
+                int(veto_id),
+            ),
+        )
+
+    def get_vetoes(self, limit: int = 100) -> List[Dict[str, Any]]:
+        rows = self._query(
+            "SELECT * FROM vetoed_signals ORDER BY id DESC LIMIT ?", (limit,)
+        )
+        return [dict(row) for row in rows]
+
+    def get_veto_stats(self) -> Dict[str, Any]:
+        """Per-gate aggregates over the shadow ledger: how many signals each
+        gate blocked, and what the resolved ones would have made or lost —
+        the number that decides whether a gate earns its keep."""
+        rows = self._query(
+            "SELECT gate, "
+            "  COUNT(*)                                        AS total, "
+            "  SUM(resolved)                                   AS resolved, "
+            "  COALESCE(SUM(CASE WHEN resolved = 1 "
+            "      THEN hypo_pnl END), 0)                      AS hypo_pnl, "
+            "  SUM(CASE WHEN resolved = 1 AND hypo_pnl > 0 "
+            "      THEN 1 ELSE 0 END)                          AS would_win, "
+            "  SUM(CASE WHEN resolved = 1 AND hypo_pnl <= 0 "
+            "      THEN 1 ELSE 0 END)                          AS would_lose "
+            "FROM vetoed_signals GROUP BY gate"
+        )
+        gates = {
+            row["gate"]: {
+                "total": int(row["total"]),
+                "resolved": int(row["resolved"] or 0),
+                "hypo_pnl": float(row["hypo_pnl"]),
+                "would_win": int(row["would_win"] or 0),
+                "would_lose": int(row["would_lose"] or 0),
+            }
+            for row in rows
+        }
+        return {
+            "gates": gates,
+            "total": sum(g["total"] for g in gates.values()),
+            "resolved": sum(g["resolved"] for g in gates.values()),
+            "hypo_pnl": sum(g["hypo_pnl"] for g in gates.values()),
         }
 
     # ------------------------------------------------------------------ #

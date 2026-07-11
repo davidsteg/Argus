@@ -358,6 +358,7 @@ def fetch_snapshot(
         "analyst_optimization": db.get_state("analyst_optimization"),
         "analyst_trades": db.get_state("analyst_trades"),
         "analyst_health": db.get_state("analyst_health"),
+        "veto_stats": db.get_veto_stats(),
         "analyst_config": db.get_state("analyst_config") or {},
         "analyst_call_log": db.get_state("analyst_call_log") or [],
         "analyst_review_history": db.get_state("analyst_review_history") or [],
@@ -1394,6 +1395,31 @@ def dashboard() -> None:
                         "w-full grid grid-cols-1 lg:grid-cols-2 "
                         "2xl:grid-cols-3 gap-3 mt-2"
                     )
+
+                # Shadow-tracked vetoes — measured hypothetical P&L of the
+                # signals each gate blocked, so "is this gate worth it?" is
+                # a number instead of a guess.
+                with card():
+                    card_title(
+                        "🚫 Shadow-tracked vetoes",
+                        "what blocked signals would have done",
+                    )
+                    ui.label(
+                        "Every signal a gate blocks (news sentiment, VWAP "
+                        "re-check, risk agent, portfolio manager) is recorded "
+                        "with the bracket it would have traded, then resolved "
+                        "against market data using the optimizer's friction "
+                        "model. Negative blocked P&L = the gate saved money. "
+                        "No RSI early exit is simulated, so results, if "
+                        "anything, flatter the vetoed trades."
+                    ).classes(f"text-xs {TEXT_MUTED}")
+                    vetoes_headline = ui.label("").classes(
+                        "text-sm font-semibold text-white mt-1"
+                    )
+                    vetoes_box = ui.column().classes("w-full gap-1")
+                    vetoes_empty = ui.label(
+                        "No vetoed signals recorded yet."
+                    ).classes(f"text-xs {TEXT_MUTED}")
 
                 # Connection & schedule config
                 with card():
@@ -3290,6 +3316,72 @@ def dashboard() -> None:
                             + ("text-rose-400" if errors else "text-gray-500")
                         )
 
+    VETO_GATE_LABELS = {
+        "sentiment": "📰 News sentiment",
+        "vwap_recheck": "📉 VWAP re-check",
+        "risk_agent": "🛡️ Risk agent",
+        "portfolio_manager": "💼 Portfolio manager",
+    }
+
+    def render_vetoes(snapshot: Dict[str, Any]) -> None:
+        stats = snapshot.get("veto_stats") or {}
+        gates = stats.get("gates") or {}
+        fingerprint = (
+            stats.get("total"),
+            stats.get("resolved"),
+            round(stats.get("hypo_pnl", 0.0) or 0.0, 2),
+        )
+        if render_state.get("vetoes_fp") == fingerprint:
+            return
+        render_state["vetoes_fp"] = fingerprint
+
+        total = int(stats.get("total") or 0)
+        vetoes_empty.set_visibility(total == 0)
+        vetoes_headline.set_visibility(total > 0)
+        vetoes_box.clear()
+        if total == 0:
+            return
+
+        resolved = int(stats.get("resolved") or 0)
+        pnl = float(stats.get("hypo_pnl") or 0.0)
+        verdict = (
+            "the gates saved money so far"
+            if pnl < 0
+            else "the gates cost money so far"
+            if pnl > 0
+            else "flat so far"
+        )
+        vetoes_headline.set_text(
+            f"Blocked signals would have made ${pnl:+,.2f} "
+            f"({resolved} of {total} resolved) — {verdict}."
+        )
+        with vetoes_box:
+            for gate, g in sorted(
+                gates.items(), key=lambda kv: kv[1]["total"], reverse=True
+            ):
+                g_pnl = float(g.get("hypo_pnl") or 0.0)
+                g_resolved = int(g.get("resolved") or 0)
+                # Negative blocked P&L = the veto avoided a loss = good.
+                pnl_color = (
+                    PNL_GREEN if g_pnl < 0
+                    else "text-rose-400" if g_pnl > 0
+                    else TEXT_MUTED
+                )
+                with ui.row().classes(
+                    "w-full items-center justify-between gap-3 flex-nowrap "
+                    "border-b border-[#222938] py-1"
+                ):
+                    ui.label(
+                        VETO_GATE_LABELS.get(gate, gate)
+                    ).classes("text-sm text-white shrink-0")
+                    ui.label(
+                        f"{g['total']} blocked · {g_resolved} resolved · "
+                        f"{g.get('would_win', 0)}W/{g.get('would_lose', 0)}L"
+                    ).classes(f"text-xs {TEXT_MUTED} truncate")
+                    ui.label(f"${g_pnl:+,.2f}").classes(
+                        f"text-sm font-mono {pnl_color} shrink-0"
+                    )
+
     def render_review_history(snapshot: Dict[str, Any]) -> None:
         history = snapshot.get("analyst_review_history") or []
         fingerprint = (
@@ -3709,6 +3801,7 @@ def dashboard() -> None:
             trade_empty,
         )
         render_analyst_agents(snapshot)
+        render_vetoes(snapshot)
         render_review_history(snapshot)
         render_call_log(snapshot)
 
