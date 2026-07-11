@@ -3649,9 +3649,12 @@ def dashboard() -> None:
                     "w-full gap-1 rounded-lg border border-[#2a3140] "
                     "bg-[#1d2432] px-3 py-2"
                 ):
-                    # Header row: timestamp, trigger badge, duration, outcome
+                    # Header row: timestamp, trigger badge, duration, outcome.
+                    # flex-wrap: with a real run the chip train (timestamp +
+                    # NIGHTLY + duration + REJECTED_ANALYST + analyst verdict)
+                    # is wider than a phone — wrapping beats sideways scroll.
                     with ui.row().classes(
-                        "w-full items-center gap-2 flex-nowrap"
+                        "w-full items-center gap-x-2 gap-y-1 flex-wrap"
                     ):
                         ui.label(fmt_short(run.get("started_at"))).classes(
                             "text-xs font-mono text-gray-300 shrink-0"
@@ -3685,8 +3688,11 @@ def dashboard() -> None:
                             )
                         ui.space()
                         if run.get("detail"):
+                            # Own full-width line on phones; inline right on
+                            # desktop. min-w-0 lets truncate actually shrink.
                             ui.label(run["detail"]).classes(
-                                f"text-[10px] {TEXT_MUTED} truncate"
+                                f"text-[10px] {TEXT_MUTED} truncate min-w-0 "
+                                "max-sm:w-full"
                             ).tooltip(run["detail"])
 
                     # Stats row: symbols, candidates, train/val

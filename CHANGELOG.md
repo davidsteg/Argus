@@ -9,6 +9,17 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.25.1] - 2026-07-11
+
+### Fixed
+- **Optimizer tab on phones.** The run-history header row (timestamp, trigger
+  badge, duration, outcome chip, analyst verdict, detail) was `flex-nowrap`
+  with rigid chips, so real runs — e.g. `NIGHTLY · 2h 19m · REJECTED_ANALYST ·
+  analyst: reject` — were wider than the screen and dragged the whole panel
+  into sideways scrolling. The chips now wrap, and the detail text moves to
+  its own truncated full-width line on small screens (tooltip still shows the
+  full text). Desktop keeps the single-line layout.
+
 ## [v2.25.0] - 2026-07-11
 
 ### Changed

@@ -10,9 +10,20 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.25.0"
+__version__ = "2.25.1"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.25.1",
+        "date": "2026-07-11",
+        "title": "Optimizer tab mobile fix",
+        "notes": [
+            "Optimizer run-history cards no longer force the whole page to "
+            "scroll sideways on phones: the chip row (timestamp, trigger, "
+            "duration, outcome, analyst verdict) wraps, and the detail text "
+            "gets its own truncated line. Desktop layout unchanged.",
+        ],
+    },
     {
         "version": "2.25.0",
         "date": "2026-07-11",
