@@ -10,9 +10,38 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.23.0"
+__version__ = "2.24.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.24.0",
+        "date": "2026-07-11",
+        "title": "Shadow-tracked vetoes, defanged optimizer override, visible fail-opens",
+        "notes": [
+            "Every signal a gate blocks — news sentiment, VWAP re-check, LLM "
+            "risk agent, LLM portfolio manager — is now shadow-recorded with "
+            "the exact bracket and share count it would have traded, then "
+            "resolved against market data with the optimizer's friction "
+            "model. The new Shadow-tracked vetoes card on the Analyst tab "
+            "(and GET /vetoes) answers, per gate, 'would the blocked trades "
+            "have made or lost money?' — previously pure guesswork.",
+            "The post-optimization LLM review is now a binary accept/reject "
+            "sanity check. Its retired 'override' action let the model pick "
+            "any rank from the TRAIN-window list (mostly combinations that "
+            "failed or never saw out-of-sample validation, shown with train "
+            "stats only) — in-sample cherry-picking by the least-validated "
+            "component. The reviewer now also receives the winner's "
+            "out-of-sample stats, so its overfitting judgment is informed.",
+            "Risk-agent and portfolio-manager fail-opens (agent unreachable "
+            "→ signals auto-approved un-gated) are now counted per session "
+            "in the analyst_health blob, exposed via GET /debug, and shown "
+            "as an amber banner on the Analyst tab — a dead Ollama can no "
+            "longer leave the bot silently un-gated for days.",
+            "The simulated-fill friction constants (COST_PER_TRADE_PCT, "
+            "STOP_SLIPPAGE_PCT) moved from optimizer.py to indicators.py so "
+            "the backtest and the shadow-veto resolver share one fill model.",
+        ],
+    },
     {
         "version": "2.23.0",
         "date": "2026-07-11",

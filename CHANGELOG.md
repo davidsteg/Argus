@@ -9,6 +9,41 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.24.0] - 2026-07-11
+
+### Added
+- **Shadow-tracking of vetoed signals.** Every signal a gate blocks — news
+  sentiment, VWAP re-check, LLM risk agent, LLM portfolio manager — is
+  recorded in a new `vetoed_signals` table with the exact bracket and share
+  count the engine would have traded (deduped per symbol+gate within the
+  cooldown window). A background resolver replays them against minute bars
+  every ~10 minutes: pessimistic first-touch stop/target, the optimizer's
+  friction model, end-of-day close for equities, 24 h timeout for crypto. The
+  per-gate hypothetical P&L is served at `GET /vetoes` and rendered as a
+  "Shadow-tracked vetoes" card on the Analyst tab — the gates were previously
+  running blind, with no evidence whether their vetoes save money or cost it.
+- **Fail-open visibility.** When the risk agent or portfolio manager is
+  unreachable, signals auto-approve (availability over gating) — now counted
+  per engine session in the `analyst_health` state blob, exposed via
+  `GET /debug`, and shown as an amber banner on the Analyst tab with the last
+  error. Previously the bot could run un-gated for days with only per-signal
+  log lines as evidence.
+
+### Changed
+- **The post-optimization LLM review is a binary accept/reject sanity check.**
+  The retired "override" action let the model install any rank from the
+  train-window list — mostly combinations that failed (or never saw) the
+  out-of-sample validation gate, shown to the model with train stats only.
+  That was in-sample parameter selection by the least-validated component,
+  overriding the most-validated one. An "override" (or any unknown action)
+  from the model now degrades to accept with a warning log. The reviewer also
+  receives the winner's out-of-sample validation stats, making the
+  overfitting call it's asked to make informed rather than blind.
+- **Simulated-fill friction constants moved to `indicators.py`**
+  (`COST_PER_TRADE_PCT`, `STOP_SLIPPAGE_PCT`, still env-tunable via
+  `OPTIMIZER_COST_PCT` / `OPTIMIZER_STOP_SLIP_PCT`) so the optimizer backtest
+  and the shadow-veto resolver can never drift onto different fill models.
+
 ## [v2.23.0] - 2026-07-11
 
 ### Changed
