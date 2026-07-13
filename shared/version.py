@@ -10,9 +10,44 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.25.1"
+__version__ = "2.26.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.26.0",
+        "date": "2026-07-13",
+        "title": "Regime gate on longs, position-protection watchdog, crypto close fix",
+        "notes": [
+            "New buys are now blocked whenever the index trades below its "
+            "EMA — calm or stressed. Jul 13 showed why: SPY drifted down on "
+            "quiet volatility (CAUTION) all session and 23 of 28 dip-buys "
+            "stopped out. Every blocked BUY is shadow-recorded as a new "
+            "'regime' veto gate, so within days the dashboard will show "
+            "what the gate saved (or cost) instead of guessing.",
+            "Fixed the crypto close-rejection loop: Alpaca charges crypto "
+            "fees in the coin itself, leaving 9-decimal balances, and the "
+            "close order rounded UP to 8 decimals — requesting one "
+            "billionth more than held, rejected forever. (AAVE sat 3.5 h "
+            "past its breached stop on Jul 13 retrying every cycle.) Close "
+            "quantities are now floored, and after 3 failed limit closes "
+            "the engine escalates to a full-position market close where "
+            "the market allows it (crypto: always; equities: regular "
+            "session).",
+            "New position-protection watchdog: every held position must "
+            "have working protection every cycle. Stop/target levels now "
+            "survive engine restarts (restored from the persisted entry "
+            "record — the hole that let VRAX ride untracked to a -$101.46 "
+            "EOD flatten), naked positions get ATR-scaled levels attached "
+            "at the current price, positions whose exchange bracket legs "
+            "vanished get soft enforcement re-armed, and anything "
+            "unmanageable for 3 cycles is closed.",
+            "Protection incidents are visible, not buried in logs: a red "
+            "banner on the Active Positions card flags stops that can't "
+            "execute and watchdog interventions (protection_health blob, "
+            "also on GET /debug). Repeated close failures no longer flood "
+            "the log — one line per streak plus every 10th attempt.",
+        ],
+    },
     {
         "version": "2.25.1",
         "date": "2026-07-11",

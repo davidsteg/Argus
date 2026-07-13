@@ -24,7 +24,21 @@ release pipeline, and mistakes already made and fixed once.
   an entry without computing and recording both levels, never weaken the
   soft-enforcement fallback, and never route a close through a market order
   or `close_all_positions` (rejected pre/post-market) — use the limit-close
+  path. ONE narrow exception (v2.26.0): after 3 consecutive failed limit
+  closes, `_market_close_fallback` may liquidate via `close_position` when
+  the adapter's `market_close_allowed()` says Alpaca accepts it (crypto:
+  24/7; equities: regular session only) — a breached stop that cannot
+  execute is strictly worse than a market fill (Jul 13: a crypto close was
+  qty-precision-rejected every cycle for 3.5 h while the position sat past
+  its stop). Do not widen this exception or make the market close a primary
   path.
+- **Every held position must stay protected** (v2.26.0): stop/target levels
+  are restored from the persisted `open_entries` blob when a position is
+  adopted after a restart, and `_ensure_position_protection` attaches
+  ATR-scaled levels to anything still naked (or closes it after 3 cycles
+  without data). Don't remove the watchdog call from `run_cycle` and don't
+  let a new code path create a position that isn't in `_open_entries` with
+  levels.
 - **The daily kill-sequence and dashboard EMERGENCY HARD STOP must always
   work independently of engine state** — `EngineController.kill()` and
   the frontend's `execute_hard_stop()` both construct their own
@@ -52,8 +66,11 @@ backend/
                   bot.py and optimizer.py so live signals and backtests
                   can never drift apart. Any indicator change goes here,
                   never duplicated into either caller.
-  regime.py       SPY trend + realized-vol classifier (RISK_ON/CAUTION/
-                  RISK_OFF); gates new entries only, never forces exits
+  regime.py       SPY trend + realized-vol classifier (TREND_UP/CAUTION/
+                  TREND_DOWN); gates new entries only, never forces exits.
+                  Since v2.26.0 any down-trend blocks new longs
+                  (blocks_long_entries), shadow-tracked as the "regime"
+                  veto gate
   sentiment.py    Alpaca news → Claude scorer → keyword heuristic →
                   neutral fallback, cached per symbol
   universe.py     static symbol list or dynamic most-actives watchlist

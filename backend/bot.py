@@ -127,6 +127,13 @@ class ArgusBot:
         # deadline of the earliest next run).
         self._veto_task: Optional[asyncio.Task] = None
         self._last_veto_resolution: float = 0.0
+        # symbol -> consecutive failed close submissions. Drives the
+        # last-resort market-close escalation and the protection banner;
+        # pruned in sync_portfolio when the position is gone.
+        self._close_failures: Dict[str, int] = {}
+        # symbol -> consecutive cycles the protection watchdog could not
+        # attach stop/target levels to an untracked position.
+        self._protect_failures: Dict[str, int] = {}
 
     # ------------------------------------------------------------------ #
     # loser cooldown
@@ -147,6 +154,45 @@ class ArgusBot:
         cd = self.config.get("cooldown_minutes", 30.0)
         if cd > 0:
             self._cooldowns[symbol] = time.monotonic() + cd * 60.0
+
+    # ------------------------------------------------------------------ #
+    # position-protection health (dashboard banner + GET /debug)
+    # ------------------------------------------------------------------ #
+
+    def reset_protection_health(self) -> None:
+        """Zero the protection counters at engine start, so the dashboard's
+        banner means this session — mirrors analyst_health."""
+        try:
+            self.db.set_state(
+                "protection_health",
+                {"levels_attached": 0, "forced_market_closes": 0,
+                 "protective_closes": 0, "close_failures": {},
+                 "last_event": None, "last_event_at": None},
+            )
+        except Exception as exc:
+            logger.error("Failed to reset protection health: %s", exc)
+
+    def _protection_event(self, counter: Optional[str], message: str) -> None:
+        """Count a protection incident and surface it (protection_health
+        blob → dashboard banner, GET /debug). A position running without a
+        working stop, or a stop that cannot execute, must be a visible
+        operational alarm, not a log line scrolling out of the buffer —
+        the 2026-07-13 AAVE close failed silently every cycle for 3.5 h.
+        Never raises: health reporting must not affect trading."""
+        try:
+            state = self.db.get_state("protection_health") or {}
+            if counter:
+                state[counter] = int(state.get(counter, 0) or 0) + 1
+            state["close_failures"] = {
+                s: n for s, n in self._close_failures.items() if n > 0
+            }
+            state["last_event"] = message[:200]
+            state["last_event_at"] = datetime.now(timezone.utc).isoformat(
+                timespec="seconds"
+            )
+            self.db.set_state("protection_health", state)
+        except Exception as exc:
+            logger.error("Failed to record protection event: %s", exc)
 
     # ------------------------------------------------------------------ #
     # shadow tracking of vetoed signals
@@ -1084,7 +1130,12 @@ class ArgusBot:
                     f"Soft {verb} hit: price ~${price:.2f} reached the "
                     f"${level:.2f} {verb} level."
                 )
-            await self._limit_close(symbol, position)
+            order = await self._limit_close(symbol, position)
+            if order is None:
+                # Close submission failed — _limit_close already logged and
+                # counted it; logging the SOFT STOP line here too would spam
+                # an identical TRADE entry every cycle until the close lands.
+                continue
             exits[symbol] = f"soft-{hit}-{side}"
             self.db.add_log(
                 "TRADE",
@@ -1092,6 +1143,144 @@ class ArgusBot:
                 f"~${price:.2f} — ${level:.2f} {hit} level breached",
             )
         return exits
+
+    async def _ensure_position_protection(
+        self, portfolio: Dict[str, Any], frames: Dict[str, pd.DataFrame]
+    ) -> None:
+        """Watchdog: every held position must have working protection.
+
+        The soft-stop loop can only enforce levels that exist and are being
+        checked; two holes let positions run naked in practice (VRAX -$101.46
+        equity, XTZ -$16.96 crypto): an adopted position with no recorded
+        stop/target is skipped by the soft loop forever, and a position
+        marked native_bracket is skipped while its exchange legs are assumed
+        to rest — even if those legs are gone. Each cycle this (a) re-arms
+        soft enforcement when a native bracket's legs are no longer resting,
+        and (b) attaches ATR-scaled levels (anchored at the CURRENT price —
+        protecting from here, not locking in the drawdown a naked position
+        already suffered) to any position without levels. If levels cannot
+        be computed for 3 consecutive cycles the position is closed: unmanageable
+        is worse than closed. Never raises."""
+        try:
+            checked_brackets: List[str] = []
+            for position in portfolio["positions"]:
+                symbol = position["symbol"]
+                qty = float(position.get("qty", 0.0))
+                if symbol in self._closing or qty == 0:
+                    continue
+                entry = self._open_entries.get(symbol)
+                if entry is None:
+                    continue  # adopted next sync; protected the cycle after
+                has_levels = (
+                    entry.get("stop_loss") is not None
+                    or entry.get("take_profit") is not None
+                )
+                if has_levels:
+                    if entry.get("native_bracket") and self.market.bracket_entry_allowed():
+                        checked_brackets.append(symbol)
+                    continue
+                await self._attach_protective_levels(symbol, position, frames)
+
+            # Trust-but-verify the exchange-side brackets in one batched
+            # order lookup: a position whose OCO legs are gone (cancelled,
+            # rejected, expired early) would otherwise sit in the soft-stop
+            # loop's skip branch with nothing enforcing its levels.
+            if checked_brackets:
+                open_orders = await asyncio.to_thread(
+                    self.trading.get_orders,
+                    GetOrdersRequest(
+                        status=QueryOrderStatus.OPEN, symbols=checked_brackets
+                    ),
+                )
+                covered = {
+                    self.market.normalize_symbol(o.symbol) for o in open_orders
+                }
+                for symbol in checked_brackets:
+                    if symbol not in covered:
+                        self._open_entries[symbol]["native_bracket"] = False
+                        self.db.add_log(
+                            "INFO",
+                            f"{symbol}: bracket legs no longer resting on the "
+                            f"exchange — soft stop/target enforcement re-armed",
+                        )
+        except Exception as exc:
+            logger.error("Position-protection watchdog failed: %s", exc)
+
+    async def _attach_protective_levels(
+        self,
+        symbol: str,
+        position: Dict[str, Any],
+        frames: Dict[str, pd.DataFrame],
+    ) -> None:
+        """Give an untracked position ATR-scaled stop/target levels, or close
+        it after 3 cycles if no usable price/ATR is available."""
+        qty = float(position.get("qty", 0.0))
+        side = "BUY" if qty > 0 else "SELL"
+        bars = frames.get(symbol)
+        atr: Optional[float] = None
+        price: Optional[float] = None
+        if bars is not None and not bars.empty:
+            candidate = float(compute_atr(bars).iloc[-1])
+            if not np.isnan(candidate) and candidate > 0:
+                atr = candidate
+            price = float(bars["close"].iloc[-1])
+        if price is None and position.get("current_price") is not None:
+            price = float(position["current_price"])
+
+        if atr is None or price is None or price <= 0:
+            failures = self._protect_failures.get(symbol, 0) + 1
+            self._protect_failures[symbol] = failures
+            if failures < 3:
+                return
+            entry = self._open_entries.get(symbol)
+            if entry is not None:
+                entry["exit_reason"] = (
+                    "Protective close: the position had no stop/target on "
+                    "record and no usable price/ATR data to attach one — "
+                    "unmanageable is worse than closed."
+                )
+            self.db.add_log(
+                "TRADE",
+                f"PROTECTIVE CLOSE {symbol} x{abs(qty):g} ({side}) — no "
+                f"stop/target on record and none could be attached for "
+                f"{failures} cycles",
+            )
+            self._protection_event(
+                "protective_closes",
+                f"{symbol}: closed — untracked and no data to attach levels",
+            )
+            await self._limit_close(symbol, position)
+            return
+
+        self._protect_failures.pop(symbol, None)
+        stop_distance, target_distance = bracket_distances(
+            price,
+            atr,
+            self.config["atr_stop_mult"],
+            self.config["atr_target_mult"],
+        )
+        if side == "BUY":
+            stop_loss = price - stop_distance
+            take_profit = price + target_distance
+        else:
+            stop_loss = price + stop_distance
+            take_profit = price - target_distance
+        entry = self._open_entries[symbol]
+        entry["stop_loss"] = stop_loss
+        entry["take_profit"] = take_profit
+        entry["native_bracket"] = False
+        self.db.add_log(
+            "TRADE",
+            f"PROTECTION ATTACHED {symbol} x{abs(qty):g} ({side}) — position "
+            f"had no stop/target on record; soft SL ${stop_loss:.2f} / TP "
+            f"${take_profit:.2f} set from the current price ~${price:.2f} "
+            f"({self.config['atr_stop_mult']:.1f}×/"
+            f"{self.config['atr_target_mult']:.1f}×ATR ${atr:.3f})",
+        )
+        self._protection_event(
+            "levels_attached",
+            f"{symbol}: protective levels attached (SL ${stop_loss:.2f})",
+        )
 
     async def _cancel_symbol_orders(self, symbol: str) -> None:
         """Cancel a symbol's resting orders (e.g. an unfilled entry limit)
@@ -1165,13 +1354,79 @@ class ArgusBot:
         )
         try:
             order = await asyncio.to_thread(self.trading.submit_order, order_request)
+            self._close_failures.pop(symbol, None)
             if symbol in self._open_entries:
                 self._open_entries[symbol]["_close_order_id"] = order.id
             return order
         except Exception as exc:
             self._closing.discard(symbol)
-            logger.error("Limit close failed for %s: %s", symbol, exc)
-            self.db.add_log("ERROR", f"{symbol}: limit close failed: {exc}")
+            failures = self._close_failures.get(symbol, 0) + 1
+            self._close_failures[symbol] = failures
+            logger.error(
+                "Limit close failed for %s (attempt %d): %s", symbol, failures, exc
+            )
+            # Deduplicate the dashboard log: the 2026-07-13 AAVE close
+            # rejection repeated identically every 60s cycle for 3.5 h and
+            # flooded 200 of the 500 visible log lines.
+            if failures == 1 or failures % 10 == 0:
+                self.db.add_log(
+                    "ERROR",
+                    f"{symbol}: limit close failed "
+                    f"({failures} consecutive attempt"
+                    f"{'s' if failures != 1 else ''}): {exc}",
+                )
+            self._protection_event(
+                None, f"{symbol}: limit close failed ({failures}x): {exc}"
+            )
+            if failures >= 3:
+                return await self._market_close_fallback(symbol, failures)
+            return None
+
+    async def _market_close_fallback(
+        self, symbol: str, failures: int
+    ) -> Optional[Any]:
+        """Last-resort liquidation after repeated limit-close failures.
+
+        A close that cannot execute leaves a breached stop unenforced
+        indefinitely — strictly worse than paying a market order's spread.
+        Only fires when the adapter says Alpaca accepts a market close right
+        now (crypto: always; equities: regular session), otherwise the
+        limit-close retry loop continues and the protection banner carries
+        the alarm. Uses close_position (full position, no qty), which
+        sidesteps qty-precision rejections entirely."""
+        if not self.market.market_close_allowed():
+            return None
+        self._closing.add(symbol)
+        try:
+            # The positions API wants the slashless form ("AAVEUSD").
+            order = await asyncio.to_thread(
+                self.trading.close_position, symbol.replace("/", "")
+            )
+            self._close_failures.pop(symbol, None)
+            if symbol in self._open_entries:
+                self._open_entries[symbol]["_close_order_id"] = getattr(
+                    order, "id", None
+                )
+            self.db.add_log(
+                "TRADE",
+                f"FORCED MARKET CLOSE {symbol} after {failures} failed limit "
+                f"closes — position was running without an enforceable stop",
+            )
+            self._protection_event(
+                "forced_market_closes",
+                f"{symbol}: market-close fallback after {failures} failed "
+                f"limit closes",
+            )
+            return order
+        except Exception as exc:
+            self._closing.discard(symbol)
+            logger.error("Market-close fallback failed for %s: %s", symbol, exc)
+            self.db.add_log(
+                "ERROR", f"{symbol}: market-close fallback failed: {exc}"
+            )
+            self._protection_event(
+                None, f"{symbol}: market-close fallback failed: {exc}"
+            )
             return None
 
     async def close_position_now(
@@ -1256,8 +1511,13 @@ class ArgusBot:
         live_symbols = {p["symbol"] for p in snapshot}
         # Drop close-in-flight guards for positions that have now exited
         # (their signal-exit close filled); keep guards for any still held so
-        # the next cycle does not double-submit a close.
+        # the next cycle does not double-submit a close. Failure counters
+        # follow the same rule — a closed position's streak is over.
         self._closing.intersection_update(live_symbols)
+        for tracker in (self._close_failures, self._protect_failures):
+            for symbol in list(tracker):
+                if symbol not in live_symbols:
+                    del tracker[symbol]
         for symbol, entry in list(self._open_entries.items()):
             if symbol in live_symbols:
                 entry["opened"] = True  # confirmed a live position at least once
@@ -1292,20 +1552,53 @@ class ArgusBot:
         # so their eventual close still produces a trade record. These are
         # confirmed-live positions, so mark them opened immediately — otherwise
         # a fast close would be mistaken for an unfilled entry and dropped.
-        for pos in snapshot:
+        # The tracked metadata (stop/target/entry context) is republished to
+        # runtime_state every cycle, so a restart can restore it instead of
+        # adopting the position naked: an adopted position used to carry NO
+        # stop_loss/take_profit, which the soft-stop loop skips — VRAX rode
+        # untracked from a restart to the EOD flatten on 2026-07-10 and lost
+        # $101.46, a third of that week's damage. Positions with no persisted
+        # record still adopt bare; _ensure_position_protection covers them.
+        adopting = [p for p in snapshot if p["symbol"] not in self._open_entries]
+        persisted: Dict[str, Any] = {}
+        if adopting:
+            try:
+                persisted = self.db.get_state("open_entries", {}) or {}
+            except Exception as exc:
+                logger.error("Persisted open-entry fetch failed: %s", exc)
+        for pos in adopting:
+            symbol = pos["symbol"]
             qty = pos["qty"]
-            self._open_entries.setdefault(
-                pos["symbol"],
-                {
-                    "qty": abs(qty),
-                    "entry_price": pos["avg_entry_price"],
-                    "side": "BUY" if qty > 0 else "SELL",
-                    "opened": True,
-                    "entry_time": datetime.now(timezone.utc).isoformat(
-                        timespec="seconds"
-                    ),
-                },
-            )
+            entry: Dict[str, Any] = {
+                "qty": abs(qty),
+                "entry_price": pos["avg_entry_price"],
+                "side": "BUY" if qty > 0 else "SELL",
+                "opened": True,
+                "entry_time": datetime.now(timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
+            }
+            saved = persisted.get(symbol)
+            if isinstance(saved, dict) and saved.get("side") == entry["side"]:
+                # Same symbol, same direction → same position; restore its
+                # levels and entry context (entry_time/price included — the
+                # live avg_entry_price is authoritative for P&L, but the
+                # saved record carries the original context fields).
+                entry.update(
+                    {k: v for k, v in saved.items() if not k.startswith("_")}
+                )
+                entry["qty"] = abs(qty)
+                entry["entry_price"] = pos["avg_entry_price"]
+                entry["opened"] = True
+                if saved.get("stop_loss") is not None:
+                    self.db.add_log(
+                        "INFO",
+                        f"{symbol}: restored tracked stop/target from the "
+                        f"persisted entry record after restart (SL "
+                        f"${saved['stop_loss']:.2f} / TP "
+                        f"${saved.get('take_profit', 0) or 0:.2f})",
+                    )
+            self._open_entries[symbol] = entry
 
         # Per-market equity: crypto uses a notional base + its own PnL; equity
         # subtracts the other market's market value from the blended account
@@ -1553,6 +1846,8 @@ class ArgusBot:
         # Zero the analyst fail-open counters so the dashboard's
         # "auto-approvals this session" badge means this session.
         get_analyst().reset_health(self.db)
+        # Same for the position-protection counters and banner.
+        self.reset_protection_health()
         cfg = self.config
         self.db.add_log(
             "INFO",
@@ -1741,17 +2036,22 @@ class ArgusBot:
             signal_exits = await self.evaluate_and_close_exits(portfolio, exit_frames)
             if signal_exits:
                 cycle["signal_exits"] = signal_exits
+            # Watchdog: any position still held after the exit passes must
+            # have working protection (levels + something enforcing them).
+            await self._ensure_position_protection(portfolio, exit_frames)
 
-        # Market regime shapes how much book we run this cycle: TREND_DOWN
-        # (index falling on stressed vol) blocks new longs outright — every
-        # dip is a knife — while shorts stay allowed since a falling market
-        # favours them. CAUTION (trend down OR vol elevated, like the losing
-        # 2026-07-08 session) halves the position cap instead of trading at
-        # full throttle. Existing positions keep their soft stop/target and
-        # the daily stop still guards them.
+        # Market regime shapes how much book we run this cycle: ANY
+        # down-trend (index below its EMA, stressed or calm) blocks new
+        # longs — every dip is a knife; 2026-07-13's calm-vol CAUTION drift
+        # stopped out 23 of 28 dip-buys — while shorts stay allowed since a
+        # falling market favours them. CAUTION (trend down OR vol elevated)
+        # additionally halves the position cap. Blocked BUY signals are
+        # still evaluated and shadow-recorded (gate "regime") so this gate's
+        # P&L is measured like every other gate. Existing positions keep
+        # their soft stop/target and the daily stop still guards them.
         regime_info = await asyncio.to_thread(self.market.regime)
         cycle["regime"] = regime_info
-        regime_blocks = regime.blocks_new_entries(regime_info)
+        regime_blocks_longs = regime.blocks_long_entries(regime_info)
 
         max_positions = int(self.config.get("max_positions", 5))
         if regime_info.get("regime") == regime.CAUTION:
@@ -1766,24 +2066,10 @@ class ArgusBot:
         if open_slots <= 0:
             cycle["stage"] = "max-positions"
             return
-        short_enabled = bool(self.config.get("short_enabled", 0.0))
-        if regime_blocks:
-            if not short_enabled:
-                self.db.add_log(
-                    "INFO",
-                    f"Regime TREND_DOWN ({regime_info['symbol']} "
-                    f"${regime_info.get('close', 0):.2f} < EMA "
-                    f"${regime_info.get('ema', 0):.2f}, realized vol "
-                    f"{regime_info.get('realized_vol_pct', 0):.0f}%) — "
-                    f"no new entries this cycle (shorts disabled)",
-                )
-                cycle["stage"] = "risk-off"
-                return
-            self.db.add_log(
-                "INFO",
-                f"Regime TREND_DOWN — BUY entries blocked, SELL entries allowed",
-            )
-
+        # NOTE: a long-blocking regime no longer short-circuits the cycle —
+        # signals must still be evaluated so the blocked ones land in the
+        # shadow-veto ledger. The sentiment calls this spends on a red tape
+        # are the price of knowing what the gate is worth.
         frames = await self.fetch_minute_bars()
         cycle["symbols_with_bars"] = len(frames)
 
@@ -1811,16 +2097,34 @@ class ArgusBot:
         # Deepest dips first for BUY, highest overextension first for SELL
         pending_signals.sort(key=lambda s: s["rsi"])
 
-        # Filter BUY signals in TREND_DOWN regime
-        if regime_blocks:
-            pending_signals = [s for s in pending_signals if s["side"] != "BUY"]
-            if not pending_signals:
+        # Regime gate: veto BUY signals while the index trends down, shadow-
+        # recording each one exactly like the sentiment/risk/PM gates so
+        # GET /vetoes answers whether the blocked dip-buys would have won.
+        if regime_blocks_longs:
+            blocked_buys = [s for s in pending_signals if s["side"] == "BUY"]
+            for s in blocked_buys:
+                self._record_veto(
+                    s,
+                    "regime",
+                    f"regime {regime_info.get('regime', '?')}: "
+                    f"{regime_info.get('symbol', '?')} "
+                    f"${regime_info.get('close', 0):.2f} < EMA "
+                    f"${regime_info.get('ema', 0):.2f} — no dip-buying into "
+                    f"a falling tape",
+                )
+            if blocked_buys:
+                cycle["regime_blocked_buys"] = len(blocked_buys)
                 self.db.add_log(
                     "INFO",
-                    "Regime TREND_DOWN — no SELL signals this cycle",
+                    f"Regime {regime_info.get('regime', '?')} "
+                    f"({regime_info.get('symbol', '?')} "
+                    f"${regime_info.get('close', 0):.2f} < EMA "
+                    f"${regime_info.get('ema', 0):.2f}) — "
+                    f"{len(blocked_buys)} BUY signal"
+                    f"{'s' if len(blocked_buys) != 1 else ''} blocked and "
+                    f"shadow-tracked",
                 )
-                cycle["stage"] = "risk-off"
-                return
+            pending_signals = [s for s in pending_signals if s["side"] != "BUY"]
 
         # Phase 2: LLM risk agent evaluates each signal (in parallel).
         analyst = get_analyst()

@@ -358,6 +358,7 @@ def fetch_snapshot(
         "analyst_optimization": db.get_state("analyst_optimization"),
         "analyst_trades": db.get_state("analyst_trades"),
         "analyst_health": db.get_state("analyst_health"),
+        "protection_health": db.get_state("protection_health"),
         "veto_stats": db.get_veto_stats(),
         "analyst_config": db.get_state("analyst_config") or {},
         "analyst_call_log": db.get_state("analyst_call_log") or [],
@@ -1141,8 +1142,9 @@ def dashboard() -> None:
             market_chip = chip()
             engine_chip = chip()
             regime_chip["holder"].tooltip(
-                "Market regime gates new entries only (TREND_DOWN = no new "
-                "buys). Evaluated while the market is open."
+                "Market regime gates new entries only (index below its EMA "
+                "= no new buys, stressed or calm; blocked signals are "
+                "shadow-tracked). Evaluated while the market is open."
             )
             market_chip["holder"].tooltip(
                 "Crypto market — 24/7" if is_crypto() else "US equity market session"
@@ -1298,6 +1300,17 @@ def dashboard() -> None:
                             "📊 Active Positions",
                             "live from Alpaca sync — tap ℹ for the full story",
                         )
+                        # Protection alarm: a position running without an
+                        # enforceable stop (close rejected repeatedly, levels
+                        # missing) must be impossible to miss — the Jul 13
+                        # AAVE close failed silently every cycle for 3.5 h
+                        # while the position sat past its breached stop.
+                        protection_banner = ui.label("").classes(
+                            "w-full text-xs font-semibold text-rose-300 "
+                            "bg-rose-950 rounded border border-rose-800 "
+                            "px-2 py-1 mb-1"
+                        )
+                        protection_banner.set_visibility(False)
                         with ui.element("div").classes("w-full scroll-x-mobile"):
                             with ui.element("div").classes(
                                 "pos-grid text-xs font-semibold uppercase "
@@ -2467,6 +2480,41 @@ def dashboard() -> None:
         ]
         positions_empty.set_visibility(not positions)
         open_entries = snapshot.get("open_entries") or {}
+
+        # Protection alarm — active close-failure streaks and this session's
+        # watchdog interventions (levels attached / forced closes).
+        health = snapshot.get("protection_health") or {}
+        stuck = {
+            s: n for s, n in (health.get("close_failures") or {}).items()
+            if market_owns(s, market) and int(n or 0) >= 3
+        }
+        attached = int(health.get("levels_attached", 0) or 0)
+        forced = int(health.get("forced_market_closes", 0) or 0)
+        protective = int(health.get("protective_closes", 0) or 0)
+        if stuck:
+            worst = max(stuck.items(), key=lambda kv: kv[1])
+            protection_banner.set_text(
+                f"🚨 Stop can't execute: {', '.join(sorted(stuck))} — the "
+                f"close has been rejected {worst[1]}× and the position is "
+                f"running without an enforceable stop "
+                f"(last: {(health.get('last_event') or '?')[:100]})"
+            )
+            protection_banner.set_visibility(True)
+        elif attached or forced or protective:
+            parts = []
+            if attached:
+                parts.append(f"{attached} naked position(s) given stops")
+            if forced:
+                parts.append(f"{forced} forced market close(s)")
+            if protective:
+                parts.append(f"{protective} protective close(s)")
+            protection_banner.set_text(
+                "⚠️ Protection watchdog acted this session: "
+                + ", ".join(parts)
+            )
+            protection_banner.set_visibility(True)
+        else:
+            protection_banner.set_visibility(False)
         positions_container.clear()
         with positions_container:
             for pos in positions:
@@ -2544,8 +2592,9 @@ def dashboard() -> None:
                 else "—"
             )
             regime_checked_label.set_text(
-                f"Checked {fmt_clock(regime_info.get('checked_at'))} — regime "
-                "gates new entries only, never forces exits"
+                f"Checked {fmt_clock(regime_info.get('checked_at'))} — a "
+                "down-trend blocks new buys (shadow-tracked); the regime "
+                "never forces exits"
             )
         else:
             regime_detail_trend.set_text("—")
@@ -3399,6 +3448,7 @@ def dashboard() -> None:
         "vwap_recheck": "📉 VWAP re-check",
         "risk_agent": "🛡️ Risk agent",
         "portfolio_manager": "💼 Portfolio manager",
+        "regime": "🌐 Market regime",
     }
 
     def render_vetoes(snapshot: Dict[str, Any]) -> None:

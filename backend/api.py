@@ -137,6 +137,7 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
             "last_cycle": controller.bot.last_cycle if controller.bot else {},
             "open_entries": controller.bot._open_entries if controller.bot else {},
             "analyst_health": db.get_state("analyst_health"),
+            "protection_health": db.get_state("protection_health"),
             "market_clock": clock_info,
             "cooldowns_active": (
                 sorted(controller.bot._cooldowns) if controller.bot else []
@@ -153,13 +154,15 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
 
     @app.get("/regime")
     async def market_regime() -> Dict[str, Any]:
-        """Current market regime — TREND_DOWN means no new BUY entries. Uses the
+        """Current market regime — any down-trend blocks new BUY entries
+        (blocks_long_entries); TREND_DOWN is its stressed superset. Uses the
         engine's own proxy (SPY for equities, BTC/USD for crypto)."""
         probe = bot_or_probe()
         info = await asyncio.to_thread(probe.market.regime)
         return {
             **info,
             "blocks_new_entries": regime_module.blocks_new_entries(info),
+            "blocks_long_entries": regime_module.blocks_long_entries(info),
         }
 
     @app.get("/signals")
@@ -173,7 +176,7 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
         watchlist = probe.watchlist or universe.get_watchlist()
         frames = await probe.fetch_minute_bars()
         regime_info = await asyncio.to_thread(probe.market.regime)
-        regime_blocks = regime_module.blocks_new_entries(regime_info)
+        regime_blocks = regime_module.blocks_long_entries(regime_info)
         evaluation: Dict[str, Any] = {}
         for symbol in watchlist:
             bars = frames.get(symbol)
@@ -296,7 +299,10 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
                     {
                         "decision": "BLOCKED",
                         "reason": "all technical + sentiment gates passed but "
-                        "market regime is TREND_DOWN — no new BUY entries",
+                        f"the market regime is "
+                        f"{regime_info.get('regime', '?')} with the index "
+                        "below its EMA — no new BUY entries into a falling "
+                        "tape (shadow-tracked by the live engine)",
                     }
                 )
             else:

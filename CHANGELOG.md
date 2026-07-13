@@ -9,6 +9,61 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.26.0] - 2026-07-13
+
+### Added
+- **Regime gate on long entries, shadow-tracked.** New BUY entries are blocked
+  whenever the regime proxy (SPY / BTC-USD) trades below its EMA — not just in
+  the stressed `TREND_DOWN` regime. Motivation: on Jul 13 SPY drifted below its
+  EMA on quiet volatility (`CAUTION`) for the whole session and 23 of 28
+  dip-buys stopped out (-$54.45); an orderly fall knifes a dip-buyer just as
+  surely as a violent one. Every blocked BUY is recorded in the shadow-veto
+  ledger under a new `regime` gate (with the exact bracket and size it would
+  have traded), so `GET /vetoes` and the Analyst tab measure what the gate
+  saves or costs instead of assuming. The engine no longer short-circuits the
+  cycle on a long-blocking regime — signals are still evaluated so the ledger
+  fills. `GET /regime` now also reports `blocks_long_entries`; the `/signals`
+  dry-run uses the same rule. Shorts remain allowed; `CAUTION` still halves the
+  position cap; `UNKNOWN` still fails open.
+- **Position-protection watchdog.** Every cycle, every held position must have
+  working protection, closing the two holes that let VRAX (-$101.46, equity)
+  and XTZ (-$16.96, crypto) run naked:
+  - Stop/target levels now **survive engine restarts**: adoption of an
+    existing position first restores its levels and entry context from the
+    `open_entries` state blob the engine already persists each cycle.
+  - Positions still tracked without levels get ATR-scaled stop/target
+    **attached at the current price** (protecting from here, not locking in
+    the past drawdown); if no usable price/ATR is available for 3 consecutive
+    cycles the position is closed — unmanageable is worse than closed.
+  - Positions marked `native_bracket` are verified against actually-resting
+    exchange orders (one batched lookup); if the legs are gone, soft
+    enforcement is re-armed instead of assuming the exchange still covers
+    them.
+- **Protection incidents are now visible.** New `protection_health` state blob
+  (session-reset like `analyst_health`, exposed on `GET /debug`): active
+  close-failure streaks per symbol, levels attached, forced/protective closes,
+  last event. The dashboard's Active Positions card shows a red banner when a
+  stop cannot execute (close rejected ≥3×) or the watchdog intervened.
+
+### Fixed
+- **Crypto closes could be rejected forever (position stuck past its breached
+  stop).** Alpaca charges crypto fees in the base asset, so a filled buy
+  leaves a 9-decimal balance (e.g. AAVE `5.037726129`); the close order
+  quantity used `round(qty, 8)`, which rounds half-up to `5.03772613` —
+  one billionth more than held → error 40310000 "insufficient balance" →
+  the soft-stop close retried and failed every 60 s cycle (AAVE sat 3.5 h and
+  ~200 log lines past its breached $98.60 stop on Jul 13). Close and entry
+  quantities are now floored to 8 dp, never rounded up.
+- **Close failures now escalate instead of looping silently.** After 3
+  consecutive failed limit closes the engine falls back to a full-position
+  market close (`close_position`, no quantity → no precision rejections) where
+  the market accepts one — crypto always, equities only in the regular
+  session. This is a deliberate, narrow exception to the "limit closes only"
+  rule: an unenforceable stop is strictly worse than paying a market order's
+  spread. Repeated failures no longer flood the log (one `ERROR` line per
+  streak start plus every 10th attempt, and the `SOFT STOP` trade line only
+  logs when the close was actually submitted).
+
 ## [v2.25.1] - 2026-07-11
 
 ### Fixed

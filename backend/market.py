@@ -30,6 +30,7 @@ fractional qty; the Asset model exposes min_order_size / min_trade_increment
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from abc import ABC, abstractmethod
@@ -204,6 +205,14 @@ class MarketAdapter(ABC):
         itself each cycle."""
         return False
 
+    def market_close_allowed(self) -> bool:
+        """True when Alpaca would accept a MARKET liquidation of a position
+        right now. Used only by the engine's last-resort close escalation
+        (repeated limit-close failures) — never as the primary close path.
+        Equities accept market orders only in the regular session; crypto
+        accepts them 24/7. Default False = limit closes only."""
+        return False
+
     def build_bracket_entry_order(
         self,
         symbol: str,
@@ -376,6 +385,10 @@ class EquityAdapter(MarketAdapter):
             return False
         open_utc, close_utc = bounds["regular"]
         return open_utc <= datetime.now(timezone.utc) < close_utc
+
+    def market_close_allowed(self) -> bool:
+        # Market orders share the bracket restriction: regular session only.
+        return self.bracket_entry_allowed()
 
     def size_qty(
         self, symbol, pos_size, price, stop_distance, risk_per
@@ -605,6 +618,17 @@ class CryptoAdapter(MarketAdapter):
             qty = min(qty, risk_per / stop_distance)
         return self._round_qty(qty, symbol)
 
+    @staticmethod
+    def _floor_qty_8dp(qty: float) -> float:
+        """Truncate (never round up) to 8 decimal places. round() half-up
+        turned the 9-decimal balances Alpaca leaves after base-asset fees
+        (buy AAVE, fee taken in AAVE → 5.037726129 held) into a request for
+        MORE than the balance (5.03772613), which error 40310000-rejects
+        every close of that position forever. Flooring can only leave
+        ≤1e-8 of dust behind, which is harmless; requesting 1e-9 too much
+        is fatal."""
+        return math.floor(qty * 1e8) / 1e8
+
     def _round_qty(self, qty: float, symbol: str) -> float:
         meta = self._assets.get(symbol, {})
         inc = meta.get("min_trade_increment", 0.0)
@@ -614,7 +638,7 @@ class CryptoAdapter(MarketAdapter):
         if min_size > 0 and qty < min_size:
             return 0.0
         # Guard against float dust; 8 dp covers every Alpaca crypto increment.
-        return round(qty, 8)
+        return self._floor_qty_8dp(qty)
 
     def round_price(self, symbol: str, price: float) -> float:
         meta = self._assets.get(symbol, {})
@@ -644,7 +668,11 @@ class CryptoAdapter(MarketAdapter):
     def build_close_order(
         self, symbol, is_long, qty, ref_price, slip_pct
     ) -> LimitOrderRequest:
-        # Close the full held qty (already a valid increment from the fill).
+        # Close the full held qty. NOT "already a valid increment from the
+        # fill": Alpaca charges crypto fees in the base asset, so the held
+        # balance is fill-minus-fee with up to 9 decimals — the qty must be
+        # floored, never rounded, or the request exceeds the balance by 1e-9
+        # and every close of the position is rejected (see _floor_qty_8dp).
         side = OrderSide.SELL if is_long else OrderSide.BUY
         if is_long:
             limit = self.round_price(symbol, ref_price * (1 - slip_pct))
@@ -652,11 +680,16 @@ class CryptoAdapter(MarketAdapter):
             limit = self.round_price(symbol, ref_price * (1 + slip_pct))
         return LimitOrderRequest(
             symbol=symbol,
-            qty=round(qty, 8),
+            qty=self._floor_qty_8dp(qty),
             side=side,
             time_in_force=TimeInForce.GTC,
             limit_price=limit,
         )
+
+    def market_close_allowed(self) -> bool:
+        # Alpaca accepts crypto market orders 24/7 — the last-resort close
+        # escalation is always available on this market.
+        return True
 
     def regime(self) -> Dict[str, Any]:
         # BTC/USD as the "market" proxy, 24/7 annualization. Fails open to

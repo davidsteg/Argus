@@ -15,14 +15,21 @@ Classification (deliberately simple and explainable, no ML):
            wide and stops get run.
 
     TREND_UP   trend up, volatility normal       → trade normally
-    CAUTION    trend down OR volatility elevated → position cap halved
+    CAUTION    trend down OR volatility elevated → position cap halved;
+                                                    if the trend is the
+                                                    trigger, longs blocked
     TREND_DOWN trend down AND volatility elevated → no new BUY entries
                                                     (shorts still allowed)
     UNKNOWN    SPY data unavailable              → fail-open, trade normally
 
 The consequences are enforced by the engine (bot.py): CAUTION halves
-max_positions so a down-trending tape is traded at half throttle instead
-of full speed, and TREND_DOWN blocks longs outright.
+max_positions so a stressed tape is traded at half throttle instead of
+full speed, and any down-trend — calm or stressed — blocks new longs
+(blocks_long_entries). 2026-07-13 showed why trend alone must gate longs:
+SPY drifted below its EMA on quiet vol (CAUTION) all session and 23 of 28
+dip-buys stopped out; an orderly fall knifes a dip-buyer just as surely
+as a violent one. Blocked BUY signals are shadow-recorded (gate "regime")
+so the cost/saving of this gate is measured, not assumed.
 
 The regime never forces an exit — brackets and the daily kill-switch own
 that. It only gates new entries. Results are cached for a few minutes so
@@ -175,3 +182,12 @@ def get_regime(
 
 def blocks_new_entries(regime_info: Dict[str, Any]) -> bool:
     return regime_info.get("regime") == TREND_DOWN
+
+
+def blocks_long_entries(regime_info: Dict[str, Any]) -> bool:
+    """True when new BUY (dip-buy) entries should be blocked: whenever the
+    index is below its EMA, stressed or not. A superset of
+    blocks_new_entries — TREND_DOWN implies trend_down. Fails open on
+    UNKNOWN (no trend_down key → False), matching get_regime's contract
+    that a data hiccup never halts trading."""
+    return bool(regime_info.get("trend_down")) or blocks_new_entries(regime_info)
