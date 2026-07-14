@@ -10,9 +10,37 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.26.0"
+__version__ = "2.27.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.27.0",
+        "date": "2026-07-14",
+        "title": "Optimizer: honest friction, more data, multi-fold validation, un-stuck LLM review",
+        "notes": [
+            "The nightly LLM review no longer rejects every run for a "
+            "phantom reason: the winner shown to the reviewer carried three "
+            "config keys (news_cutoff, analyst_enabled, short_enabled) that "
+            "no candidate had, so the model called it a 'structural "
+            "mismatch' and vetoed the whole night's work — including the "
+            "Jul 13 run. Those keys are now merged only after the review.",
+            "The backtest's stop slippage is now calibrated from your own "
+            "realized stop fills (median, clamped, never more optimistic "
+            "than the configured floor) instead of a 0.05% guess that "
+            "Jul 8–10 measured at 10–200× under reality. The shadow-veto "
+            "resolver prices hypothetical fills with the same calibrated "
+            "number, so 'what a blocked trade would have made' and 'what "
+            "the optimizer thinks' can't drift apart.",
+            "More data, spent carefully: 60 days × 15 symbols (from 30 × "
+            "10) — about 5.5 h of grid time, still inside the overnight "
+            "window — and the single 25% holdout is now three sequential "
+            "validation folds. A parameter set only goes live if it made "
+            "money in at least 2 of 3 unseen folds AND overall; one lucky "
+            "window no longer promotes a coin flip.",
+            "Run records and the Optimizer tab now show the fold-by-fold "
+            "validation returns and the calibrated slippage each run used.",
+        ],
+    },
     {
         "version": "2.26.0",
         "date": "2026-07-13",

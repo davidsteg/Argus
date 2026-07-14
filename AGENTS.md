@@ -102,12 +102,25 @@ lingering DB row for a key not in `DEFAULT_CONFIG`, so retiring is safe
 without a migration.
 
 **The optimizer must stay out-of-sample validated.** Since v2.2.0 it
-splits history 75% train / 25% validation (`split_history`) and only lets
-a parameter combination go live if it's also profitable on the unseen
-validation window (see `run_optimization`'s ranking-then-validation-gate
+splits history chronologically (`split_history`); since v2.27.0 the 25 %
+holdout is cut into `OPTIMIZER_VALIDATION_FOLDS` sequential folds and a
+combination only goes live if it is profitable in a MAJORITY of them and
+in aggregate (see `run_optimization`'s ranking-then-validation-gate
 loop). Never revert to picking the best in-sample combination outright —
-that's how a 30-day grid search convinces itself a coin flip is a
-strategy.
+that's how a grid search convinces itself a coin flip is a strategy.
+Two more optimizer invariants (v2.27.0):
+- Stop slippage is calibrated from the ledger's realized stop fills
+  (`calibrate_stop_slippage`), clamped to never be MORE optimistic than
+  the `OPTIMIZER_STOP_SLIP_PCT` floor. Don't feed the backtest raw env
+  guesses again, and keep the shadow-veto resolver reading the same
+  `optimizer_friction` state blob so both fill models stay identical.
+- The LLM post-review sees the winner with grid keys ONLY; the
+  carried-forward config keys (news_cutoff, analyst_enabled,
+  short_enabled) are merged AFTER the review. Merging them earlier made
+  the reviewer reject every run as a "structural mismatch" (2026-07-13).
+Runtime budget: grid time scales linearly with lookback-days × symbols
+(~108 min at 30 × 10 measured); keep the product small enough to finish
+inside the 22:00 UTC → 08:00 UTC overnight window.
 
 ## The debug API is the primary diagnostic tool — use it before guessing
 

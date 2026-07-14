@@ -603,7 +603,17 @@ class StrategyAnalyst:
 
         winner_info = None
         if winner:
-            winner_info = {k: (int(v) if k == "rsi_period" else round(v, 2)) for k, v in winner.items()}
+            # Show the winner with exactly the keys the candidates carry —
+            # ride-along config keys (news_cutoff, analyst_enabled,
+            # short_enabled) made the reviewer reject every run as a
+            # "structural mismatch" (2026-07-13). Belt-and-braces with the
+            # optimizer now merging those keys only after this review.
+            grid_keys = set(ranked[0][1].keys()) if ranked else None
+            winner_info = {
+                k: (int(v) if k == "rsi_period" else round(v, 2))
+                for k, v in winner.items()
+                if grid_keys is None or k in grid_keys
+            }
         winner_validation = None
         if validation is not None:
             winner_validation = {

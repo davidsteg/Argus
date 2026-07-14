@@ -3,19 +3,27 @@ Argus — nightly walk-forward parameter optimizer with out-of-sample
 validation.
 
 Runs as an asyncio task inside the backend container (started by bot.py)
-and fires at midnight Europe/Zurich. It fetches the last 30 days of
+and fires at midnight Europe/Zurich. It fetches OPTIMIZER_LOOKBACK_DAYS of
 1-minute historical bars from Alpaca and replays the exact live strategy
 (RSI dip entry + ATR-multiple bracket exits + RSI-overbought early exit,
 same indicator code via indicators.py) across a parameter grid.
 
 Overfitting guard: the bars are split chronologically into a train window
-(first 75 %) and a validation window (last 25 %). Combinations are ranked
-by yield-to-drawdown on the train window, but a candidate is only allowed
-to go live if it also made money on the validation window it has never
-seen — parameters that merely memorized the past are rejected. The best
-validated combination is written to the shared bot_config table; the
-engine re-reads bot_config every cycle, so new parameters take effect at
-the next trading session without a restart.
+(first 75 %) and OPTIMIZER_VALIDATION_FOLDS sequential validation folds
+covering the remainder. Combinations are ranked by yield-to-drawdown on
+the train window, but a candidate is only allowed to go live if it made
+money in a MAJORITY of the unseen validation folds AND in aggregate — one
+lucky holdout window is no longer enough (v2.27.0; before that a single
+25 % window was the whole gate). The best validated combination is
+written to the shared bot_config table; the engine re-reads bot_config
+every cycle, so new parameters take effect at the next trading session
+without a restart.
+
+Friction honesty: stop slippage is calibrated from the ledger's own
+realized stop fills (calibrate_stop_slippage) instead of trusting the
+OPTIMIZER_STOP_SLIP_PCT guess — the Jul 8–10 sessions proved the guess
+could be 10–200× under reality, which let the grid promote bracket-tight
+parameters that only won on paper.
 """
 
 from __future__ import annotations
@@ -61,14 +69,26 @@ ZURICH = ZoneInfo("Europe/Zurich")
 
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
-LOOKBACK_DAYS = int(os.getenv("OPTIMIZER_LOOKBACK_DAYS", "30"))
+LOOKBACK_DAYS = int(os.getenv("OPTIMIZER_LOOKBACK_DAYS", "60"))
 # In whole-market mode the watchlist can be 100 symbols; the grid search
-# replays 30 days of minute bars per symbol per combination, so it
-# optimizes over the most active subset to stay fast.
-OPTIMIZER_MAX_SYMBOLS = int(os.getenv("OPTIMIZER_MAX_SYMBOLS", "10"))
+# replays LOOKBACK_DAYS of minute bars per symbol per combination, so it
+# optimizes over the most active subset. Runtime budget: the measured
+# nightly run was ~108 min at 30 days × 10 symbols and scales linearly in
+# (days × symbols), so 60 × 15 lands near 5.5 h — inside the 22:00 UTC →
+# 08:00 UTC equity-pre-open window, with margin. Bump these only with that
+# arithmetic in hand.
+OPTIMIZER_MAX_SYMBOLS = int(os.getenv("OPTIMIZER_MAX_SYMBOLS", "15"))
 # Chronological share of each symbol's bars used for parameter selection;
-# the remainder is the untouched validation window.
+# the remainder is cut into the sequential validation folds.
 TRAIN_FRACTION = float(os.getenv("OPTIMIZER_TRAIN_FRACTION", "0.75"))
+# Number of sequential out-of-sample folds the holdout is cut into. A
+# winner must be profitable in a majority of folds and in aggregate.
+VALIDATION_FOLDS = max(1, int(os.getenv("OPTIMIZER_VALIDATION_FOLDS", "3")))
+# Guardrails for fill-calibrated stop slippage: never calibrate below the
+# configured default (optimism is what caused the paper-only winners) and
+# never above 2% (one catastrophic fill must not poison every backtest).
+CALIBRATION_MIN_SAMPLES = int(os.getenv("OPTIMIZER_CALIBRATION_MIN_SAMPLES", "8"))
+CALIBRATION_MAX_SLIP = 0.02
 # Post-close re-entry bench, mirrored from the live engine (1 bar ≈ 1 min).
 # Read from bot_config at runtime so it's tunable from the dashboard.
 
@@ -99,8 +119,10 @@ def _clear_status(db) -> None:
 
 
 # Grid searched nightly. Kept deliberately compact: 4*4*3*4*3*3*3 = 5184
-# combinations replayed over train+validation finish in a few minutes of
-# CPU inside the container. Bracket distances are ATR multiples
+# combinations. NOT cheap at scale: replaying the grid measured ~108 min
+# at 30 days × 10 symbols (2026-07-13 run) and grows linearly with
+# days × symbols — see the runtime note on OPTIMIZER_MAX_SYMBOLS before
+# widening anything. Bracket distances are ATR multiples
 # (see indicators.bracket_distances), so the same parameters adapt to each
 # symbol's own volatility.
 PARAMETER_GRID: Dict[str, List[float]] = {
@@ -158,6 +180,48 @@ def fetch_history(symbols: List[str], days: int) -> Dict[str, pd.DataFrame]:
     return frames
 
 
+def calibrate_stop_slippage(db) -> Tuple[float, int]:
+    """(stop_slippage_pct, sample_count) measured from the ledger's own
+    realized stop fills — the "more data" the optimizer actually needed.
+
+    For every recent closed trade whose exit was a stop, the realized
+    slippage is how far the fill landed beyond the recorded stop level,
+    as a fraction of that level (long: fill below stop; short: fill
+    above). The median over the sample is robust to the odd disaster
+    fill; the result is clamped to [default, CALIBRATION_MAX_SLIP] so
+    calibration can tighten the backtest's honesty but never make it more
+    optimistic than the configured default. Falls back to the default
+    when there are fewer than CALIBRATION_MIN_SAMPLES stop exits (fresh
+    DB, or an engine that has been closing everything via targets)."""
+    try:
+        trades = db.get_trades(200)
+    except Exception as exc:
+        logger.error("Slippage calibration: trade fetch failed: %s", exc)
+        return STOP_SLIPPAGE_PCT, 0
+
+    slips: List[float] = []
+    for t in trades:
+        reason = (t.get("exit_reason") or "").lower()
+        if "stop" not in reason:
+            continue
+        stop = t.get("stop_loss")
+        exit_price = t.get("exit_price")
+        if not stop or not exit_price or stop <= 0:
+            continue
+        if t.get("side") == "SELL":
+            slip = (float(exit_price) - float(stop)) / float(stop)
+        else:
+            slip = (float(stop) - float(exit_price)) / float(stop)
+        # A limit close can fill better than the level; that is zero
+        # slippage for this model, not negative.
+        slips.append(max(slip, 0.0))
+
+    if len(slips) < CALIBRATION_MIN_SAMPLES:
+        return STOP_SLIPPAGE_PCT, len(slips)
+    measured = float(np.median(slips))
+    return min(max(measured, STOP_SLIPPAGE_PCT), CALIBRATION_MAX_SLIP), len(slips)
+
+
 def position_qty(
     price: float,
     stop_distance: float,
@@ -198,6 +262,8 @@ def backtest(
     position_size_usd: float = 500.0,
     risk_per_trade_usd: float = 20.0,
     account_equity: float = 100000.0,
+    cost_per_trade_pct: float = COST_PER_TRADE_PCT,
+    stop_slippage_pct: float = STOP_SLIPPAGE_PCT,
 ) -> Tuple[float, float, int]:
     """Replay the live strategy over one symbol's bars.
 
@@ -262,7 +328,7 @@ def backtest(
             gross = qty * (exit_price - entry_price)
         else:
             gross = qty * (entry_price - exit_price)
-        cost = COST_PER_TRADE_PCT * qty * entry_price
+        cost = cost_per_trade_pct * qty * entry_price
         cash_pnl += gross - cost
         n_trades += 1
         peak_pnl = max(peak_pnl, cash_pnl)
@@ -279,14 +345,14 @@ def backtest(
             exit_price: Optional[float] = None
             if position_side == "BUY":
                 if lows[i] <= stop_price:
-                    exit_price = stop_price * (1.0 - STOP_SLIPPAGE_PCT)
+                    exit_price = stop_price * (1.0 - stop_slippage_pct)
                 elif highs[i] >= target_price:
                     exit_price = target_price
                 elif not np.isnan(rsi[i]) and rsi[i] >= rsi_exit_signal:
                     exit_price = closes[i]
             else:
                 if highs[i] >= stop_price:
-                    exit_price = stop_price * (1.0 + STOP_SLIPPAGE_PCT)
+                    exit_price = stop_price * (1.0 + stop_slippage_pct)
                 elif lows[i] <= target_price:
                     exit_price = target_price
                 elif not np.isnan(rsi[i]) and rsi[i] <= rsi_short_exit:
@@ -399,6 +465,8 @@ class _WindowData:
         position_size_usd: float = 500.0,
         risk_per_trade_usd: float = 20.0,
         account_equity: float = 100000.0,
+        cost_per_trade_pct: float = COST_PER_TRADE_PCT,
+        stop_slippage_pct: float = STOP_SLIPPAGE_PCT,
     ) -> Tuple[float, float, float, int]:
         """Aggregate (score, return, worst drawdown, trades) across symbols.
 
@@ -428,6 +496,8 @@ class _WindowData:
                 position_size_usd=position_size_usd,
                 risk_per_trade_usd=risk_per_trade_usd,
                 account_equity=account_equity,
+                cost_per_trade_pct=cost_per_trade_pct,
+                stop_slippage_pct=stop_slippage_pct,
             )
             total_return += ret
             worst_drawdown = max(worst_drawdown, drawdown)
@@ -442,11 +512,20 @@ class _WindowData:
 
 
 def split_history(
-    history: Dict[str, pd.DataFrame]
-) -> Tuple[Dict[str, pd.DataFrame], Dict[str, pd.DataFrame]]:
-    """Chronological per-symbol split into train and validation windows."""
+    history: Dict[str, pd.DataFrame],
+    n_folds: int = VALIDATION_FOLDS,
+) -> Tuple[Dict[str, pd.DataFrame], List[Dict[str, pd.DataFrame]]]:
+    """Chronological per-symbol split into a train window and n_folds
+    sequential validation folds covering the holdout.
+
+    One 25 % holdout window rewards candidates that got lucky in that
+    single stretch of tape; splitting it into sequential folds and (in
+    run_optimization) demanding profitability in a majority of them keeps
+    the same data budget while filtering one-window luck. A symbol whose
+    slice of a fold is under 50 bars is left out of that fold; symbols too
+    short to validate at all stay train-only, exactly as before."""
     train: Dict[str, pd.DataFrame] = {}
-    validation: Dict[str, pd.DataFrame] = {}
+    folds: List[Dict[str, pd.DataFrame]] = [dict() for _ in range(n_folds)]
     for symbol, bars in history.items():
         cut = int(len(bars) * TRAIN_FRACTION)
         if cut < 50 or len(bars) - cut < 50:
@@ -454,8 +533,15 @@ def split_history(
             train[symbol] = bars
             continue
         train[symbol] = bars.iloc[:cut]
-        validation[symbol] = bars.iloc[cut:]
-    return train, validation
+        holdout = bars.iloc[cut:]
+        fold_len = len(holdout) // n_folds
+        for i in range(n_folds):
+            start = i * fold_len
+            end = (i + 1) * fold_len if i < n_folds - 1 else len(holdout)
+            fold_bars = holdout.iloc[start:end]
+            if len(fold_bars) >= 50:
+                folds[i][symbol] = fold_bars
+    return train, [f for f in folds if f]
 
 
 def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
@@ -489,8 +575,8 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
             f"{'Nightly' if trigger == 'nightly' else 'Manual'} walk-forward "
             f"optimization started "
             f"({LOOKBACK_DAYS}d of 1-minute bars, "
-            f"{TRAIN_FRACTION:.0%} train / {1 - TRAIN_FRACTION:.0%} validation, "
-            f"{len(symbols)} symbols: {', '.join(symbols)})",
+            f"{TRAIN_FRACTION:.0%} train / {VALIDATION_FOLDS} validation "
+            f"folds, {len(symbols)} symbols: {', '.join(symbols)})",
         )
         try:
             history = fetch_history(symbols, LOOKBACK_DAYS)
@@ -513,9 +599,9 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
             "Optimizing over %d bars across %d symbols", total_bars, len(history)
         )
 
-        train_frames, validation_frames = split_history(history)
+        train_frames, validation_folds = split_history(history)
         train = _WindowData(train_frames)
-        validation = _WindowData(validation_frames) if validation_frames else None
+        validations = [_WindowData(f) for f in validation_folds]
 
         # Read cooldown and position sizing from live config/status so the
         # backtest sizes and benches exactly like the engine. account_equity is
@@ -531,6 +617,34 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
             "risk_per_trade_usd": risk_per_trade_usd,
             "account_equity": account_equity,
         }
+
+        # Friction honesty: replace the stop-slippage guess with the median
+        # of the ledger's own realized stop fills (clamped, never below the
+        # configured default). Published to runtime_state so the shadow-veto
+        # resolver prices hypothetical fills with the same numbers.
+        stop_slip, slip_samples = calibrate_stop_slippage(db)
+        sizing["cost_per_trade_pct"] = COST_PER_TRADE_PCT
+        sizing["stop_slippage_pct"] = stop_slip
+        db.set_state("optimizer_friction", {
+            "stop_slippage_pct": stop_slip,
+            "cost_per_trade_pct": COST_PER_TRADE_PCT,
+            "samples": slip_samples,
+            "calibrated_at": started_at,
+        })
+        if slip_samples >= CALIBRATION_MIN_SAMPLES:
+            db.add_log(
+                "OPTIMIZER",
+                f"Stop slippage calibrated from {slip_samples} realized stop "
+                f"fills: {stop_slip * 100:.3f}% "
+                f"(env default {STOP_SLIPPAGE_PCT * 100:.3f}%)",
+            )
+        else:
+            db.add_log(
+                "OPTIMIZER",
+                f"Stop slippage NOT calibrated — only {slip_samples} stop "
+                f"fills on record (need {CALIBRATION_MIN_SAMPLES}); using the "
+                f"{STOP_SLIPPAGE_PCT * 100:.3f}% default",
+            )
 
         # Score every combination on the train window, rank best-first.
         _publish_status(db, {
@@ -605,8 +719,9 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
             run["detail"] = "No combination produced any trades on train data"
             return None
 
-        # Walk down the train ranking and take the first combination that also
-        # made money on the unseen validation window.
+        # Walk down the train ranking and take the first combination that
+        # made money in a MAJORITY of the unseen validation folds and in
+        # aggregate — surviving one lucky window is not survival.
         _publish_status(db, {
             "phase": "validation",
             "trigger": trigger,
@@ -622,23 +737,28 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
         best_train_score = 0.0
         train_stats: Tuple[float, float, int] = (0.0, 0.0, 0)
         val_stats: Optional[Tuple[float, float, int]] = None
+        fold_note: Optional[str] = None
+        folds_needed = len(validations) // 2 + 1
         validated = 0
         for score, params, stats in ranked:
-            if validation is None:
+            if not validations:
                 best_params, best_train_score, train_stats = params, score, stats
                 break
-            _, val_return, val_drawdown, val_trades = validation.score(
-                rsi_period=int(params["rsi_period"]),
-                rsi_buy_signal=params["rsi_buy_signal"],
-                atr_stop_mult=params["atr_stop_mult"],
-                atr_target_mult=params["atr_target_mult"],
-                rsi_exit_signal=params["rsi_exit_signal"],
-                rsi_short_signal=params.get("rsi_short_signal", 999.0),
-                rsi_short_exit=params.get("rsi_short_exit", 0.0),
-                max_vwap_dislocation_pct=params.get("max_vwap_dislocation_pct", 999.0),
-                cooldown_bars=cooldown_bars,
-                **sizing,
-            )
+            fold_results: List[Tuple[float, float, int]] = []
+            for window in validations:
+                _, val_return, val_drawdown, val_trades = window.score(
+                    rsi_period=int(params["rsi_period"]),
+                    rsi_buy_signal=params["rsi_buy_signal"],
+                    atr_stop_mult=params["atr_stop_mult"],
+                    atr_target_mult=params["atr_target_mult"],
+                    rsi_exit_signal=params["rsi_exit_signal"],
+                    rsi_short_signal=params.get("rsi_short_signal", 999.0),
+                    rsi_short_exit=params.get("rsi_short_exit", 0.0),
+                    max_vwap_dislocation_pct=params.get("max_vwap_dislocation_pct", 999.0),
+                    cooldown_bars=cooldown_bars,
+                    **sizing,
+                )
+                fold_results.append((val_return, val_drawdown, val_trades))
             validated += 1
             if validated % 50 == 0:
                 _publish_status(db, {
@@ -652,31 +772,35 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
                     "candidates": len(ranked),
                     "validated": validated,
                 })
-            if val_return > 0.0:
+            profitable_folds = sum(1 for r in fold_results if r[0] > 0.0)
+            aggregate_return = sum(r[0] for r in fold_results)
+            if profitable_folds >= folds_needed and aggregate_return > 0.0:
                 best_params, best_train_score, train_stats = params, score, stats
-                val_stats = (val_return, val_drawdown, val_trades)
+                val_stats = (
+                    aggregate_return,
+                    max(r[1] for r in fold_results),
+                    sum(r[2] for r in fold_results),
+                )
+                fold_note = (
+                    f"{profitable_folds}/{len(fold_results)} folds profitable: "
+                    + ", ".join(f"{r[0] * 100:+.2f}%" for r in fold_results)
+                )
                 break
 
         if best_params is None:
             db.add_log(
                 "OPTIMIZER",
-                f"No combination survived out-of-sample validation "
-                f"({len(ranked)} candidates were profitable in-sample only) — "
-                f"keeping current parameters unchanged",
+                f"No combination survived out-of-sample validation — "
+                f"{len(ranked)} candidates were profitable in-sample but none "
+                f"made money in {folds_needed} of {len(validations)} holdout "
+                f"folds — keeping current parameters unchanged",
             )
             run["status"] = "rejected_validation"
             run["detail"] = (
-                f"All {len(ranked)} candidates failed out-of-sample validation"
+                f"All {len(ranked)} candidates failed the "
+                f"{folds_needed}-of-{len(validations)}-fold validation gate"
             )
             return None
-
-        # news_cutoff, analyst_enabled and short_enabled are not part of the
-        # technical grid; carry the live values forward so a config read after
-        # this write stays complete.
-        current = db.get_config()
-        best_params["news_cutoff"] = current["news_cutoff"]
-        best_params["analyst_enabled"] = current.get("analyst_enabled", 0.0)
-        best_params["short_enabled"] = current.get("short_enabled", 0.0)
 
         # Post-optimization LLM review (if analyst is enabled): a binary
         # sanity check that can only accept the validated winner or reject
@@ -685,6 +809,11 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
         # from the train-window ranking (mostly combinations that failed or
         # never saw the out-of-sample gate), i.e. exactly the in-sample
         # cherry-picking the walk-forward validation exists to prevent.
+        # best_params is still grid-keys-only here ON PURPOSE: the reviewer
+        # compares the winner against the candidates, and merging the
+        # carried-forward config keys (news_cutoff etc.) before this point
+        # made it reject every run as a "structural mismatch between grid
+        # search and validation" (2026-07-13 nightly).
         analyst_decision = None
         try:
             from analyst import get_analyst
@@ -719,6 +848,15 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
         except Exception as exc:
             logger.error("Post-optimization analyst review failed: %s", exc)
 
+        # news_cutoff, analyst_enabled and short_enabled are not part of the
+        # technical grid; carry the live values forward so a config read
+        # after this write stays complete. Merged only NOW, after the
+        # analyst review — see the note above the review block.
+        current = db.get_config()
+        best_params["news_cutoff"] = current["news_cutoff"]
+        best_params["analyst_enabled"] = current.get("analyst_enabled", 0.0)
+        best_params["short_enabled"] = current.get("short_enabled", 0.0)
+
         _publish_status(db, {
             "phase": "writing",
             "trigger": trigger,
@@ -737,7 +875,8 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
         if val_stats is not None:
             validation_note = (
                 f"validation: {val_stats[0] * 100:+.2f}% return, "
-                f"{val_stats[1] * 100:.2f}% max drawdown, {val_stats[2]} trades"
+                f"{val_stats[1] * 100:.2f}% worst fold drawdown, "
+                f"{val_stats[2]} trades ({fold_note})"
             )
         db.add_log(
             "OPTIMIZER",
@@ -765,10 +904,15 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
             if params_before.get(k) != best_params.get(k)
         ]
         run["status"] = "no_change" if not changed_keys else "applied"
+        slip_note = (
+            f"stop slip {stop_slip * 100:.3f}% from {slip_samples} fills"
+            if slip_samples >= CALIBRATION_MIN_SAMPLES
+            else f"stop slip default ({slip_samples} fills on record)"
+        )
         run["detail"] = (
-            "Parameters unchanged (winner matches current)"
+            f"Parameters unchanged (winner matches current); {slip_note}"
             if not changed_keys
-            else None
+            else f"{fold_note or 'no validation folds'}; {slip_note}"
         )
         run["params_after"] = best_params
         run["changed_keys"] = changed_keys

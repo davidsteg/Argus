@@ -266,6 +266,17 @@ class ArgusBot:
             vetoes = self.db.get_unresolved_vetoes()
             if not vetoes:
                 return
+            # Price hypothetical fills with the optimizer's fill-calibrated
+            # friction when available (optimizer_friction state, v2.27.0);
+            # the env-default constants remain the fallback — notably for
+            # the crypto engine, which runs no optimizer.
+            friction = self.db.get_state("optimizer_friction") or {}
+            stop_slip = float(
+                friction.get("stop_slippage_pct") or STOP_SLIPPAGE_PCT
+            )
+            cost_pct = float(
+                friction.get("cost_per_trade_pct") or COST_PER_TRADE_PCT
+            )
             symbols = sorted({v["symbol"] for v in vetoes})
             earliest = min(
                 datetime.fromisoformat(v["ts"]) for v in vetoes
@@ -276,7 +287,8 @@ class ArgusBot:
             now = datetime.now(timezone.utc)
             for veto in vetoes:
                 resolution = self._resolve_one_veto(
-                    veto, frames.get(veto["symbol"]), now
+                    veto, frames.get(veto["symbol"]), now,
+                    stop_slippage_pct=stop_slip, cost_per_trade_pct=cost_pct,
                 )
                 if resolution is not None:
                     outcome, exit_price, hypo_pnl = resolution
@@ -291,6 +303,8 @@ class ArgusBot:
         veto: Dict[str, Any],
         bars: Optional[pd.DataFrame],
         now: datetime,
+        stop_slippage_pct: float = STOP_SLIPPAGE_PCT,
+        cost_per_trade_pct: float = COST_PER_TRADE_PCT,
     ) -> Optional[Tuple[str, Optional[float], Optional[float]]]:
         """(outcome, exit_price, hypo_pnl) for one veto, or None to retry
         later (its trading horizon is still open)."""
@@ -356,14 +370,14 @@ class ArgusBot:
         # notional, and stop fills slip through the level against the trade.
         if outcome == "stop":
             exit_price = (
-                exit_price * (1.0 - STOP_SLIPPAGE_PCT)
+                exit_price * (1.0 - stop_slippage_pct)
                 if is_long
-                else exit_price * (1.0 + STOP_SLIPPAGE_PCT)
+                else exit_price * (1.0 + stop_slippage_pct)
             )
         gross = (
             (exit_price - entry) * qty if is_long else (entry - exit_price) * qty
         )
-        hypo_pnl = gross - COST_PER_TRADE_PCT * entry * qty
+        hypo_pnl = gross - cost_per_trade_pct * entry * qty
         return (outcome, exit_price, hypo_pnl)
 
     # ------------------------------------------------------------------ #

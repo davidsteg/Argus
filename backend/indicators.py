@@ -32,8 +32,10 @@ MIN_TARGET_PCT = 0.0050  # target never tighter than 0.50 % of price
 # thinks a trade makes" can never drift apart. COST is a round-trip
 # fraction of notional (half-spread in and out); stops additionally slip
 # against the trade because a breached stop fills through the level.
-# NOTE: measured live stop slippage (Jul 8–10) ran far above this default —
-# calibrating these from realized fills is an open backlog item.
+# Since v2.27.0 STOP_SLIPPAGE_PCT is only the FLOOR/fallback: each optimizer
+# run calibrates the working value from the ledger's realized stop fills
+# (optimizer.calibrate_stop_slippage) and publishes it in the
+# optimizer_friction state blob, which the shadow-veto resolver also reads.
 COST_PER_TRADE_PCT = float(os.getenv("OPTIMIZER_COST_PCT", "0.10")) / 100.0
 STOP_SLIPPAGE_PCT = float(os.getenv("OPTIMIZER_STOP_SLIP_PCT", "0.05")) / 100.0
 

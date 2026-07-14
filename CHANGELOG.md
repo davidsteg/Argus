@@ -9,6 +9,42 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.27.0] - 2026-07-14
+
+### Fixed
+- **Nightly optimization was being nullified by its own reviewer.** The
+  post-optimization LLM review compares the validated winner against the top
+  train-window candidates — but the winner dict had `news_cutoff`,
+  `analyst_enabled` and `short_enabled` merged in *before* the review (they
+  are carried forward into the config write), while candidates carry grid
+  keys only. The reviewer read the extra keys as a "structural mismatch
+  between grid search and validation configuration" and rejected the run —
+  e.g. the entire Jul 13 nightly (1h48m of compute) produced nothing. The
+  carry-forward merge now happens after the review, and
+  `analyst.review_optimization` additionally filters the winner to the
+  candidates' keys (belt and braces).
+
+### Added
+- **Fill-calibrated stop slippage.** Each optimizer run now measures realized
+  stop slippage from the ledger's own stop exits (median over up to 200
+  recent trades, minimum 8 samples, clamped to
+  `[OPTIMIZER_STOP_SLIP_PCT, 2%]` — calibration may make the backtest more
+  honest, never more optimistic) and uses it in every simulated fill instead
+  of the raw env guess. The calibrated value is published in the
+  `optimizer_friction` state blob and logged per run; the shadow-veto
+  resolver reads the same blob (fallback: env defaults, e.g. on the crypto
+  engine, which runs no optimizer) so both fill models stay identical.
+- **Multi-fold out-of-sample validation.** The 25 % holdout is now cut into
+  `OPTIMIZER_VALIDATION_FOLDS` (default 3) sequential folds; a candidate is
+  only promoted if profitable in a majority of folds AND in aggregate.
+  Fold-by-fold returns are recorded in the run detail and the OPTIMIZER log
+  line.
+- **Wider training data within the runtime budget.** Defaults raised from 30
+  days × 10 symbols to 60 days × 15 symbols. Measured baseline: ~108 min at
+  30 × 10, scaling linearly with days × symbols → ~5.5 h at the new
+  defaults, still inside the 22:00 UTC → 08:00 UTC overnight window. The
+  optimizer env knobs are now documented in `.env.example`.
+
 ## [v2.26.0] - 2026-07-13
 
 ### Added
