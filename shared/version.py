@@ -10,9 +10,31 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.27.0"
+__version__ = "2.27.1"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.27.1",
+        "date": "2026-07-14",
+        "title": "LLM reliability: retry-once with adaptive budget",
+        "notes": [
+            "Every analyst LLM call now retries once before giving up, so a "
+            "single flaky response can no longer fail-open a gate: the "
+            "crypto risk agent passed signals un-gated 6 times in the first "
+            "12 h of v2.26.0 because one blank Ollama reply was treated as "
+            "final. Persistent failures still fail open (availability over "
+            "gating) and still count in the analyst_health badge.",
+            "When the failure looks like the model spent its whole budget "
+            "reasoning before answering (truncated or non-JSON output), the "
+            "retry doubles the response budget. The watchlist curator — "
+            "which lost two runs to exactly that (its JSON list arrived cut "
+            "off mid-symbol) — also starts from a doubled 8192-token "
+            "budget.",
+            "Non-JSON failures now log the finish_reason, so truncation "
+            "('length') and disobedience ('stop') are distinguishable at a "
+            "glance in the log.",
+        ],
+    },
     {
         "version": "2.27.0",
         "date": "2026-07-14",

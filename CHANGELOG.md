@@ -9,6 +9,26 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.27.1] - 2026-07-14
+
+### Fixed
+- **One flaky LLM response no longer defeats a gate or a review.**
+  `_call_llm` now makes one automatic retry before raising: the crypto
+  engine's risk agent / portfolio manager failed open 6× in the first 12 h of
+  v2.26.0 on one-off `blank content (finish_reason=stop)` replies from
+  Ollama, and the watchlist curator lost two runs to truncated JSON. When the
+  failure signature is a spent reasoning budget (`finish_reason=length` or a
+  non-JSON/cut-off body), the retry doubles the response budget (capped at
+  16384). Each attempt is recorded in the llm_log individually; a failure of
+  the final attempt raises exactly as before, so fail-open accounting
+  (`analyst_health`) keeps meaning what it meant.
+- **Watchlist curator response budget 4096 → 8192.** Its answer is a
+  ~50-symbol JSON list, but reasoning models (deepseek-r1) burn most of the
+  budget thinking before emitting it — 4096 produced `LLM returned non-JSON
+  response` failures that were actually truncation (Jul 13 23:00, Jul 14
+  08:00). Non-JSON errors now include the `finish_reason` so truncation and
+  disobedience are distinguishable in the log.
+
 ## [v2.27.0] - 2026-07-14
 
 ### Fixed

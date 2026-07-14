@@ -811,12 +811,17 @@ class StrategyAnalyst:
         }
 
         try:
+            # 8192: the curator answers with a ~50-symbol JSON list, but
+            # reasoning models spend most of the budget thinking before the
+            # JSON — 4096 produced truncated lists ("non-JSON" failures) on
+            # 2026-07-13/14. The _call_llm retry doubles this once more if
+            # the response still comes back cut off.
             result = self._call_llm(
                 prompt_data, "watchlist",
                 system_prompt=WATCHLIST_REVIEW_PROMPT,
                 client_override=self._watchlist_client,
                 model_override=self._config.get("watchlist_model") or None,
-                max_tokens=4096,
+                max_tokens=8192,
             )
         except Exception as exc:
             logger.error("Watchlist review failed: %s", exc)
@@ -971,9 +976,20 @@ class StrategyAnalyst:
         client_override=None,
         model_override: Optional[str] = None,
         max_tokens: int = 2048,
+        retries: int = 1,
     ) -> Dict[str, Any]:
-        from llm_log import record_llm_call
+        """One LLM call with one automatic retry (v2.27.1).
 
+        A single flaky response must not fail-open a gate or waste a
+        review: the crypto risk agent failed open 6× in the first 12 h of
+        v2.26.0 on one-off "blank content (finish_reason=stop)" replies,
+        and the watchlist curator lost whole runs to truncated JSON. When
+        the failure looks like the model spent its budget reasoning
+        (finish_reason=length, or prose/cut-off instead of JSON) the retry
+        doubles the response budget. Every attempt — failed or not — is
+        still recorded in the llm_log, and a failure of the final attempt
+        raises exactly as before, so analyst_health fail-open accounting
+        keeps meaning what it meant."""
         client = client_override or self._client
         model = model_override or str(self._config.get("model", "deepseek-r1"))
         prompt = system_prompt or (
@@ -981,6 +997,37 @@ class StrategyAnalyst:
             "bot called Argus. Respond with valid JSON only, no markdown, no preamble."
         )
         payload = json.dumps(data, default=str, indent=2)
+
+        budget = max_tokens
+        last_exc: Optional[RuntimeError] = None
+        for attempt in range(retries + 1):
+            if attempt:
+                reason = str(last_exc)
+                if "finish_reason=length" in reason or "non-JSON" in reason:
+                    budget = min(budget * 2, 16384)
+                logger.warning(
+                    "Analyst %s review retry %d/%d (response budget %d) after: %.200s",
+                    review_type, attempt, retries, budget, reason,
+                )
+            try:
+                return self._call_llm_once(
+                    client, model, prompt, payload, review_type, budget
+                )
+            except RuntimeError as exc:
+                last_exc = exc
+        raise last_exc
+
+    def _call_llm_once(
+        self,
+        client,
+        model: str,
+        prompt: str,
+        payload: str,
+        review_type: str,
+        max_tokens: int,
+    ) -> Dict[str, Any]:
+        from llm_log import record_llm_call
+
         logger.info("Analyst calling %s for %s review (%d chars)", model, review_type, len(payload))
         started = time.monotonic()
 
@@ -1023,7 +1070,9 @@ class StrategyAnalyst:
         except json.JSONDecodeError:
             snippet = text[:500]
             logger.error("Analyst %s review — failed to parse JSON. Raw response (first 500 chars): %s", review_type, snippet)
-            raise _fail(f"LLM returned non-JSON response: {snippet}")
+            # finish_reason is part of the message so the retry logic (and a
+            # human reading the log) can tell truncation from disobedience.
+            raise _fail(f"LLM returned non-JSON response (finish_reason={finish}): {snippet}")
 
         record_llm_call(
             review_type, model, (time.monotonic() - started) * 1000,
