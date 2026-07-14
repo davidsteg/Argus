@@ -118,13 +118,18 @@ def _clear_status(db) -> None:
         pass
 
 
-# Grid searched nightly. Kept deliberately compact: 4*4*3*4*3*3*3 = 5184
-# combinations. NOT cheap at scale: replaying the grid measured ~108 min
-# at 30 days × 10 symbols (2026-07-13 run) and grows linearly with
-# days × symbols — see the runtime note on OPTIMIZER_MAX_SYMBOLS before
-# widening anything. Bracket distances are ATR multiples
-# (see indicators.bracket_distances), so the same parameters adapt to each
-# symbol's own volatility.
+# Grid searched nightly: 4*4*3*4*3*3*3*3 = 15552 combinations in full —
+# the long-standing "5184" comment under-counted by the dislocation
+# dimension. In practice the run searches effective_grid(), which pins the
+# two short dimensions to "disabled" while short_enabled is off live
+# (15552 → 1728 combos, 9×), both for speed and for fidelity: shorts are
+# simulated whenever rsi_short_signal < 999, so searching them while the
+# live engine can't take them ranked candidates on phantom short P&L.
+# NOT cheap at scale: the full grid measured ~108 min at 30 days × 10
+# symbols (2026-07-13 run) and grows linearly with days × symbols — see
+# the runtime note on OPTIMIZER_MAX_SYMBOLS before widening anything.
+# Bracket distances are ATR multiples (see indicators.bracket_distances),
+# so the same parameters adapt to each symbol's own volatility.
 PARAMETER_GRID: Dict[str, List[float]] = {
     "rsi_period": [7.0, 10.0, 14.0, 21.0],
     "rsi_buy_signal": [20.0, 25.0, 30.0, 35.0],
@@ -139,12 +144,52 @@ PARAMETER_GRID: Dict[str, List[float]] = {
     "max_vwap_dislocation_pct": [0.08, 0.15, 999.0],
 }
 
-# Total number of parameter combinations the grid search evaluates, computed
-# once so the live status can report a concrete progress fraction (the grid
-# itself is a module-level constant so this never drifts from the actual loop).
+# Total number of parameter combinations in the FULL grid (informational);
+# each run's actual count comes from effective_grid(), which may pin
+# dimensions, and is what the live status reports.
 GRID_TOTAL_COMBINATIONS = 1
 for _values in PARAMETER_GRID.values():
     GRID_TOTAL_COMBINATIONS *= len(_values)
+
+
+def effective_grid(live_config: Dict[str, float]) -> Dict[str, List[float]]:
+    """The grid a run actually searches, derived from the live config.
+
+    While short_enabled is off, the short dimensions are pinned to their
+    disabled sentinels (rsi_short_signal 999 never crosses, so backtest()
+    takes no shorts): the live engine cannot take a short, so exploring
+    3×3 short combinations both multiplied the grid 9× (15552 vs 1728)
+    and — worse — let candidates win on simulated short P&L the bot can
+    never realize."""
+    grid: Dict[str, List[float]] = dict(PARAMETER_GRID)
+    if not bool(live_config.get("short_enabled", 0.0)):
+        grid["rsi_short_signal"] = [999.0]
+        grid["rsi_short_exit"] = [0.0]
+    return grid
+
+
+def clear_stale_status() -> None:
+    """Reset the optimizer status blob at process start.
+
+    A run only lives inside its process: a deploy restart kills the grid-
+    search thread without running its `finally`, leaving the last progress
+    blob behind — the 2026-07-14 manual run died at the v2.27.2 restart
+    and the dashboard showed its frozen progress bar for hours ("optimizer
+    is very slow"). At process start nothing can be running yet, so any
+    non-idle phase found here is stale by definition. Never raises."""
+    try:
+        db = get_db()
+        status = db.get_state("optimizer_status") or {}
+        phase = status.get("phase")
+        if phase and phase != "idle":
+            db.add_log(
+                "OPTIMIZER",
+                f"Startup: cleared stale optimizer status (phase '{phase}' "
+                f"from a previous process — that run died with the restart)",
+            )
+        _clear_status(db)
+    except Exception as exc:
+        logger.error("Stale optimizer-status clear failed: %s", exc)
 
 
 def fetch_history(symbols: List[str], days: int) -> Dict[str, pd.DataFrame]:
@@ -646,6 +691,26 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
                 f"{STOP_SLIPPAGE_PCT * 100:.3f}% default",
             )
 
+        # The grid a run actually searches (short dims pinned while shorts
+        # are disabled live — 9× fewer combos AND no phantom short P&L in
+        # the ranking; see effective_grid).
+        grid = effective_grid(live_config)
+        short_dims_pinned = len(grid["rsi_short_signal"]) == 1
+        total_combos = 1
+        for values in grid.values():
+            total_combos *= len(values)
+        run["total_combinations"] = total_combos
+        db.add_log(
+            "OPTIMIZER",
+            f"Grid: {total_combos} combinations"
+            + (
+                " (short dimensions pinned — shorts are disabled live, so "
+                "simulating them would rank candidates on P&L the engine "
+                "cannot realize)"
+                if short_dims_pinned else " (full two-sided grid)"
+            ),
+        )
+
         # Score every combination on the train window, rank best-first.
         _publish_status(db, {
             "phase": "grid_search",
@@ -653,21 +718,21 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
             "started_at": started_at,
             "total_bars": total_bars,
             "n_symbols": len(history),
-            "total_combinations": GRID_TOTAL_COMBINATIONS,
+            "total_combinations": total_combos,
             "evaluated": 0,
             "candidates": 0,
         })
         ranked: List[Tuple[float, Dict[str, float], Tuple[float, float, int]]] = []
         evaluated = 0
         for rsi_period, rsi_buy, stop_mult, target_mult, exit_signal, short_signal, short_exit, max_disloc in itertools.product(
-            PARAMETER_GRID["rsi_period"],
-            PARAMETER_GRID["rsi_buy_signal"],
-            PARAMETER_GRID["atr_stop_mult"],
-            PARAMETER_GRID["atr_target_mult"],
-            PARAMETER_GRID["rsi_exit_signal"],
-            PARAMETER_GRID["rsi_short_signal"],
-            PARAMETER_GRID["rsi_short_exit"],
-            PARAMETER_GRID["max_vwap_dislocation_pct"],
+            grid["rsi_period"],
+            grid["rsi_buy_signal"],
+            grid["atr_stop_mult"],
+            grid["atr_target_mult"],
+            grid["rsi_exit_signal"],
+            grid["rsi_short_signal"],
+            grid["rsi_short_exit"],
+            grid["max_vwap_dislocation_pct"],
         ):
             score, total_return, drawdown, trades = train.score(
                 rsi_period=int(rsi_period),
@@ -689,7 +754,7 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
                     "started_at": started_at,
                     "total_bars": total_bars,
                     "n_symbols": len(history),
-                    "total_combinations": GRID_TOTAL_COMBINATIONS,
+                    "total_combinations": total_combos,
                     "evaluated": evaluated,
                     "candidates": len(ranked),
                 })
@@ -728,8 +793,8 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
             "started_at": started_at,
             "total_bars": total_bars,
             "n_symbols": len(history),
-            "total_combinations": GRID_TOTAL_COMBINATIONS,
-            "evaluated": GRID_TOTAL_COMBINATIONS,
+            "total_combinations": total_combos,
+            "evaluated": total_combos,
             "candidates": len(ranked),
             "validated": 0,
         })
@@ -767,8 +832,8 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
                     "started_at": started_at,
                     "total_bars": total_bars,
                     "n_symbols": len(history),
-                    "total_combinations": GRID_TOTAL_COMBINATIONS,
-                    "evaluated": GRID_TOTAL_COMBINATIONS,
+                    "total_combinations": total_combos,
+                    "evaluated": total_combos,
                     "candidates": len(ranked),
                     "validated": validated,
                 })
@@ -825,8 +890,8 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
                 "started_at": started_at,
                 "total_bars": total_bars,
                 "n_symbols": len(history),
-                "total_combinations": GRID_TOTAL_COMBINATIONS,
-                "evaluated": GRID_TOTAL_COMBINATIONS,
+                "total_combinations": total_combos,
+                "evaluated": total_combos,
                 "candidates": len(ranked),
                 "validated": validated,
             })
@@ -856,6 +921,13 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
         best_params["news_cutoff"] = current["news_cutoff"]
         best_params["analyst_enabled"] = current.get("analyst_enabled", 0.0)
         best_params["short_enabled"] = current.get("short_enabled", 0.0)
+        if short_dims_pinned:
+            # The 999/0 short sentinels were search-time placeholders, not
+            # tuned values; keep the stored short thresholds so flipping
+            # short_enabled on later starts from sane numbers instead of a
+            # short signal that can never fire.
+            best_params["rsi_short_signal"] = current.get("rsi_short_signal", 80.0)
+            best_params["rsi_short_exit"] = current.get("rsi_short_exit", 20.0)
 
         _publish_status(db, {
             "phase": "writing",
@@ -863,8 +935,8 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
             "started_at": started_at,
             "total_bars": total_bars,
             "n_symbols": len(history),
-            "total_combinations": GRID_TOTAL_COMBINATIONS,
-            "evaluated": GRID_TOTAL_COMBINATIONS,
+            "total_combinations": total_combos,
+            "evaluated": total_combos,
             "candidates": len(ranked),
             "validated": validated,
         })

@@ -9,6 +9,32 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.27.3] - 2026-07-14
+
+### Fixed
+- **The optimizer searched short parameters the engine can't trade.**
+  `backtest()` simulates shorts whenever `rsi_short_signal < 999`, and the
+  grid always explored 3×3 short combinations — while `short_enabled` is off
+  live. Two consequences: 9× wasted grid time (the grid is really 15,552
+  combinations, not the 5,184 the comment claimed — it under-counted the
+  dislocation dimension), and a fidelity hole — candidates were ranked and
+  validated partly on phantom short P&L. New `effective_grid()` pins the
+  short dimensions to their disabled sentinels while shorts are off
+  (15,552 → 1,728 combos; tonight's 60d × 15-symbol run: ~5.4 h → ~36 min)
+  and the full two-sided grid returns automatically when `short_enabled` is
+  turned on. When pinned, the stored `rsi_short_signal`/`rsi_short_exit`
+  config values are carried forward on write, so enabling shorts later
+  starts from sane thresholds rather than the 999/0 placeholders. Status
+  publishes and the run record report the run's true effective count.
+- **Ghost optimizer progress after a restart.** A deploy restart kills the
+  grid-search thread without its `finally`, leaving the last
+  `optimizer_status` blob in place — the dashboard showed a frozen
+  "grid_search 1000/15552" bar for ~3 h on Jul 14 from a manual run that had
+  died at the 12:07 v2.27.2 restart ("optimizer is very slow"). The engine
+  now calls `clear_stale_status()` at startup: any non-idle phase found
+  before the scheduler starts is by definition stale, is cleared, and the
+  aborted run is noted in the OPTIMIZER log.
+
 ## [v2.27.2] - 2026-07-14
 
 ### Fixed

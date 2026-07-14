@@ -10,9 +10,34 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.27.2"
+__version__ = "2.27.3"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.27.3",
+        "date": "2026-07-14",
+        "title": "Optimizer 9× faster while shorts are off; no more ghost progress bars",
+        "notes": [
+            "The grid search no longer explores short-side parameters while "
+            "shorts are disabled live: it was spending 9 of every 10 "
+            "combinations simulating trades the engine can never take — and "
+            "ranking candidates on that phantom P&L. With the short "
+            "dimensions pinned, tonight's 60-day × 15-symbol run drops from "
+            "~5.4 h to ~36 min, and the backtest finally is the live "
+            "strategy. (Flip shorts on and the full two-sided grid comes "
+            "back automatically; your stored short thresholds are preserved "
+            "either way.)",
+            "A deploy restart kills a running grid search but used to leave "
+            "its last progress blob behind — the dashboard showed a frozen "
+            "'running' bar for 3 hours today from a run that died at the "
+            "12:07 restart. The engine now clears stale optimizer status at "
+            "startup and logs that the old run was aborted.",
+            "Honest bookkeeping: the grid was actually 15,552 combinations, "
+            "not the 5,184 the code comment claimed (it under-counted a "
+            "dimension); comments, logs and the live status now report the "
+            "run's true effective count.",
+        ],
+    },
     {
         "version": "2.27.2",
         "date": "2026-07-14",

@@ -2459,6 +2459,12 @@ async def main() -> None:
     # crypto engine's params. Crypto runs on static/default params in v1.
     optimizer_task: Optional[asyncio.Task] = None
     if os.getenv("MARKET", "equity").strip().lower() != "crypto":
+        from optimizer import clear_stale_status
+
+        # A previous process's run died with that process; without this the
+        # dashboard keeps showing its frozen progress bar (2026-07-14: a
+        # manual run killed by a deploy restart "ran" for 3 h on screen).
+        clear_stale_status()
         optimizer_task = asyncio.create_task(schedule_daily_optimization())
 
     # The debug API runs in the same event loop as the engine so it can
