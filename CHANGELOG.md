@@ -9,6 +9,29 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.27.2] - 2026-07-14
+
+### Fixed
+- **Crypto dust is not a position.** Alpaca charges crypto fees in the base
+  asset and the engine floors close quantities to 8 dp (v2.26.0), so ~1e-9
+  coin residues survive every real close. Treated as positions, they (a)
+  held `max_positions` slots hostage — the risk agent rejected a real PEPE
+  entry because two of the "3 held crypto positions" were 2e-9 YFI and 9e-9
+  AAVE; (b) kept the protection watchdog busy attaching stops to
+  unmanageable balances; (c) produced the `-$0.00` / `-2.33%` rows in Trade
+  History (dust qty × real price move); and (d) — the real bug — swallowed
+  real trade records: `sync_portfolio` only reconciles a close once the
+  symbol *leaves* the account, and dust kept it alive, so the real AAVE
+  stop-out of Jul 13 (≈ -$27) and the YFI close of Jul 14 (≈ -$5) were never
+  ledgered; after the next restart their history rows show the dust close
+  instead. New `market.is_dust` (below the asset's `min_order_size`;
+  $0.01-notional fallback) filters dust out of the portfolio snapshot before
+  slots, watchdog, `live_symbols`, or the dashboard see it, and
+  `_sweep_dust` liquidates it via `close_position` once per session —
+  logged, but never recorded as a trade. The missing AAVE/YFI ledger rows
+  cannot be backfilled retroactively; full account-activities reconciliation
+  remains a backlog item.
+
 ## [v2.27.1] - 2026-07-14
 
 ### Fixed

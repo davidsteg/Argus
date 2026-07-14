@@ -213,6 +213,12 @@ class MarketAdapter(ABC):
         accepts them 24/7. Default False = limit closes only."""
         return False
 
+    def is_dust(self, symbol: str, qty: float, price: Optional[float]) -> bool:
+        """True for a residual balance too small to trade — not a position.
+        The engine excludes dust from its portfolio snapshot entirely.
+        Equities trade whole shares, so only an exact zero is dust."""
+        return qty == 0.0
+
     def build_bracket_entry_order(
         self,
         symbol: str,
@@ -690,6 +696,26 @@ class CryptoAdapter(MarketAdapter):
         # Alpaca accepts crypto market orders 24/7 — the last-resort close
         # escalation is always available on this market.
         return True
+
+    def is_dust(self, symbol: str, qty: float, price: Optional[float]) -> bool:
+        """Alpaca charges crypto fees in the base asset and the engine
+        floors close quantities to 8 dp, so ~1e-9-coin residues survive
+        every real close. Below the asset's min_order_size such a residue
+        cannot even be sold with a regular order — yet treated as a
+        position it wasted max_positions slots, spun the protection
+        watchdog, and swallowed real trade records: the reconciler only
+        fires when a symbol leaves the account, so dust kept the symbol
+        "alive" and the real close's P&L was never ledgered (the missing
+        AAVE -$27 / YFI -$5 rows of 2026-07-13/14, replaced by -$0.00
+        dust trades after a restart). Falls back to a $0.01 notional test
+        when the asset metadata is not loaded."""
+        q = abs(qty)
+        if q == 0.0:
+            return True
+        min_size = self._assets.get(symbol, {}).get("min_order_size", 0.0)
+        if min_size > 0:
+            return q < min_size
+        return price is not None and q * float(price) < 0.01
 
     def regime(self) -> Dict[str, Any]:
         # BTC/USD as the "market" proxy, 24/7 annualization. Fails open to

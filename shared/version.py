@@ -10,9 +10,37 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.27.1"
+__version__ = "2.27.2"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.27.2",
+        "date": "2026-07-14",
+        "title": "Crypto dust is not a position",
+        "notes": [
+            "Alpaca charges crypto fees in the coin itself and the engine "
+            "floors close quantities, so a billionth of a coin survives "
+            "every real close. That residue was being counted as a "
+            "position: it hogged max_positions slots (the risk agent "
+            "rejected a real entry this morning because two of the "
+            "'3 held positions' were 2e-9 YFI and 9e-9 AAVE), busied the "
+            "protection watchdog, and produced the confusing -$0.00 / "
+            "-2.33% rows in Trade History.",
+            "Worst of all it silently swallowed real trade records: the "
+            "reconciler only records a trade when a symbol leaves the "
+            "account, and dust kept the symbol alive — yesterday's real "
+            "AAVE stop-out (≈ -$27) and today's YFI close (≈ -$5) never "
+            "made it into the ledger; after a restart their rows were "
+            "replaced by -$0.00 dust closes. (The equity curve was always "
+            "right — it reads the account, not the ledger.)",
+            "Fix: balances below the asset's minimum order size are dust, "
+            "not positions — filtered out of the portfolio snapshot before "
+            "slots, watchdog, or reconciliation see them, and quietly "
+            "liquidated once per session without ever becoming a trade "
+            "record. Real closes now reconcile immediately even though "
+            "their dust remains for a moment.",
+        ],
+    },
     {
         "version": "2.27.1",
         "date": "2026-07-14",

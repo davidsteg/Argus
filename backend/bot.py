@@ -134,6 +134,9 @@ class ArgusBot:
         # symbol -> consecutive cycles the protection watchdog could not
         # attach stop/target levels to an untracked position.
         self._protect_failures: Dict[str, int] = {}
+        # Symbols whose residual dust was already swept (or the sweep
+        # failed) this session — one liquidation attempt per symbol.
+        self._dust_swept: set = set()
 
     # ------------------------------------------------------------------ #
     # loser cooldown
@@ -1520,6 +1523,24 @@ class ArgusBot:
             }
             for p in live_positions
         ]
+
+        # Residual fee/floor dust is NOT a position (see market.is_dust):
+        # counting it held max_positions slots hostage, spun the protection
+        # watchdog on unmanageable 1e-9 balances, and — worst — kept the
+        # symbol in live_symbols after a real close, so the reconciler
+        # never recorded the real trade (its P&L vanished from the ledger,
+        # replaced after a restart by a -$0.00 dust row). Dust is dropped
+        # here, before anything downstream sees it, and swept from the
+        # account once per session without ever becoming a trade record.
+        dust = [
+            p for p in snapshot
+            if self.market.is_dust(p["symbol"], p["qty"], p.get("current_price"))
+        ]
+        if dust:
+            dust_symbols = {p["symbol"] for p in dust}
+            snapshot = [p for p in snapshot if p["symbol"] not in dust_symbols]
+            await self._sweep_dust(dust)
+
         self.db.replace_positions(snapshot)
 
         live_symbols = {p["symbol"] for p in snapshot}
@@ -1622,6 +1643,33 @@ class ArgusBot:
         self.db.set_status(equity=equity)
         self.db.record_equity(equity)
         return {"equity": equity, "positions": snapshot}
+
+    async def _sweep_dust(self, dust_positions: List[Dict[str, Any]]) -> None:
+        """Liquidate residual dust balances, once per symbol per session.
+
+        Uses close_position (full position, no qty), which demonstrably
+        works below the minimum order size where regular orders are
+        rejected with "qty must be > 0". Deliberately NOT routed through
+        _limit_close and never recorded as a trade — dust is a fee/rounding
+        remainder worth ~$0.000001, not a trade. A failed sweep is logged
+        at debug level and not retried: invisible dust on the account is
+        harmless once it no longer counts as a position."""
+        for pos in dust_positions:
+            symbol = pos["symbol"]
+            if symbol in self._dust_swept:
+                continue
+            self._dust_swept.add(symbol)
+            try:
+                await asyncio.to_thread(
+                    self.trading.close_position, symbol.replace("/", "")
+                )
+                self.db.add_log(
+                    "INFO",
+                    f"{symbol}: swept {abs(pos['qty']):g} residual dust "
+                    f"(fee/rounding remainder — not a position, not a trade)",
+                )
+            except Exception as exc:
+                logger.debug("Dust sweep failed for %s: %s", symbol, exc)
 
     @staticmethod
     def _infer_exit_reason(

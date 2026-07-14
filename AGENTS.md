@@ -38,7 +38,13 @@ release pipeline, and mistakes already made and fixed once.
   ATR-scaled levels to anything still naked (or closes it after 3 cycles
   without data). Don't remove the watchdog call from `run_cycle` and don't
   let a new code path create a position that isn't in `_open_entries` with
-  levels.
+  levels. Deliberate exception (v2.27.2): sub-min-order-size **dust**
+  (`market.is_dust`) is filtered out of the portfolio snapshot before
+  anything sees it — it is a fee/rounding remainder, not a position.
+  Counting dust as a position wasted `max_positions` slots and, worse,
+  kept a really-closed symbol in `live_symbols` so the reconciler never
+  recorded the real trade. Don't "protect" or trade dust; it is swept via
+  `close_position` once per session and never becomes a trade record.
 - **The daily kill-sequence and dashboard EMERGENCY HARD STOP must always
   work independently of engine state** — `EngineController.kill()` and
   the frontend's `execute_hard_stop()` both construct their own
