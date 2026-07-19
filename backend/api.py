@@ -176,7 +176,9 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
         watchlist = probe.watchlist or universe.get_watchlist()
         frames = await probe.fetch_minute_bars()
         regime_info = await asyncio.to_thread(probe.market.regime)
-        regime_blocks = regime_module.blocks_long_entries(regime_info)
+        # v2.28.0: mirror the live engine — only stressed TREND_DOWN gates
+        # entries; blocks_long_entries is reporting-only.
+        regime_blocks = regime_module.blocks_new_entries(regime_info)
         evaluation: Dict[str, Any] = {}
         for symbol in watchlist:
             bars = frames.get(symbol)
@@ -298,11 +300,10 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
                 entry.update(
                     {
                         "decision": "BLOCKED",
-                        "reason": "all technical + sentiment gates passed but "
-                        f"the market regime is "
-                        f"{regime_info.get('regime', '?')} with the index "
-                        "below its EMA — no new BUY entries into a falling "
-                        "tape (shadow-tracked by the live engine)",
+                        "reason": "all technical gates passed but the market "
+                        "regime is TREND_DOWN (index below EMA on stressed "
+                        "vol) — no new BUY entries into a falling tape "
+                        "(shadow-tracked by the live engine)",
                     }
                 )
             else:

@@ -1142,9 +1142,9 @@ def dashboard() -> None:
             market_chip = chip()
             engine_chip = chip()
             regime_chip["holder"].tooltip(
-                "Market regime gates new entries only (index below its EMA "
-                "= no new buys, stressed or calm; blocked signals are "
-                "shadow-tracked). Evaluated while the market is open."
+                "Market regime gates new entries only (stressed downtrend "
+                "= no new buys; blocked signals are shadow-tracked). "
+                "Evaluated while the market is open."
             )
             market_chip["holder"].tooltip(
                 "Crypto market — 24/7" if is_crypto() else "US equity market session"
@@ -2593,8 +2593,8 @@ def dashboard() -> None:
             )
             regime_checked_label.set_text(
                 f"Checked {fmt_clock(regime_info.get('checked_at'))} — a "
-                "down-trend blocks new buys (shadow-tracked); the regime "
-                "never forces exits"
+                "stressed downtrend blocks new buys (shadow-tracked); the "
+                "regime never forces exits"
             )
         else:
             regime_detail_trend.set_text("—")

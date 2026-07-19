@@ -9,6 +9,33 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.28.0] - 2026-07-19
+
+### Changed
+- **Sentiment gate is measure-only.** Jul 14–19 shadow ledger: 198 equity
+  vetoes worth **+$632** of hypothetical wins (41% would-win) — the most
+  expensive gate in the stack; bearish-headline dips bounced harder, not
+  softer. `evaluate_signal` now logs the low-sentiment condition and trades
+  anyway (both sides). No shadow veto is recorded for a signal that actually
+  trades (it would double-count the real outcome); measurement continues via
+  `entry_sentiment` on every trade record.
+- **Regime entry gate reverted to stressed TREND_DOWN only.** The v2.26.0
+  calm-drift extension (any index-below-EMA blocks longs) was priced by its
+  own ledger at **+$224 equity / +$460 crypto** of blocked winners in one
+  week (crypto: 58% of blocked entries would have won — BTC's trend is a
+  poor proxy for alt dips). The engine gates on `blocks_new_entries` again;
+  `blocks_long_entries` remains for `GET /regime` observability. CAUTION
+  still halves the position cap; actual blocks are still shadow-tracked.
+- **Short-selling startup breadcrumb.** Shorts turned on ~15:47 UTC Jul 14
+  with no attributable actor in the reachable log window and ran 50 trades
+  (24% WR, -$77) before being noticed. The engine now logs a WARNING at
+  every start while `short_enabled` is on. Operational follow-up: turn
+  Short Selling OFF in Settings (also re-arms the v2.27.3 pinned optimizer
+  grid, ~36 min nightly instead of ~6 h).
+- Deliberately unchanged: VWAP re-check (**-$603**, the one clearly
+  valuable gate), both LLM gates (~flat — kept blocking to limit
+  simultaneous changes), all v2.26–v2.27.3 machinery.
+
 ## [v2.27.3] - 2026-07-14
 
 ### Fixed

@@ -74,9 +74,14 @@ backend/
                   never duplicated into either caller.
   regime.py       SPY trend + realized-vol classifier (TREND_UP/CAUTION/
                   TREND_DOWN); gates new entries only, never forces exits.
-                  Since v2.26.0 any down-trend blocks new longs
-                  (blocks_long_entries), shadow-tracked as the "regime"
-                  veto gate
+                  Entry gate = stressed TREND_DOWN only (v2.28.0 reverted
+                  the v2.26.0 any-down-trend extension after its own
+                  shadow ledger priced it at +$224/+$460 of blocked
+                  winners in one week). blocks_long_entries is
+                  reporting-only; blocks are shadow-tracked as the
+                  "regime" veto gate. The sentiment gate is measure-only
+                  since v2.28.0 for the same reason (+$632) — don't
+                  re-arm either without fresh ledger evidence.
   sentiment.py    Alpaca news → Claude scorer → keyword heuristic →
                   neutral fallback, cached per symbol
   universe.py     static symbol list or dynamic most-actives watchlist

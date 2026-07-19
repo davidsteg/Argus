@@ -488,21 +488,22 @@ class ArgusBot:
                 return None
 
             sentiment, source = await self.process_news_sentiment(symbol)
+            # v2.28.0: the sentiment gate no longer blocks. Its Jul 14-19
+            # shadow ledger showed $632 of blocked would-be winners (the
+            # single most expensive gate); dips with bearish headlines
+            # bounced MORE, not less. Sentiment is still computed and
+            # recorded on every trade (entry_sentiment), so its predictive
+            # value keeps being measured on real fills — no shadow veto is
+            # recorded for a signal that actually trades, or the ledger
+            # would double-count the real outcome.
             if sentiment <= self.config["news_cutoff"]:
                 self.db.add_log(
                     "INFO",
-                    f"{symbol}: RSI {latest_rsi:.1f} triggered BUY but sentiment "
+                    f"{symbol}: RSI {latest_rsi:.1f} BUY with sentiment "
                     f"{sentiment:.2f} ({source}) <= cutoff "
-                    f"{self.config['news_cutoff']:.2f} — skipped",
+                    f"{self.config['news_cutoff']:.2f} — trading anyway "
+                    f"(gate is measure-only since v2.28.0)",
                 )
-                self._record_veto(
-                    {"symbol": symbol, "side": "BUY",
-                     "price": latest_close, "atr": atr},
-                    "sentiment",
-                    f"sentiment {sentiment:.2f} ({source}) <= cutoff "
-                    f"{self.config['news_cutoff']:.2f}",
-                )
-                return None
 
             return {
                 "symbol": symbol,
@@ -547,28 +548,19 @@ class ArgusBot:
                 return None
 
             sentiment, source = await self.process_news_sentiment(symbol)
-            # Shorts use the mirror of the long gate: longs need
-            # sentiment > news_cutoff, shorts need sentiment below
-            # 1 - news_cutoff. Both cutoffs sit the same distance from
-            # neutral, so a no-news 0.5 passes both sides — only actively
-            # bullish headlines block a short, exactly as only actively
-            # bearish headlines block a long.
+            # Mirror of the long side: measure-only since v2.28.0 (see the
+            # long-side note). A short with bullish headlines is logged but
+            # no longer skipped; entry_sentiment on the trade record keeps
+            # the measurement alive.
             short_cutoff = 1.0 - self.config["news_cutoff"]
             if sentiment >= short_cutoff:
                 self.db.add_log(
                     "INFO",
-                    f"{symbol}: RSI {latest_rsi:.1f} triggered SELL but sentiment "
+                    f"{symbol}: RSI {latest_rsi:.1f} SELL with sentiment "
                     f"{sentiment:.2f} ({source}) >= short cutoff "
-                    f"{short_cutoff:.2f} — too bullish to short, skipped",
+                    f"{short_cutoff:.2f} — trading anyway "
+                    f"(gate is measure-only since v2.28.0)",
                 )
-                self._record_veto(
-                    {"symbol": symbol, "side": "SELL",
-                     "price": latest_close, "atr": atr},
-                    "sentiment",
-                    f"sentiment {sentiment:.2f} ({source}) >= short cutoff "
-                    f"{short_cutoff:.2f}",
-                )
-                return None
 
             return {
                 "symbol": symbol,
@@ -1925,6 +1917,16 @@ class ArgusBot:
             self.market.name,
             self.market.describe_mode(),
         )
+        # Breadcrumb: shorts once turned on unnoticed (first spotted days
+        # later in the trade history, 2026-07-14, and nobody could say who
+        # enabled them). An enabled short side must never be silent.
+        if bool(cfg.get("short_enabled", 0.0)):
+            self.db.add_log(
+                "WARNING",
+                "Short selling is ENABLED — SELL signals will trade. If this "
+                "is unexpected, turn it off in Settings → Short Selling. "
+                "(Its first live week, Jul 14–18, ran 24% win rate, -$77.)",
+            )
 
         # Publish operational environment (no secrets) so the Settings tab
         # can display and edit them.
@@ -2102,18 +2104,18 @@ class ArgusBot:
             # have working protection (levels + something enforcing them).
             await self._ensure_position_protection(portfolio, exit_frames)
 
-        # Market regime shapes how much book we run this cycle: ANY
-        # down-trend (index below its EMA, stressed or calm) blocks new
-        # longs — every dip is a knife; 2026-07-13's calm-vol CAUTION drift
-        # stopped out 23 of 28 dip-buys — while shorts stay allowed since a
-        # falling market favours them. CAUTION (trend down OR vol elevated)
-        # additionally halves the position cap. Blocked BUY signals are
-        # still evaluated and shadow-recorded (gate "regime") so this gate's
-        # P&L is measured like every other gate. Existing positions keep
-        # their soft stop/target and the daily stop still guards them.
+        # Market regime shapes how much book we run this cycle. v2.28.0
+        # reverts the entry gate to STRESSED TREND_DOWN only (trend down
+        # AND elevated vol): the v2.26.0 calm-drift extension blocked every
+        # long while the index sat a cent under its EMA, and its own shadow
+        # ledger priced that at +$224 (equity) / +$460 (crypto) of missed
+        # winners over Jul 14-19 — the gate it was, judged by the ledger it
+        # brought. CAUTION (trend down OR vol elevated) still halves the
+        # position cap, blocked BUYs are still shadow-recorded (gate
+        # "regime"), and existing positions keep their stops regardless.
         regime_info = await asyncio.to_thread(self.market.regime)
         cycle["regime"] = regime_info
-        regime_blocks_longs = regime.blocks_long_entries(regime_info)
+        regime_blocks_longs = regime.blocks_new_entries(regime_info)
 
         max_positions = int(self.config.get("max_positions", 5))
         if regime_info.get("regime") == regime.CAUTION:

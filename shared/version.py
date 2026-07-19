@@ -10,9 +10,37 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.27.3"
+__version__ = "2.28.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.28.0",
+        "date": "2026-07-19",
+        "title": "Checkpoint: the gates judged by their own ledger",
+        "notes": [
+            "The news-sentiment gate no longer blocks entries. Its "
+            "shadow ledger priced a single week of its vetoes at $632 in "
+            "blocked would-be winners — the most expensive gate in the "
+            "stack. Dips with bearish headlines bounced more, not less. "
+            "Sentiment is still scored and recorded on every trade, so its "
+            "predictive value keeps being measured on real fills.",
+            "The regime gate is back to blocking longs only in a STRESSED "
+            "downtrend (falling index AND elevated volatility). The "
+            "calm-drift extension from v2.26.0 blocked $224 (equities) / "
+            "$460 (crypto) of hypothetical winners in its first measured "
+            "week — judged and reverted by the very ledger it introduced. "
+            "Blocked signals stay shadow-tracked.",
+            "Short selling gets a startup breadcrumb: if it is enabled, "
+            "the engine logs a WARNING at start — it once turned on "
+            "without anyone remembering doing it, and traded 50 times "
+            "(24% win rate, -$77) before being noticed in the history. "
+            "Recommended: keep Short Selling OFF in Settings for now; "
+            "that also re-arms the 9× faster pinned optimizer grid.",
+            "Kept deliberately unchanged for clean measurement: the VWAP "
+            "re-check (saved $603 — the one clearly good gate), both LLM "
+            "gates (measured ~flat), and everything shipped in v2.26–27.",
+        ],
+    },
     {
         "version": "2.27.3",
         "date": "2026-07-14",
