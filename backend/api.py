@@ -118,6 +118,52 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
             "updated_at": db.get_config_updated_at(),
         }
 
+    @app.post("/config")
+    async def set_config(updates: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+        """Update strategy/operational parameters remotely — the same
+        bot_config write the dashboard Settings sliders perform, with the
+        same kind of audit line. Exists because config was previously only
+        writable through the dashboard UI: when short_enabled flipped on
+        unattributed (2026-07-14) there was no scripted way to flip it back,
+        and no remote-ops path at all. Keys are validated against
+        DEFAULT_CONFIG (the single source of truth for valid keys — unknown
+        keys are rejected, not silently dropped, so a typo cannot look like
+        success); values must be numeric. The engine re-reads bot_config
+        every cycle, so changes take effect within one poll interval."""
+        from shared.database import DEFAULT_CONFIG
+
+        unknown = [k for k in updates if k not in DEFAULT_CONFIG]
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown config keys: {', '.join(sorted(unknown))} "
+                       f"(valid: {', '.join(sorted(DEFAULT_CONFIG))})",
+            )
+        filtered: Dict[str, float] = {}
+        for key, value in updates.items():
+            try:
+                filtered[key] = float(value)
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    status_code=400, detail=f"{key} must be numeric"
+                )
+        if not filtered:
+            raise HTTPException(
+                status_code=400, detail="No config keys provided"
+            )
+        db.set_config(filtered)
+        # Same audit-trail contract as the dashboard's manual-change WARNING:
+        # every config writer must leave an attributable log line.
+        db.add_log(
+            "WARNING",
+            "Strategy parameters changed via debug API: "
+            + ", ".join(f"{k}={v:g}" for k, v in filtered.items()),
+        )
+        return {
+            "config": db.get_config(),
+            "updated_at": db.get_config_updated_at(),
+        }
+
     @app.get("/debug")
     async def debug() -> Dict[str, Any]:
         clock_info: Dict[str, Any]

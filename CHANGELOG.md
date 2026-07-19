@@ -9,6 +9,20 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.28.1] - 2026-07-19
+
+### Added
+- **`POST /config` on the debug API** — remote, scripted parameter changes.
+  Same `bot_config` write as the dashboard Settings sliders and the same
+  audit contract: every call leaves a `WARNING` log line ("Strategy
+  parameters changed via debug API: …"). Keys validated against
+  `DEFAULT_CONFIG` (unknown keys → 400 listing valid keys, so a typo cannot
+  masquerade as success); values must be numeric; the engine picks changes
+  up within one poll cycle. Motivation: config was writable only through
+  the dashboard UI — when `short_enabled` flipped on unattributed
+  (2026-07-14) there was no scripted way to flip it back or manage settings
+  remotely. README endpoint table updated.
+
 ## [v2.28.0] - 2026-07-19
 
 ### Changed

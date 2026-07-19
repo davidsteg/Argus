@@ -141,6 +141,7 @@ the backend API.
 | `GET /health` | liveness: process, database, Alpaca connectivity |
 | `GET /status` | bot status, equity, daily PnL, engine task state |
 | `GET /config` | live strategy parameters + last optimization time |
+| `POST /config` | update strategy/operational parameters (validated against `DEFAULT_CONFIG`, audit-logged like dashboard changes) |
 | `GET /debug` | engine internals: env, last cycle trace, cooldowns |
 | `GET /regime` | current market regime (SPY trend + realized vol) |
 | `GET /signals` | dry-run of the full decision pipeline per symbol |

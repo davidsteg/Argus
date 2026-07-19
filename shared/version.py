@@ -10,9 +10,25 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.28.0"
+__version__ = "2.28.1"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.28.1",
+        "date": "2026-07-19",
+        "title": "Remote config: POST /config on the debug API",
+        "notes": [
+            "Strategy and operational parameters can now be changed via "
+            "POST /config on the debug API — the same bot_config write the "
+            "dashboard sliders perform, with the same WARNING audit line "
+            "(prefixed 'via debug API' so every config change stays "
+            "attributable). Keys are validated against DEFAULT_CONFIG and "
+            "unknown keys are rejected loudly, not dropped. Until now the "
+            "dashboard UI was the only way to change parameters — there "
+            "was no scripted path to, say, turn off an unexpectedly "
+            "enabled short side.",
+        ],
+    },
     {
         "version": "2.28.0",
         "date": "2026-07-19",
