@@ -32,7 +32,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import numpy as np
 from fastapi import Body, FastAPI, HTTPException, Query
@@ -383,6 +383,37 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
         risk agent, portfolio manager) with each veto's resolved hypothetical
         P&L — the evidence for whether a gate saves money or costs it."""
         return {"stats": db.get_veto_stats(), "vetoes": db.get_vetoes(limit)}
+
+    @app.get("/shadow/strategies")
+    async def shadow_strategies() -> Dict[str, Any]:
+        """Per-strategy expectancy scoreboard for the candidate strategies
+        trading a paper book alongside the live engine (backend/strategies.py,
+        shadow.py) — trade count, win rate, expectancy, open positions. The
+        evidence for whether a candidate has earned a look at real capital."""
+        stats = db.get_shadow_stats()
+        open_counts: Dict[str, int] = {}
+        for pos in db.get_shadow_positions():
+            open_counts[pos["strategy"]] = open_counts.get(pos["strategy"], 0) + 1
+        for name in set(stats) | set(open_counts):
+            stats.setdefault(name, {
+                "total": 0, "total_pnl": 0.0, "wins": 0, "losses": 0,
+                "avg_win": 0.0, "avg_loss": 0.0, "expectancy": 0.0,
+            })
+            stats[name]["open_positions"] = open_counts.get(name, 0)
+        return {"strategies": stats}
+
+    @app.get("/shadow/positions")
+    async def shadow_positions(
+        strategy: Optional[str] = Query(None)
+    ) -> Dict[str, Any]:
+        return {"positions": db.get_shadow_positions(strategy)}
+
+    @app.get("/shadow/trades")
+    async def shadow_trades(
+        strategy: Optional[str] = Query(None),
+        limit: int = Query(50, ge=1, le=500),
+    ) -> Dict[str, Any]:
+        return {"trades": db.get_shadow_trades(strategy, limit)}
 
     @app.get("/logs")
     async def logs(limit: int = Query(20, ge=1, le=500)) -> Dict[str, Any]:

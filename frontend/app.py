@@ -330,6 +330,24 @@ EQUITY_RANGES: Dict[str, Optional[timedelta]] = {
 # ---------------------------------------------------------------------- #
 
 
+def _shadow_strategy_snapshot(db) -> Dict[str, Any]:
+    """Per-strategy expectancy stats plus each strategy's open paper
+    position count — mirrors the merge api.py's GET /shadow/strategies
+    endpoint performs, kept separate from get_shadow_stats() so that DB
+    method stays a pure trade aggregate like get_trade_stats/get_veto_stats."""
+    stats = db.get_shadow_stats()
+    open_counts: Dict[str, int] = {}
+    for pos in db.get_shadow_positions():
+        open_counts[pos["strategy"]] = open_counts.get(pos["strategy"], 0) + 1
+    for name in set(stats) | set(open_counts):
+        stats.setdefault(name, {
+            "total": 0, "total_pnl": 0.0, "wins": 0, "losses": 0,
+            "avg_win": 0.0, "avg_loss": 0.0, "expectancy": 0.0,
+        })
+        stats[name]["open_positions"] = open_counts.get(name, 0)
+    return stats
+
+
 def fetch_snapshot(
     log_limit: int, equity_since: Optional[str], market: str = "equity"
 ) -> Dict[str, Any]:
@@ -360,6 +378,7 @@ def fetch_snapshot(
         "analyst_health": db.get_state("analyst_health"),
         "protection_health": db.get_state("protection_health"),
         "veto_stats": db.get_veto_stats(),
+        "shadow_strategies": _shadow_strategy_snapshot(db),
         "analyst_config": db.get_state("analyst_config") or {},
         "analyst_call_log": db.get_state("analyst_call_log") or [],
         "analyst_review_history": db.get_state("analyst_review_history") or [],
@@ -1498,6 +1517,28 @@ def dashboard() -> None:
                     vetoes_box = ui.column().classes("w-full gap-1")
                     vetoes_empty = ui.label(
                         "No vetoed signals recorded yet."
+                    ).classes(f"text-xs {TEXT_MUTED}")
+
+                # Shadow strategies — candidate entry strategies trading a
+                # paper book alongside the live one, same bars/friction,
+                # zero real capital. The scoreboard that decides whether a
+                # candidate has earned a look at real money.
+                with card():
+                    card_title(
+                        "🧪 Shadow strategies",
+                        "candidates trading on paper — same bars, zero capital",
+                    )
+                    ui.label(
+                        "Each candidate evaluates every symbol every cycle "
+                        "and trades a fully separate paper book: same "
+                        "ATR-bracket math and calibrated friction as the "
+                        "live engine, no real orders. A candidate earns a "
+                        "track record before anyone considers giving it "
+                        "real money."
+                    ).classes(f"text-xs {TEXT_MUTED}")
+                    shadow_box = ui.column().classes("w-full gap-1")
+                    shadow_empty = ui.label(
+                        "No shadow trades recorded yet."
                     ).classes(f"text-xs {TEXT_MUTED}")
 
                 # Connection & schedule config
@@ -3510,6 +3551,58 @@ def dashboard() -> None:
                         f"text-sm font-mono {pnl_color} shrink-0"
                     )
 
+    STRATEGY_LABELS = {
+        "fear_confirmation": "😨 Fear confirmation",
+        "random_baseline": "🎲 Random baseline",
+    }
+
+    def render_shadow_strategies(snapshot: Dict[str, Any]) -> None:
+        strategies = snapshot.get("shadow_strategies") or {}
+        fingerprint = tuple(
+            sorted(
+                (name, s.get("total"), round(s.get("total_pnl", 0.0) or 0.0, 2))
+                for name, s in strategies.items()
+            )
+        )
+        if render_state.get("shadow_fp") == fingerprint:
+            return
+        render_state["shadow_fp"] = fingerprint
+
+        shadow_empty.set_visibility(not strategies)
+        shadow_box.clear()
+        if not strategies:
+            return
+        with shadow_box:
+            for name, s in sorted(
+                strategies.items(), key=lambda kv: kv[1].get("total_pnl", 0.0),
+                reverse=True,
+            ):
+                total = int(s.get("total") or 0)
+                pnl = float(s.get("total_pnl") or 0.0)
+                expectancy = float(s.get("expectancy") or 0.0)
+                open_positions = int(s.get("open_positions") or 0)
+                wins = int(s.get("wins") or 0)
+                pnl_color = (
+                    PNL_GREEN if pnl > 0
+                    else "text-rose-400" if pnl < 0
+                    else TEXT_MUTED
+                )
+                with ui.row().classes(
+                    "w-full items-center justify-between gap-3 flex-nowrap "
+                    "border-b border-[#222938] py-1"
+                ):
+                    ui.label(
+                        STRATEGY_LABELS.get(name, name)
+                    ).classes("text-sm text-white shrink-0")
+                    ui.label(
+                        f"{total} trades · {wins}W/{total - wins}L · "
+                        f"{open_positions} open · "
+                        f"expectancy ${expectancy:+,.2f}/trade"
+                    ).classes(f"text-xs {TEXT_MUTED} truncate")
+                    ui.label(f"${pnl:+,.2f}").classes(
+                        f"text-sm font-mono {pnl_color} shrink-0"
+                    )
+
     def render_review_history(snapshot: Dict[str, Any]) -> None:
         history = snapshot.get("analyst_review_history") or []
         fingerprint = (
@@ -3936,6 +4029,7 @@ def dashboard() -> None:
         )
         render_analyst_agents(snapshot)
         render_vetoes(snapshot)
+        render_shadow_strategies(snapshot)
         render_review_history(snapshot)
         render_call_log(snapshot)
 

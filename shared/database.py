@@ -22,6 +22,12 @@ vetoed_signals  shadow ledger of signals a gate blocked (sentiment, VWAP
                 re-check, risk agent, portfolio manager) with the bracket they
                 would have traded; resolved later against market data so each
                 gate's hypothetical P&L is measurable instead of guesswork
+shadow_positions  open paper positions for candidate strategies that are not
+                  the live strategy — same bars, same friction model, zero
+                  real capital, so a strategy earns a track record before
+                  ever touching money (see backend/strategies.py, shadow.py)
+shadow_trades     closed shadow-strategy trades, mirrors `trades` but keyed
+                  by strategy name for per-candidate expectancy comparison
 logs            system event log with strict UTC ISO-8601 timestamps
 equity_history  periodic account-equity snapshots powering the dashboard curve
 runtime_state   JSON key/value blobs the engine publishes for the dashboard
@@ -210,6 +216,38 @@ CREATE TABLE IF NOT EXISTS optimizer_runs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_optimizer_runs_id_desc ON optimizer_runs (id DESC);
+
+CREATE TABLE IF NOT EXISTS shadow_positions (
+    strategy      TEXT NOT NULL,
+    symbol        TEXT NOT NULL,
+    side          TEXT NOT NULL,
+    qty           REAL NOT NULL,
+    entry_price   REAL NOT NULL,
+    entry_time    TEXT NOT NULL,
+    stop_loss     REAL NOT NULL,
+    take_profit   REAL NOT NULL,
+    entry_rsi     REAL,
+    entry_atr     REAL,
+    rationale     TEXT,
+    PRIMARY KEY (strategy, symbol)
+);
+
+CREATE TABLE IF NOT EXISTS shadow_trades (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy      TEXT NOT NULL,
+    symbol        TEXT NOT NULL,
+    side          TEXT NOT NULL,
+    qty           REAL NOT NULL,
+    entry_price   REAL NOT NULL,
+    exit_price    REAL,
+    entry_time    TEXT NOT NULL,
+    exit_time     TEXT,
+    realized_pnl  REAL,
+    exit_reason   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_shadow_trades_strategy ON shadow_trades (strategy);
+CREATE INDEX IF NOT EXISTS idx_shadow_trades_exit_time ON shadow_trades (exit_time);
 """
 
 # Columns added to existing tables after their initial release. CREATE TABLE
@@ -655,6 +693,134 @@ class Database:
             "total": sum(g["total"] for g in gates.values()),
             "resolved": sum(g["resolved"] for g in gates.values()),
             "hypo_pnl": sum(g["hypo_pnl"] for g in gates.values()),
+        }
+
+    # ------------------------------------------------------------------ #
+    # shadow strategies (candidate strategies trading on paper alongside
+    # the live one — see backend/strategies.py, backend/shadow.py)
+    # ------------------------------------------------------------------ #
+
+    def open_shadow_position(
+        self,
+        strategy: str,
+        symbol: str,
+        side: str,
+        qty: float,
+        entry_price: float,
+        stop_loss: float,
+        take_profit: float,
+        entry_rsi: Optional[float] = None,
+        entry_atr: Optional[float] = None,
+        rationale: Optional[str] = None,
+    ) -> None:
+        """Record a candidate strategy's paper entry. One open position per
+        (strategy, symbol) — INSERT OR REPLACE mirrors `positions`, which is
+        similarly keyed by symbol alone for the live (single-strategy) book."""
+        self._execute(
+            "INSERT OR REPLACE INTO shadow_positions "
+            "(strategy, symbol, side, qty, entry_price, entry_time, "
+            " stop_loss, take_profit, entry_rsi, entry_atr, rationale) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                strategy, symbol, side, float(qty), float(entry_price),
+                _utcnow(), float(stop_loss), float(take_profit),
+                _optional_float(entry_rsi), _optional_float(entry_atr),
+                rationale,
+            ),
+        )
+
+    def get_shadow_positions(
+        self, strategy: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        if strategy is None:
+            rows = self._query("SELECT * FROM shadow_positions")
+        else:
+            rows = self._query(
+                "SELECT * FROM shadow_positions WHERE strategy = ?", (strategy,)
+            )
+        return [dict(row) for row in rows]
+
+    def close_shadow_position(
+        self,
+        strategy: str,
+        symbol: str,
+        exit_price: float,
+        realized_pnl: float,
+        exit_reason: str,
+    ) -> None:
+        """Atomically move an open shadow position into shadow_trades. The
+        read-then-delete-then-insert happens under the single connection
+        lock (_execute/_query serialize through the same RLock), so a
+        concurrent open_shadow_position for the same key cannot interleave."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM shadow_positions WHERE strategy = ? AND symbol = ?",
+                (strategy, symbol),
+            ).fetchall()
+            if not rows:
+                return
+            pos = dict(rows[0])
+            self._conn.execute(
+                "DELETE FROM shadow_positions WHERE strategy = ? AND symbol = ?",
+                (strategy, symbol),
+            )
+            self._conn.execute(
+                "INSERT INTO shadow_trades "
+                "(strategy, symbol, side, qty, entry_price, exit_price, "
+                " entry_time, exit_time, realized_pnl, exit_reason) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    strategy, symbol, pos["side"], pos["qty"],
+                    pos["entry_price"], float(exit_price), pos["entry_time"],
+                    _utcnow(), float(realized_pnl), exit_reason,
+                ),
+            )
+            self._conn.commit()
+
+    def get_shadow_trades(
+        self, strategy: Optional[str] = None, limit: int = 200
+    ) -> List[Dict[str, Any]]:
+        if strategy is None:
+            rows = self._query(
+                "SELECT * FROM shadow_trades ORDER BY id DESC LIMIT ?", (limit,)
+            )
+        else:
+            rows = self._query(
+                "SELECT * FROM shadow_trades WHERE strategy = ? "
+                "ORDER BY id DESC LIMIT ?",
+                (strategy, limit),
+            )
+        return [dict(row) for row in rows]
+
+    def get_shadow_stats(self) -> Dict[str, Any]:
+        """Per-strategy expectancy aggregates — the scoreboard that decides
+        whether a candidate has earned a look at real capital: trade count,
+        win rate, total/average P&L. Mirrors get_trade_stats/get_veto_stats."""
+        rows = self._query(
+            "SELECT strategy, "
+            "  COUNT(*)                                          AS total, "
+            "  COALESCE(SUM(realized_pnl), 0)                    AS total_pnl, "
+            "  SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) AS wins, "
+            "  SUM(CASE WHEN realized_pnl <= 0 THEN 1 ELSE 0 END) AS losses, "
+            "  COALESCE(AVG(CASE WHEN realized_pnl > 0 "
+            "      THEN realized_pnl END), 0)                    AS avg_win, "
+            "  COALESCE(AVG(CASE WHEN realized_pnl <= 0 "
+            "      THEN realized_pnl END), 0)                    AS avg_loss "
+            "FROM shadow_trades WHERE realized_pnl IS NOT NULL "
+            "GROUP BY strategy"
+        )
+        return {
+            row["strategy"]: {
+                "total": int(row["total"]),
+                "total_pnl": float(row["total_pnl"]),
+                "wins": int(row["wins"] or 0),
+                "losses": int(row["losses"] or 0),
+                "avg_win": float(row["avg_win"]),
+                "avg_loss": float(row["avg_loss"]),
+                "expectancy": float(row["total_pnl"]) / int(row["total"])
+                if row["total"] else 0.0,
+            }
+            for row in rows
         }
 
     # ------------------------------------------------------------------ #

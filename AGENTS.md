@@ -53,6 +53,13 @@ release pipeline, and mistakes already made and fixed once.
   engine has crashed.
 - Never remove or bypass `DAILY_STOP_LOSS`, `MAX_POSITIONS`, or
   `MIN_PRICE_USD` checks to "test something quickly."
+- **Shadow strategies (strategies.py/shadow.py) may never submit a real
+  order, call `self.trading`, or touch anything but their own
+  `shadow_positions`/`shadow_trades` tables.** The entire point of the
+  harness is that a candidate earns a track record with zero capital at
+  risk before anyone considers it for real money; a strategy that could
+  place live orders defeats that. Promotion to live trading is a
+  deliberate, reviewed, separate change — never automatic.
 
 ## Architecture map
 
@@ -68,6 +75,20 @@ backend/
   api.py          FastAPI debug/ops app (port 8000/8002 depending on deploy)
                   — THE primary diagnostic surface, see below
   optimizer.py    nightly grid search, midnight Europe/Zurich
+  strategies.py   candidate strategies for the shadow harness — pure
+                  evaluate(symbol, bars, config) -> Signal|None, no I/O.
+                  Reuses indicators.py math so a candidate can never drift
+                  from the live/backtest signal math
+  shadow.py       runs strategies.py candidates on a paper book every
+                  cycle: same bracket math, same calibrated friction as
+                  the optimizer/veto resolver, zero real capital, own DB
+                  tables (shadow_positions/shadow_trades). Called from
+                  bot.py right after the session-open gate — decoupled
+                  from the live book's slots/regime/EOD state on purpose,
+                  and wrapped in try/except so a candidate bug can never
+                  reach live trading. Add a strategy by subclassing
+                  ShadowStrategy and adding it to STRATEGIES; nothing else
+                  needs to change for it to start earning a track record
   indicators.py   RSI / ATR / VWAP / bracket-distance math — SHARED by
                   bot.py and optimizer.py so live signals and backtests
                   can never drift apart. Any indicator change goes here,

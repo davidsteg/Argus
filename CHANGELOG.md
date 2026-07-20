@@ -9,6 +9,39 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.29.0] - 2026-07-20
+
+### Added
+- **Shadow-strategy harness.** Candidate entry strategies (`backend/strategies.py`)
+  now trade a fully separate paper book alongside the live engine every
+  cycle the market is open (`backend/shadow.py`): same bars, the same
+  ATR-bracket math (`indicators.py`), the same calibrated friction model
+  the optimizer and the vetoed-signal resolver use, and zero real capital.
+  A candidate accumulates a real track record — trade count, win rate,
+  expectancy — before anyone considers giving it money. The runner is
+  called right after the session-open gate, before the live book's
+  slot count / regime gate / EOD-flatten logic, so a full or paused live
+  book never silences candidate measurement; the call is wrapped in
+  try/except so a bug in a candidate can never reach live trading. New
+  `shadow_positions` / `shadow_trades` tables; new
+  `GET /shadow/strategies` `/positions` `/trades` endpoints; new "Shadow
+  strategies" card on the Analyst tab.
+- **Two candidates, seeded from the Jul 14–19 shadow-veto ledger's own
+  findings**: `fear_confirmation` requires a VWAP dislocation DEEPER than
+  the live falling-knife cap allows plus a confirmed upturn before
+  entering — testing whether the dips the live gates rejected as "too
+  scary" are actually the better trades (the ledger's inversion, tested
+  directly). `random_baseline` fires on the same RSI-trigger bars as the
+  live strategy but picks its side with a deterministic coin flip
+  (seeded from symbol + bar timestamp, so a restart replays the same
+  decisions) — the control that answers whether the live entry's
+  direction call carries any information over noise. Add a third
+  candidate by subclassing `ShadowStrategy`; nothing else changes.
+- Hard invariant (documented in AGENTS.md): shadow strategies may never
+  submit a real order or touch anything but their own two tables.
+  Promotion of a candidate to live capital is a deliberate, reviewed,
+  manual change — never automatic.
+
 ## [v2.28.1] - 2026-07-19
 
 ### Added

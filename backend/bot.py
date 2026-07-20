@@ -59,6 +59,7 @@ from dotenv import load_dotenv
 
 import regime
 from analyst import get_analyst
+from shadow import ShadowRunner
 from indicators import (
     COST_PER_TRADE_PCT,
     STOP_SLIPPAGE_PCT,
@@ -134,6 +135,10 @@ class ArgusBot:
         # symbol -> consecutive cycles the protection watchdog could not
         # attach stop/target levels to an untracked position.
         self._protect_failures: Dict[str, int] = {}
+        # Candidate strategies trading a separate paper book alongside the
+        # live one (backend/strategies.py, shadow.py) — zero real capital,
+        # own DB tables, decoupled from every live gate/slot/regime check.
+        self._shadow_runner = ShadowRunner()
         # Symbols whose residual dust was already swept (or the sweep
         # failed) this session — one liquidation attempt per symbol.
         self._dust_swept: set = set()
@@ -2063,6 +2068,20 @@ class ArgusBot:
                 cycle["next_open"] = str(state.next_open)
             cycle["stage"] = "market-closed"
             return
+
+        # Shadow-strategy candidates run every cycle the market is open,
+        # BEFORE the EOD-flatten/held-symbols/regime/slot logic below so a
+        # full or paused live book, or a market-closed candle for the live
+        # symbol set, never silences candidate measurement. Own paper book,
+        # own DB tables, wrapped so a candidate bug can never reach live
+        # trading (see shadow.py's module docstring).
+        try:
+            await self._shadow_runner.run_cycle(
+                self.market, self.config, self.db, self.watchlist
+            )
+        except Exception as exc:
+            logger.error("Shadow strategy cycle failed: %s", exc)
+            self.db.add_log("ERROR", f"Shadow strategy cycle failed: {exc}")
 
         # End-of-day flatten (equities only): entries are DAY limit orders that
         # expire at the extended close, which would leave a surviving position

@@ -10,9 +10,38 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.28.1"
+__version__ = "2.29.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.29.0",
+        "date": "2026-07-20",
+        "title": "Shadow strategies: candidates trade paper before they trade money",
+        "notes": [
+            "New shadow-strategy harness: candidate entry strategies now "
+            "trade a fully separate paper book alongside the live engine "
+            "every cycle — same bars, same ATR-bracket math, the same "
+            "calibrated friction model as the optimizer and the veto "
+            "resolver, and zero real capital. A candidate earns a real "
+            "track record (trade count, win rate, expectancy) before "
+            "anyone considers giving it money. Decoupled from the live "
+            "book's slots, regime gate and EOD-flatten state on purpose, "
+            "and wrapped so a candidate bug can never reach live trading.",
+            "Two candidates seeded directly from the Jul 14–19 shadow-veto "
+            "ledger's findings: Fear Confirmation requires a DEEPER VWAP "
+            "dislocation than the live falling-knife cap allows plus a "
+            "confirmed upturn before entry — testing whether the 'too "
+            "scary' dips the live gates rejected are actually the better "
+            "trades. Random Baseline fires on the same RSI-trigger bars as "
+            "the live strategy but picks its side with a coin flip — the "
+            "control that answers whether the live entry's direction call "
+            "carries any information at all.",
+            "New 'Shadow strategies' card on the Analyst tab (and GET "
+            "/shadow/strategies, /positions, /trades) shows each "
+            "candidate's trade count, win rate, expectancy and open paper "
+            "positions — the scoreboard for the next strategy decision.",
+        ],
+    },
     {
         "version": "2.28.1",
         "date": "2026-07-19",
