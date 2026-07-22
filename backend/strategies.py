@@ -8,7 +8,7 @@ use, decide whether to open a signal. No I/O, no LLM calls, no side effects
 cycle. Sizing, exit management, persistence and friction live in shadow.py,
 not here, so a strategy author only ever writes the entry rule.
 
-These two candidates are seeded directly from the 2026-07-14..19 shadow-veto
+The first two candidates are seeded from the 2026-07-14..19 shadow-veto
 ledger's findings (see CHANGELOG v2.28.0 / the argus-profitability-backlog
 memory): signals the live gates blocked for being "too scary" (bearish
 sentiment, a calm downtrend) or "too extended" (deep VWAP dislocation)
@@ -20,6 +20,15 @@ the live RSI/VWAP entry carry any directional information at all, or would
 a coin flip on the same trigger bars do just as well? If the live strategy
 cannot beat this control, no amount of parameter tuning will fix it — the
 entry itself is the defect.
+
+That control has now returned its verdict (Jul 8–22 ledger, v2.30.0): the
+live entry's expectancy (-$3.65/trade) is statistically indistinguishable
+from the coin flip's (-$3.77) — the mean-reversion dip entry carries no
+directional edge on this universe. MomentumBreakoutStrategy is the response:
+the opposite hypothesis, buying breakouts (strength) instead of dips
+(weakness), on the premise that these high-beta most-actives trend rather
+than revert. It earns its own paper track record before anyone considers it
+for real capital — the whole point of the harness.
 
 Adding a third candidate: subclass ShadowStrategy, implement evaluate(), add
 an instance to STRATEGIES. It starts accumulating a paper track record on
@@ -229,10 +238,103 @@ class RandomBaselineStrategy(ShadowStrategy):
         )
 
 
+class MomentumBreakoutStrategy(ShadowStrategy):
+    """The opposite hypothesis to the live entry. The live strategy buys
+    oversold dips below VWAP (mean reversion); the random_baseline control
+    showed that entry carries no directional edge on this most-actives
+    universe (Jul 8–22 ledger: live expectancy -$3.65 ≈ coin-flip -$3.77 —
+    see argus-profitability-backlog). If dip-buying is edgeless because these
+    high-beta names trend rather than revert, the natural thing to test next
+    is the inverse: buy *strength*, not weakness. This fires on a fresh
+    breakout above the recent high while price leads VWAP and RSI is strong
+    but not blow-off exhausted — trend continuation. Mirror rule shorts a
+    breakdown below the recent low when shorts are enabled. Same bracket and
+    friction math as every other candidate, so its track record is directly
+    comparable to the live strategy's."""
+
+    name = "momentum_breakout"
+    max_positions = 5
+
+    LOOKBACK = 20  # bars whose high/low define the breakout level
+    RSI_FLOOR = 55.0  # momentum must be present...
+    RSI_CEILING = 78.0  # ...but not a parabolic blow-off
+
+    def evaluate(self, symbol, bars, config):
+        period = max(int(config.get("rsi_period", 14)), 2)
+        if len(bars) < max(period * 2 + 2, self.LOOKBACK + 2):
+            return None
+        rsi = compute_rsi(bars["close"], period)
+        atr = compute_atr(bars)
+        vwap = compute_vwap(bars)
+        closes = bars["close"]
+        latest_rsi = float(rsi.iloc[-1])
+        latest_atr = float(atr.iloc[-1])
+        latest_vwap = float(vwap.iloc[-1])
+        latest_close = float(closes.iloc[-1])
+        if np.isnan(latest_rsi) or np.isnan(latest_atr) or latest_atr <= 0:
+            return None
+        stop_mult = config.get("atr_stop_mult", 2.0)
+        target_mult = config.get("atr_target_mult", 4.0)
+        if stop_is_floored(latest_close, latest_atr, stop_mult):
+            return None
+
+        # Breakout level excludes the current bar, so "cleared the high" means
+        # the latest close exceeds the prior LOOKBACK bars, not itself.
+        prior = closes.iloc[-(self.LOOKBACK + 1):-1]
+        prior_high = float(prior.max())
+        prior_low = float(prior.min())
+
+        if (
+            latest_close > prior_high
+            and latest_close > latest_vwap
+            and self.RSI_FLOOR <= latest_rsi <= self.RSI_CEILING
+        ):
+            stop_d, target_d = bracket_distances(
+                latest_close, latest_atr, stop_mult, target_mult
+            )
+            return Signal(
+                symbol=symbol, side="BUY", price=latest_close,
+                atr=latest_atr, rsi=latest_rsi,
+                stop_loss=latest_close - stop_d,
+                take_profit=latest_close + target_d,
+                rationale=(
+                    f"Breakout: close ${latest_close:.2f} cleared the "
+                    f"{self.LOOKBACK}-bar high ${prior_high:.2f} while leading "
+                    f"VWAP ${latest_vwap:.2f}, RSI {latest_rsi:.1f} (momentum, "
+                    f"not exhaustion) — trend continuation long."
+                ),
+            )
+
+        if not bool(config.get("short_enabled", 0.0)):
+            return None
+        if (
+            latest_close < prior_low
+            and latest_close < latest_vwap
+            and (100.0 - self.RSI_CEILING) <= latest_rsi <= (100.0 - self.RSI_FLOOR)
+        ):
+            stop_d, target_d = bracket_distances(
+                latest_close, latest_atr, stop_mult, target_mult
+            )
+            return Signal(
+                symbol=symbol, side="SELL", price=latest_close,
+                atr=latest_atr, rsi=latest_rsi,
+                stop_loss=latest_close + stop_d,
+                take_profit=latest_close - target_d,
+                rationale=(
+                    f"Breakdown: close ${latest_close:.2f} broke the "
+                    f"{self.LOOKBACK}-bar low ${prior_low:.2f} below VWAP "
+                    f"${latest_vwap:.2f}, RSI {latest_rsi:.1f} — trend "
+                    f"continuation short."
+                ),
+            )
+        return None
+
+
 # Registered candidates, evaluated every cycle the market is open. Order is
 # cosmetic (dashboard listing order); each strategy's own position book is
 # independent.
 STRATEGIES: List[ShadowStrategy] = [
     FearConfirmationStrategy(),
     RandomBaselineStrategy(),
+    MomentumBreakoutStrategy(),
 ]

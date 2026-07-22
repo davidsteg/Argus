@@ -585,7 +585,7 @@ class ArgusBot:
         return None
 
     def evaluate_exit(
-        self, bars: pd.DataFrame, side: str
+        self, bars: pd.DataFrame, side: str, entry_price: Optional[float] = None
     ) -> Optional[Dict[str, Any]]:
         """Early-exit decision for a held position.
 
@@ -593,21 +593,39 @@ class ArgusBot:
         overbought exit level. Short: the overextension has corrected once
         RSI drops to the oversold exit level. Returns exit context, or None
         to keep holding. The bracket's stop/target still guard the position
-        independently; this only banks the reversion sooner."""
+        independently; this only banks the reversion sooner.
+
+        Winner-capping guard (v2.30.0): the RSI-recovery exit exists to bank a
+        reversion that has actually turned a profit. Firing it while the
+        position is still below its cost basis (net of round-trip friction)
+        converts a live stop/target into a guaranteed loss-after-costs and
+        hands back the ATR target for pennies — the mechanism behind the
+        0.92:1 realized win/loss payoff in the Jul 8–22 ledger, where signal
+        exits banked ~$2.44 on average while stops ran the full distance. When
+        an entry_price is known, require the move to clear round-trip friction
+        before banking; otherwise keep holding and let the bracket manage it."""
         period = max(int(self.config["rsi_period"]), 2)
         if len(bars) < period * 2:
             return None
         latest_rsi = float(compute_rsi(bars["close"], period).iloc[-1])
         if np.isnan(latest_rsi):
             return None
+        latest_close = float(bars["close"].iloc[-1])
+        friction = self.config.get("entry_slip_pct", 0.001) + self.config.get(
+            "exit_slip_pct", 0.002
+        )
         if side == "BUY":
             if latest_rsi < self.config["rsi_exit_signal"]:
                 return None
-            return {"rsi": latest_rsi, "close": float(bars["close"].iloc[-1])}
+            if entry_price and latest_close < entry_price * (1.0 + friction):
+                return None
+            return {"rsi": latest_rsi, "close": latest_close}
         else:
             if latest_rsi > self.config["rsi_short_exit"]:
                 return None
-            return {"rsi": latest_rsi, "close": float(bars["close"].iloc[-1])}
+            if entry_price and latest_close > entry_price * (1.0 - friction):
+                return None
+            return {"rsi": latest_rsi, "close": latest_close}
 
     # ------------------------------------------------------------------ #
     # order placement
@@ -1041,7 +1059,10 @@ class ArgusBot:
             bars = frames.get(symbol)
             if bars is None or bars.empty:
                 continue
-            exit_signal = self.evaluate_exit(bars, side)
+            entry_price = position.get("avg_entry_price")
+            exit_signal = self.evaluate_exit(
+                bars, side, float(entry_price) if entry_price else None
+            )
             if exit_signal is None:
                 continue
             await self.close_position_now(symbol, position, exit_signal)

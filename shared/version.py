@@ -10,9 +10,42 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.29.0"
+__version__ = "2.30.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.30.0",
+        "date": "2026-07-22",
+        "title": "Winner-capping exit fix + a momentum candidate for the dead signal",
+        "notes": [
+            "The RSI-recovery early exit no longer scratches a position for "
+            "pennies. evaluate_exit now knows each position's entry price and "
+            "refuses to bank the signal exit while the trade is still below "
+            "its cost basis net of round-trip friction — the mechanism behind "
+            "the Jul 8–22 ledger's inverted 0.92:1 win/loss payoff, where "
+            "signal exits banked ~$2.44 on average (often under break-even "
+            "after costs) while stops ran the full distance. A reversion that "
+            "hasn't actually turned a profit now keeps its bracket instead of "
+            "being handed back; the stop and target still guard it "
+            "independently.",
+            "New momentum_breakout shadow candidate. The random_baseline "
+            "control has returned its verdict: the live mean-reversion dip "
+            "entry's expectancy (-$3.65/trade) is statistically "
+            "indistinguishable from a coin flip (-$3.77) — no directional "
+            "edge on the most-actives universe. momentum_breakout tests the "
+            "opposite hypothesis on the same book: buy strength, not weakness "
+            "— a fresh breakout above the trailing 20-bar high while price "
+            "leads VWAP and RSI is strong but not a blow-off (mirror "
+            "breakdown short when shorts are enabled). It earns its own paper "
+            "track record first; no live-trading change.",
+            "Ops: the equity engine's live config had drifted from the "
+            "shipped defaults (falling-knife cap switched off at "
+            "max_vwap_dislocation_pct=999, target stretched to 4.0×ATR, "
+            "rsi_exit 60, max_positions 10, daily_stop 1000). Restored to "
+            "sane defaults via the audited POST /config — crypto was already "
+            "clean, so the drift was equity-only and unattributed.",
+        ],
+    },
     {
         "version": "2.29.0",
         "date": "2026-07-20",

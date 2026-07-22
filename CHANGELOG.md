@@ -9,6 +9,45 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.30.0] - 2026-07-22
+
+### Fixed
+- **Winner-capping early exit.** `ArgusBot.evaluate_exit` now takes the
+  position's `entry_price` and refuses to fire the RSI-recovery signal exit
+  while the position is still below its cost basis net of round-trip friction
+  (`entry_slip_pct + exit_slip_pct`). The Jul 8–22 ledger showed this exit
+  banking ~$2.44 average "winners" — frequently below break-even after
+  costs — while losers ran the full stop, for a realized win/loss payoff of
+  0.92:1 against a 2.5×/1.5×-ATR (1.67:1) bracket. A reversion that hasn't
+  actually turned a profit now keeps its bracket instead of being scratched
+  for pennies; the stop and target still guard the position independently.
+  When no entry price is available the legacy behaviour (bank on RSI recovery
+  alone) is preserved, so the change is inert on adopted/naked positions.
+
+### Added
+- **`momentum_breakout` shadow candidate** (`backend/strategies.py`). The
+  `random_baseline` control has returned its verdict — the live
+  mean-reversion dip entry's expectancy (-$3.65/trade over Jul 8–22) is
+  statistically indistinguishable from a coin flip (-$3.77), i.e. no
+  directional edge on the most-actives universe. This candidate tests the
+  opposite hypothesis on the same trigger universe: buy strength, not
+  weakness — a fresh breakout above the trailing 20-bar high while price
+  leads VWAP and RSI is strong (55–78) but not a blow-off, with the mirror
+  breakdown short when shorts are enabled. Same bracket and friction math as
+  the other candidates, so its paper track record is directly comparable to
+  the live strategy's. No live-trading change — it earns a record first.
+
+### Ops
+- **Equity live-config drift corrected** (operational, audited `POST
+  /config` — no code change). The equity engine's `bot_config` had drifted
+  from the shipped `DEFAULT_CONFIG`, most damagingly
+  `max_vwap_dislocation_pct = 999` (falling-knife cap OFF; default `0.15`) —
+  the source of the deepest-dip losses (entries 7%+ below VWAP averaged
+  -$33.73). Also restored: `atr_target_mult` 4.0→2.5, `rsi_exit_signal`
+  60→70, `max_positions` 10→5, `daily_stop_loss` 1000→100. The crypto engine
+  was already at these values, so the drift was equity-only and
+  unattributed — the same failure mode as the Jul 14 `short_enabled` flip.
+
 ## [v2.29.0] - 2026-07-20
 
 ### Added
