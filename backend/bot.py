@@ -2201,6 +2201,45 @@ class ArgusBot:
         # Deepest dips first for BUY, highest overextension first for SELL
         pending_signals.sort(key=lambda s: s["rsi"])
 
+        # Research mode (v2.31.0): live entries paused. Placed BEFORE the
+        # regime/LLM gates on purpose — every RAW technical signal is
+        # shadow-recorded (gate "entries_paused") so the paused period keeps
+        # measuring exactly what the ungated entry rule would have done,
+        # priced by the same hypothetical resolver as every other gate. The
+        # LLM phases are skipped: no orders will be placed, so their vetoes
+        # would measure nothing this cycle. Everything protective already ran
+        # above (stops, signal exits, watchdog, EOD flatten, shadow book).
+        if bool(self.config.get("entries_paused", 0.0)):
+            for s in pending_signals:
+                self._record_veto(
+                    s,
+                    "entries_paused",
+                    "live entries paused (research mode) — raw signal "
+                    "recorded for hypothetical resolution",
+                )
+            if pending_signals:
+                self.db.add_log(
+                    "INFO",
+                    f"Entries paused — {len(pending_signals)} signal"
+                    f"{'s' if len(pending_signals) != 1 else ''} "
+                    f"shadow-recorded, none traded",
+                )
+            paused_map = {
+                s["symbol"]: f"paused-{s['side']}" for s in pending_signals
+            }
+            for symbol in frames:
+                if symbol not in paused_map and symbol not in held_symbols:
+                    paused_map[symbol] = "no-signal"
+            cycle["evaluated"] = paused_map
+            cycle["entries_paused"] = len(pending_signals)
+            cycle["stage"] = "entries-paused"
+            # Background research (analyst reviews, watchlist curation,
+            # screener) must keep running while paused — the shadow
+            # candidates trade the curated watchlist, and pausing live
+            # entries must never starve the research pipeline it exists for.
+            self._schedule_background_research(regime_info)
+            return
+
         # Regime gate: veto BUY signals while the index trends down, shadow-
         # recording each one exactly like the sentiment/risk/PM gates so
         # GET /vetoes answers whether the blocked dip-buys would have won.
@@ -2325,6 +2364,13 @@ class ArgusBot:
         cycle["evaluated"] = evaluated
         cycle["stage"] = "complete"
 
+        self._schedule_background_research(regime_info)
+
+    def _schedule_background_research(self, regime_info: Dict[str, Any]) -> None:
+        """Kick off the periodic background tasks (LLM reviews, watchlist
+        curation, opportunity screener) if none are already running. Shared
+        by the normal cycle tail and the entries-paused early return — a
+        paused live book must never starve the research pipeline."""
         # Periodic LLM reviews run in the background so a slow review can
         # never delay the next order-placing cycle. At most one review batch
         # runs at a time.

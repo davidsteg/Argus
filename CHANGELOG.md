@@ -9,6 +9,54 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.31.0] - 2026-07-29
+
+### Added
+- **`entries_paused` config key — research mode.** When set, the engine
+  opens no new live positions; everything else keeps running: stop
+  enforcement, signal exits, the protection watchdog, EOD flatten, the
+  shadow harness, and the background research pipeline (analyst reviews,
+  watchlist curation, screener — extracted into
+  `_schedule_background_research` so the paused path shares it). Every
+  would-be entry is shadow-recorded as an `entries_paused` veto with the
+  exact bracket and size the engine would have traded, so the paused period
+  keeps measuring the raw entry rule through the same hypothetical resolver
+  as every other gate. The gate sits BEFORE the regime/LLM phases on
+  purpose: with no order to place, their vetoes would measure nothing, and
+  the raw-rule record is the research-grade number. `/debug` shows stage
+  `entries-paused` with a `paused-BUY/SELL` per-symbol map; the dashboard
+  shows an amber banner driven off live config. **Why:** the Jul 8–28
+  ledger (408 closed trades) plus three shadow candidates falsified the
+  entire entry family on this universe — live dip-buy (−$3.9/trade),
+  coin-flip control (−$2.2), momentum (−$2.5), deep-dip (−$9.9) all lose at
+  roughly the same rate. Further live trades buy data we already own.
+- **The terrain experiment: `liquid_dip` and `liquid_momentum` shadow
+  candidates.** Every direction rule losing equally — while the crypto
+  engine runs the same code on liquid majors near breakeven — points at the
+  universe, not the trigger: thin, gappy, sub-$20 most-actives are
+  unwinnable after friction. The new candidates complete the
+  {dip, momentum} × {all, liquid} grid: `liquid_dip` replicates the live
+  technical rule exactly (same config keys, RSI + VWAP dip + falling-knife
+  cap) plus a $20 price floor; `liquid_momentum` subclasses
+  `momentum_breakout` with the same floor. Each is one variable away from a
+  running baseline (the live rule's own veto ledger, and
+  `momentum_breakout` respectively), so the scoreboard reads directly as an
+  answer to "was it the terrain?"
+
+### Changed
+- **`fear_confirmation` retired** (`max_positions = 0`): falsified at
+  −$9.93/trade expectancy over 43 shadow trades — deeper dips resolved
+  worse, not better. Entries stop; the shadow runner keeps draining its
+  open paper positions; its scoreboard row and DB history remain.
+- **The nightly optimizer does not apply parameters while entries are
+  paused.** The grid, validation folds, friction calibration and LLM review
+  all still run and the run is recorded (status `frozen_paused`, with the
+  would-be winner in the log), but `bot_config` stays frozen: shadow
+  candidates read `rsi_period`/bracket multiples from live config, and a
+  nightly rewrite mid-experiment would make their track records a moving
+  target (the Jul 28 run overwrote the v2.30.0 ops restore hours after the
+  daily breaker had already killed the engine).
+
 ## [v2.30.0] - 2026-07-22
 
 ### Fixed

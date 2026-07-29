@@ -10,9 +10,46 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.30.0"
+__version__ = "2.31.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.31.0",
+        "date": "2026-07-29",
+        "title": "Research mode: entries paused, the terrain experiment begins",
+        "notes": [
+            "New entries_paused config key (research mode). With it set, the "
+            "engine opens no new live positions but everything else keeps "
+            "running: stop enforcement, signal exits, the protection "
+            "watchdog, EOD flatten and the shadow harness. Every would-be "
+            "entry is recorded as an 'entries_paused' veto and priced by the "
+            "same hypothetical resolver as every other gate — the pause "
+            "itself keeps measuring the live rule at zero cost. Rationale: "
+            "Jul 8–28 ledger, 408 closed trades, every direction rule on the "
+            "most-actives universe (live dip-buy, coin-flip control, "
+            "momentum, deep-dip) lost at roughly the same rate — the entry "
+            "family is falsified; further live trades buy data we already "
+            "own. An amber dashboard banner makes the mode impossible to "
+            "miss.",
+            "The terrain experiment: the working hypothesis is now that the "
+            "UNIVERSE (thin, gappy, sub-$20 most-actives), not the trigger, "
+            "is the defect — the crypto engine runs the same code on liquid "
+            "majors near breakeven. Two new shadow candidates complete the "
+            "{dip, momentum} × {all, liquid} grid: liquid_dip is the exact "
+            "live entry rule plus a $20 price floor; liquid_momentum is "
+            "momentum_breakout plus the same floor. Each sits one variable "
+            "from a running baseline, so the scoreboard reads directly as "
+            "an answer. fear_confirmation is retired (falsified at "
+            "-$9.93/trade): entries off, open paper positions keep draining, "
+            "its scoreboard row stays.",
+            "The nightly optimizer no longer applies parameters while "
+            "entries are paused — the winner is still searched, validated, "
+            "reviewed and recorded (status frozen_paused), but the config "
+            "stays frozen so shadow track records aren't a moving target. "
+            "With no live entries there is nothing for new parameters to "
+            "trade anyway.",
+        ],
+    },
     {
         "version": "2.30.0",
         "date": "2026-07-22",

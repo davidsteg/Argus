@@ -63,6 +63,13 @@ DEFAULT_CONFIG: Dict[str, float] = {
     "rsi_short_signal": 70.0,  # enter short when RSI rises above this level
     "rsi_short_exit": 30.0,    # cover short early when RSI drops below this
     "short_enabled": 0.0,      # 0 = off, 1 = on — short selling toggle
+    # 0 = trading, 1 = research mode: no NEW live entries. Exits, stop
+    # enforcement, protection, EOD flatten and the shadow harness all keep
+    # running, and every would-be entry is recorded as an "entries_paused"
+    # veto so its hypothetical P&L keeps being measured. Added v2.31.0 after
+    # the Jul 8–28 ledger falsified the live entry signal (expectancy
+    # ≈ coin flip); pausing costs nothing but the data we already own.
+    "entries_paused": 0.0,
     "news_cutoff": 0.45,       # minimum sentiment score required to trade (below 0.50 so no-news/neutral passes)
     "max_vwap_dislocation_pct": 0.15,  # skip entries more than this fraction past VWAP — that deep a dislocation is a falling knife, not a mean reversion (999 = off)
     "atr_stop_mult": 1.5,      # soft stop-loss distance, ATR multiples

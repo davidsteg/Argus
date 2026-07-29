@@ -929,6 +929,44 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
             best_params["rsi_short_signal"] = current.get("rsi_short_signal", 80.0)
             best_params["rsi_short_exit"] = current.get("rsi_short_exit", 20.0)
 
+        # Research mode (v2.31.0): while live entries are paused, the winner
+        # is measured and recorded but NOT applied. Shadow candidates read
+        # rsi_period / bracket multiples from the live config, so a nightly
+        # rewrite mid-experiment would make their track records a moving
+        # target — and with no live entries there is nothing for new
+        # parameters to trade anyway. The full grid + validation + review
+        # still ran above, so the run's verdict stays on record.
+        if bool(current.get("entries_paused", 0.0)):
+            total_return, drawdown, trades = train_stats
+            db.add_log(
+                "OPTIMIZER",
+                f"Winner validated but NOT applied — entries_paused=1 "
+                f"(research mode): config frozen so shadow track records "
+                f"stay comparable. Would have set: "
+                f"RSI({int(best_params['rsi_period'])}) "
+                f"buy<{best_params['rsi_buy_signal']:.0f}, "
+                f"stop {best_params['atr_stop_mult']:.1f}×ATR, "
+                f"target {best_params['atr_target_mult']:.1f}×ATR | "
+                f"train {total_return * 100:+.2f}%",
+            )
+            run["status"] = "frozen_paused"
+            run["detail"] = (
+                "entries_paused=1: winner validated but not applied "
+                "(parameters frozen during research mode)"
+            )
+            run["params_after"] = dict(params_before)
+            run["changed_keys"] = []
+            run["train_return"] = total_return
+            run["train_drawdown"] = drawdown
+            run["train_score"] = best_train_score
+            run["train_trades"] = trades
+            if val_stats is not None:
+                run["val_return"] = val_stats[0]
+                run["val_drawdown"] = val_stats[1]
+                run["val_trades"] = val_stats[2]
+            run["analyst_decision"] = analyst_decision
+            return None
+
         _publish_status(db, {
             "phase": "writing",
             "trigger": trigger,

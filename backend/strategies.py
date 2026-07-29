@@ -30,6 +30,17 @@ the opposite hypothesis, buying breakouts (strength) instead of dips
 than revert. It earns its own paper track record before anyone considers it
 for real capital — the whole point of the harness.
 
+v2.31.0 turns the page: after a week, momentum_breakout (-$2.45/trade) ≈
+random_baseline (-$2.22) ≈ the live rule — every direction rule loses at
+about the same rate on this universe, while the crypto engine (same code,
+liquid majors) sits near breakeven. The working hypothesis is now TERRAIN,
+not trigger: thin, gappy, sub-$20 most-actives are unwinnable after
+friction. fear_confirmation is retired (falsified at -$9.93/trade), and the
+{dip, momentum} x {all, liquid} grid is completed with LiquidDipStrategy
+and LiquidMomentumStrategy — each one variable (a $20 price floor) away
+from a running baseline. Live entries are paused (entries_paused config
+key) while the grid decides which cell, if any, deserves capital.
+
 Adding a third candidate: subclass ShadowStrategy, implement evaluate(), add
 an instance to STRATEGIES. It starts accumulating a paper track record on
 the very next cycle; nothing else needs to change.
@@ -101,7 +112,13 @@ class FearConfirmationStrategy(ShadowStrategy):
     unconfirmed dips."""
 
     name = "fear_confirmation"
-    max_positions = 5
+    # RETIRED v2.31.0 — hypothesis falsified: 43 shadow trades, expectancy
+    # -$9.93/trade (worst of all candidates); deeper dips resolved WORSE,
+    # not better, so the Jul 14–19 ledger inversion was sampling noise.
+    # max_positions = 0 stops new entries while the runner keeps managing
+    # (draining) any still-open paper positions; the class and its DB track
+    # record stay for the historical row on the scoreboard.
+    max_positions = 0
 
     MIN_DISLOCATION_PCT = 0.15  # deeper than the live cap, not shallower
     RSI_PERIOD_FLOOR = 2
@@ -330,11 +347,97 @@ class MomentumBreakoutStrategy(ShadowStrategy):
         return None
 
 
+class LiquidDipStrategy(ShadowStrategy):
+    """The live entry rule on better terrain — the terrain experiment's
+    missing cell. Jul 8–28 evidence: every direction rule on the full
+    most-actives universe (dip-buy, deep-dip, breakout, coin flip) lost at
+    roughly the same rate, while the crypto engine — same code, liquid
+    majors — sat near breakeven. That pattern says the universe, not the
+    trigger, is the defect: thin sub-$20 movers where the spread eats the
+    bracket and stops gap through. This candidate replicates the live
+    technical rule EXACTLY (RSI oversold + close below VWAP + falling-knife
+    cap, same config keys) with one added condition: price >= $20. One
+    variable versus the live rule's own veto-ledger record — if this earns
+    while the full-universe rule keeps losing, the fix for the live engine
+    is a universe change, not a new signal."""
+
+    name = "liquid_dip"
+    max_positions = 5
+
+    MIN_PRICE = 20.0  # the single experimental variable vs the live rule
+
+    def evaluate(self, symbol, bars, config):
+        period = max(int(config.get("rsi_period", 14)), 2)
+        if len(bars) < period * 2:
+            return None
+        closes = bars["close"]
+        latest_close = float(closes.iloc[-1])
+        if latest_close < self.MIN_PRICE:
+            return None
+        rsi = compute_rsi(closes, period)
+        atr = compute_atr(bars)
+        vwap = compute_vwap(bars)
+        latest_rsi = float(rsi.iloc[-1])
+        latest_atr = float(atr.iloc[-1])
+        latest_vwap = float(vwap.iloc[-1])
+        if np.isnan(latest_rsi) or np.isnan(latest_atr) or latest_atr <= 0:
+            return None
+        stop_mult = config.get("atr_stop_mult", 1.5)
+        target_mult = config.get("atr_target_mult", 2.5)
+        if stop_is_floored(latest_close, latest_atr, stop_mult):
+            return None
+
+        if latest_rsi >= config.get("rsi_buy_signal", 30.0):
+            return None
+        if latest_close > latest_vwap:
+            return None  # not a real dip — mirrors the live gate
+        dislocation = (latest_vwap - latest_close) / latest_vwap
+        if dislocation > config.get("max_vwap_dislocation_pct", 0.15):
+            return None  # falling knife — mirrors the live cap
+
+        stop_d, target_d = bracket_distances(
+            latest_close, latest_atr, stop_mult, target_mult
+        )
+        return Signal(
+            symbol=symbol, side="BUY", price=latest_close,
+            atr=latest_atr, rsi=latest_rsi,
+            stop_loss=latest_close - stop_d,
+            take_profit=latest_close + target_d,
+            rationale=(
+                f"Live dip rule on liquid terrain: RSI {latest_rsi:.1f} "
+                f"oversold, {dislocation * 100:.1f}% below VWAP "
+                f"${latest_vwap:.2f}, price ${latest_close:.2f} >= "
+                f"${self.MIN_PRICE:.0f} floor — same trigger, better tape."
+            ),
+        )
+
+
+class LiquidMomentumStrategy(MomentumBreakoutStrategy):
+    """momentum_breakout restricted to liquid terrain (price >= $20) — the
+    fourth cell of the {dip, momentum} x {all, liquid} experiment grid.
+    Everything else inherits from MomentumBreakoutStrategy, so the pair
+    differs by exactly one variable and their track records read directly
+    against each other."""
+
+    name = "liquid_momentum"
+    max_positions = 5
+
+    MIN_PRICE = 20.0
+
+    def evaluate(self, symbol, bars, config):
+        if len(bars) and float(bars["close"].iloc[-1]) < self.MIN_PRICE:
+            return None
+        return super().evaluate(symbol, bars, config)
+
+
 # Registered candidates, evaluated every cycle the market is open. Order is
 # cosmetic (dashboard listing order); each strategy's own position book is
-# independent.
+# independent. fear_confirmation stays registered with max_positions=0
+# (retired: entries off, exits keep draining, scoreboard row preserved).
 STRATEGIES: List[ShadowStrategy] = [
     FearConfirmationStrategy(),
     RandomBaselineStrategy(),
     MomentumBreakoutStrategy(),
+    LiquidDipStrategy(),
+    LiquidMomentumStrategy(),
 ]

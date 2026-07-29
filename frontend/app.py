@@ -264,6 +264,14 @@ ENVIRONMENT_LABELS: Dict[str, str] = {
 # Editable operational environment — these used to be env vars, now live
 # in bot_config so they can be tuned from the dashboard without a restart.
 OPERATIONAL_PARAM_META: Dict[str, Dict[str, Any]] = {
+    "entries_paused": {
+        "label": "Live Entries Paused",
+        "hint": (
+            "1 = research mode: no new live entries; exits/protection/shadow "
+            "candidates keep running, would-be entries are shadow-recorded"
+        ),
+        "min": 0.0, "max": 1.0, "step": 1.0, "int": True,
+    },
     "position_size_usd": {
         "label": "Position Size (USD)",
         "hint": "max notional per trade",
@@ -1330,6 +1338,19 @@ def dashboard() -> None:
                             "px-2 py-1 mb-1"
                         )
                         protection_banner.set_visibility(False)
+                        # Research-mode banner (v2.31.0): entries_paused=1
+                        # means the engine deliberately opens nothing — say
+                        # so loudly, or a paused book reads as a broken bot.
+                        pause_banner = ui.label(
+                            "⏸ LIVE ENTRIES PAUSED — research mode: signals "
+                            "are shadow-recorded, exits and protection stay "
+                            "active, shadow candidates keep trading"
+                        ).classes(
+                            "w-full text-xs font-semibold text-amber-300 "
+                            "bg-amber-950 rounded border border-amber-800 "
+                            "px-2 py-1 mb-1"
+                        )
+                        pause_banner.set_visibility(False)
                         with ui.element("div").classes("w-full scroll-x-mobile"):
                             with ui.element("div").classes(
                                 "pos-grid text-xs font-semibold uppercase "
@@ -2521,6 +2542,12 @@ def dashboard() -> None:
         ]
         positions_empty.set_visibility(not positions)
         open_entries = snapshot.get("open_entries") or {}
+
+        # Research-mode banner — driven straight off live config so it can
+        # never disagree with what the engine will actually do next cycle.
+        pause_banner.set_visibility(
+            bool((snapshot.get("config") or {}).get("entries_paused", 0.0))
+        )
 
         # Protection alarm — active close-failure streaks and this session's
         # watchdog interventions (levels attached / forced closes).
