@@ -10,9 +10,33 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.31.0"
+__version__ = "2.31.1"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.31.1",
+        "date": "2026-07-30",
+        "title": "Config hardening: no more ride-along writes, reachable audit trails",
+        "notes": [
+            "Dashboard settings cards now write ONLY the keys you actually "
+            "changed on that page. Every Apply used to write its card's "
+            "entire parameter set, so a page loaded before a config change "
+            "elsewhere silently reverted it on the next Apply — on Jul 29 "
+            "this flipped entries_paused back off within hours of it being "
+            "set, un-pausing a deliberately paused engine and disarming the "
+            "optimizer freeze. Untouched inputs no longer generate writes, "
+            "an Apply with no changes writes nothing, and the audit line "
+            "lists exactly what changed. Watchlist and screener applies are "
+            "now audited too (they previously wrote silently).",
+            "GET /logs now accepts limit up to 5000 (was 500). During "
+            "market hours 500 lines is ~80 minutes of history — twice now "
+            "a config-write audit line rolled out of reach before it could "
+            "be attributed (short_enabled Jul 14, entries_paused Jul 29). "
+            "GET /vetoes and GET /shadow/trades get the same 5000 cap: the "
+            "shadow candidates alone produce hundreds of trades a day, and "
+            "the terrain-experiment checkpoint needs the full ledger.",
+        ],
+    },
     {
         "version": "2.31.0",
         "date": "2026-07-29",

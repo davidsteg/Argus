@@ -9,6 +9,35 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.31.1] - 2026-07-30
+
+### Fixed
+- **Dashboard settings cards no longer write keys the user didn't touch.**
+  Every card's Apply wrote its ENTIRE meta dict, so a page loaded before a
+  config change made elsewhere silently reverted that change on the next
+  Apply. This is how `entries_paused=1` (set 08:53 UTC Jul 29 via the debug
+  API) was flipped back to 0 before 12:21 the same morning: live trading
+  resumed on the falsified signal (76 trades, −$87) and the 22:35 nightly
+  optimizer — no longer frozen — applied a winner that re-disabled the
+  falling-knife cap. Each card now keeps a per-input baseline (value at
+  page load / last reload / last apply) and `diff_against_baseline` filters
+  the write to keys whose value actually differs; an Apply with no edits
+  writes nothing. All four `bot_config` cards (strategy, watchlist,
+  screener, operational) share `write_config_changes`, so every dashboard
+  write now leaves one WARNING audit line listing exactly the changed keys
+  — watchlist and screener applies were previously not audited at all.
+
+### Changed
+- **`GET /logs` limit cap raised 500 → 5000.** During market hours 500
+  lines is ~80 minutes of history; twice now (Jul 14 `short_enabled`,
+  Jul 29 `entries_paused`) the audit line for an unexplained config change
+  rolled out of API reach before it could be attributed. An audit trail
+  that expires faster than a working day is not an audit trail.
+  `GET /vetoes` and `GET /shadow/trades` get the same 5000 cap — the
+  shadow candidates alone produce hundreds of paper trades a day and the
+  terrain-experiment checkpoint needs complete ledgers, not the last few
+  hours of them.
+
 ## [v2.31.0] - 2026-07-29
 
 ### Added

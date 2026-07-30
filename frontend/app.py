@@ -333,6 +333,39 @@ EQUITY_RANGES: Dict[str, Optional[timedelta]] = {
 }
 
 
+def diff_against_baseline(
+    intended: Dict[str, float], baseline: Dict[str, float]
+) -> Dict[str, float]:
+    """Only the keys the user actually edited on THIS page: value differs
+    from what the page loaded (or last applied/reloaded into the input).
+
+    Every settings card used to write its ENTIRE meta dict on Apply, so a
+    stale page silently reverted keys changed elsewhere in the meantime —
+    on 2026-07-29 entries_paused=1 (set 08:53 UTC via the debug API) was
+    flipped back to 0 within hours, un-pausing a deliberately paused engine
+    and disarming the optimizer freeze; by the time anyone looked, the
+    audit line had rolled past the log window. An untouched input must
+    never generate a write."""
+    return {
+        k: v
+        for k, v in intended.items()
+        if baseline.get(k) is None or float(baseline[k]) != float(v)
+    }
+
+
+def write_config_changes(db, changed: Dict[str, float], source: str) -> None:
+    """Persist and audit exactly the changed keys (blocking — call via
+    run.io_bound). Shared by all settings cards so every dashboard config
+    write leaves the same attributable WARNING line, listing only what
+    actually changed."""
+    db.set_config(changed)
+    db.add_log(
+        "WARNING",
+        f"{source}: "
+        + ", ".join(f"{k}={v:g}" for k, v in sorted(changed.items())),
+    )
+
+
 # ---------------------------------------------------------------------- #
 # blocking data access & actions (run via run.io_bound)
 # ---------------------------------------------------------------------- #
@@ -1891,6 +1924,10 @@ def dashboard() -> None:
                             "re-tunes and overwrites these values."
                         ).classes(f"text-xs {TEXT_MUTED}")
                         param_inputs: Dict[str, Any] = {}
+                        # What each input held at page load / last reload /
+                        # last apply — Apply only writes keys that differ
+                        # from this (see diff_against_baseline).
+                        param_baseline: Dict[str, float] = {}
                         _CRYPTO_SKIP_PARAMS = {"short_enabled", "rsi_short_signal", "rsi_short_exit"}
                         for key, meta in PARAM_META.items():
                             if is_crypto() and key in _CRYPTO_SKIP_PARAMS:
@@ -1911,17 +1948,22 @@ def dashboard() -> None:
                                         value=bool(int(initial_config.get(key, 0.0)))
                                     ).props("dense")
                                     param_inputs[key] = sw
+                                    param_baseline[key] = float(
+                                        int(initial_config.get(key, 0.0))
+                                    )
                                 else:
+                                    value = (
+                                        int(initial_config[key])
+                                        if meta["int"]
+                                        else round(float(initial_config[key]), 2)
+                                    )
                                     param_inputs[key] = ui.number(
-                                        value=(
-                                            int(initial_config[key])
-                                            if meta["int"]
-                                            else round(float(initial_config[key]), 2)
-                                        ),
+                                        value=value,
                                         min=meta["min"],
                                         max=meta["max"],
                                         step=meta["step"],
                                     ).props("dense outlined").classes("w-full sm:w-32 sm:shrink-0")
+                                    param_baseline[key] = float(value)
 
                         async def apply_parameters() -> None:
                             updates: Dict[str, float] = {}
@@ -1945,6 +1987,15 @@ def dashboard() -> None:
                                     if meta["int"]:
                                         value = float(int(value))
                                     updates[key] = value
+                            changed = diff_against_baseline(
+                                updates, param_baseline
+                            )
+                            if not changed:
+                                ui.notify(
+                                    "No changes to apply — nothing written",
+                                    type="info",
+                                )
+                                return
                             if updates["atr_target_mult"] <= updates["atr_stop_mult"]:
                                 ui.notify(
                                     "Take profit ≤ stop loss (× ATR): negative "
@@ -1953,19 +2004,18 @@ def dashboard() -> None:
                                     type="warning",
                                     timeout=8000,
                                 )
-                            await run.io_bound(cur_db().set_config, updates)
                             await run.io_bound(
-                                cur_db().add_log,
-                                "WARNING",
-                                "Strategy parameters changed manually from the "
-                                "dashboard: "
-                                + ", ".join(
-                                    f"{k}={v:g}" for k, v in updates.items()
-                                ),
+                                write_config_changes,
+                                cur_db(),
+                                changed,
+                                "Strategy parameters changed manually from "
+                                "the dashboard",
                             )
+                            param_baseline.update(changed)
                             ui.notify(
-                                "Parameters applied — engine picks them up "
-                                "on its next cycle",
+                                f"{len(changed)} parameter"
+                                f"{'s' if len(changed) != 1 else ''} applied — "
+                                "engine picks them up on its next cycle",
                                 type="positive",
                             )
 
@@ -1997,12 +2047,17 @@ def dashboard() -> None:
                                     continue
                                 if meta.get("toggle"):
                                     param_inputs[key].value = bool(int(live.get(key, 0.0)))
+                                    param_baseline[key] = float(
+                                        int(live.get(key, 0.0))
+                                    )
                                 else:
-                                    param_inputs[key].value = (
+                                    value = (
                                         int(live[key])
                                         if meta["int"]
                                         else round(float(live[key]), 2)
                                     )
+                                    param_inputs[key].value = value
+                                    param_baseline[key] = float(value)
                             ui.notify("Reloaded live values from the database")
 
                         with ui.row().classes("w-full gap-2 mt-2"):
@@ -2025,6 +2080,7 @@ def dashboard() -> None:
                             "needed."
                         ).classes(f"text-xs {TEXT_MUTED}")
                         watchlist_param_inputs: Dict[str, ui.number] = {}
+                        watchlist_baseline: Dict[str, float] = {}
                         for key, meta in WATCHLIST_PARAM_META.items():
                             with ui.row().classes(
                                 "w-full items-center justify-between gap-4 "
@@ -2043,6 +2099,9 @@ def dashboard() -> None:
                                     max=meta["max"],
                                     step=meta["step"],
                                 ).props("dense outlined").classes("w-full sm:w-32 sm:shrink-0")
+                                watchlist_baseline[key] = float(
+                                    int(initial_config[key])
+                                )
 
                         async def apply_watchlist_parameters() -> None:
                             updates: Dict[str, float] = {}
@@ -2059,7 +2118,22 @@ def dashboard() -> None:
                                     min(float(meta["max"]), float(raw)),
                                 )
                                 updates[key] = float(int(value))
-                            await run.io_bound(cur_db().set_config, updates)
+                            changed = diff_against_baseline(
+                                updates, watchlist_baseline
+                            )
+                            if not changed:
+                                ui.notify(
+                                    "No changes to apply — nothing written",
+                                    type="info",
+                                )
+                                return
+                            await run.io_bound(
+                                write_config_changes,
+                                cur_db(),
+                                changed,
+                                "Watchlist settings changed from the dashboard",
+                            )
+                            watchlist_baseline.update(changed)
                             ui.notify(
                                 "Watchlist settings applied",
                                 type="positive",
@@ -2069,6 +2143,7 @@ def dashboard() -> None:
                             live = cur_db().get_config()
                             for key in WATCHLIST_PARAM_META:
                                 watchlist_param_inputs[key].value = int(live[key])
+                                watchlist_baseline[key] = float(int(live[key]))
                             ui.notify("Reloaded live values from the database")
 
                         with ui.row().classes("w-full gap-2 mt-2"):
@@ -2092,6 +2167,7 @@ def dashboard() -> None:
                             "background."
                         ).classes(f"text-xs {TEXT_MUTED}")
                         screener_param_inputs: Dict[str, ui.number] = {}
+                        screener_baseline: Dict[str, float] = {}
                         for key, meta in SCREENER_PARAM_META.items():
                             with ui.row().classes(
                                 "w-full items-center justify-between gap-4 "
@@ -2104,20 +2180,19 @@ def dashboard() -> None:
                                     ui.label(meta["hint"]).classes(
                                         f"text-xs {TEXT_MUTED}"
                                     )
-                                if key == "screener_enabled":
-                                    screener_param_inputs[key] = ui.number(
-                                        value=int(initial_config.get(key, 0.0)),
-                                        min=meta["min"],
-                                        max=meta["max"],
-                                        step=meta["step"],
-                                    ).props("dense outlined").classes("w-full sm:w-32 sm:shrink-0")
-                                else:
-                                    screener_param_inputs[key] = ui.number(
-                                        value=int(initial_config.get(key, 200.0)),
-                                        min=meta["min"],
-                                        max=meta["max"],
-                                        step=meta["step"],
-                                    ).props("dense outlined").classes("w-full sm:w-32 sm:shrink-0")
+                                value = int(
+                                    initial_config.get(
+                                        key,
+                                        0.0 if key == "screener_enabled" else 200.0,
+                                    )
+                                )
+                                screener_param_inputs[key] = ui.number(
+                                    value=value,
+                                    min=meta["min"],
+                                    max=meta["max"],
+                                    step=meta["step"],
+                                ).props("dense outlined").classes("w-full sm:w-32 sm:shrink-0")
+                                screener_baseline[key] = float(value)
 
                         async def apply_screener_parameters() -> None:
                             updates: Dict[str, float] = {}
@@ -2134,7 +2209,22 @@ def dashboard() -> None:
                                     min(float(meta["max"]), float(raw)),
                                 )
                                 updates[key] = float(int(value))
-                            await run.io_bound(cur_db().set_config, updates)
+                            changed = diff_against_baseline(
+                                updates, screener_baseline
+                            )
+                            if not changed:
+                                ui.notify(
+                                    "No changes to apply — nothing written",
+                                    type="info",
+                                )
+                                return
+                            await run.io_bound(
+                                write_config_changes,
+                                cur_db(),
+                                changed,
+                                "Screener settings changed from the dashboard",
+                            )
+                            screener_baseline.update(changed)
                             ui.notify(
                                 "Screener settings applied",
                                 type="positive",
@@ -2143,9 +2233,11 @@ def dashboard() -> None:
                         def reload_screener_from_db() -> None:
                             live = cur_db().get_config()
                             for key in SCREENER_PARAM_META:
-                                screener_param_inputs[key].value = int(
+                                value = int(
                                     live.get(key, 0.0 if key == "screener_enabled" else 200.0)
                                 )
+                                screener_param_inputs[key].value = value
+                                screener_baseline[key] = float(value)
                             ui.notify("Reloaded live values from the database")
 
                         with ui.row().classes("w-full gap-2 mt-2"):
@@ -2262,6 +2354,7 @@ def dashboard() -> None:
                             "take effect on the next engine cycle."
                         ).classes(f"text-xs {TEXT_MUTED}")
                         op_param_inputs: Dict[str, Any] = {}
+                        op_baseline: Dict[str, float] = {}
                         _CRYPTO_SKIP_OP = {"eod_flatten_minutes"}
                         for key, meta in OPERATIONAL_PARAM_META.items():
                             if is_crypto() and key in _CRYPTO_SKIP_OP:
@@ -2277,16 +2370,18 @@ def dashboard() -> None:
                                     ui.label(meta["hint"]).classes(
                                         f"text-xs {TEXT_MUTED}"
                                     )
+                                value = (
+                                    int(initial_config.get(key, meta["min"]))
+                                    if meta["int"]
+                                    else round(float(initial_config.get(key, meta["min"])), 2)
+                                )
                                 op_param_inputs[key] = ui.number(
-                                    value=(
-                                        int(initial_config.get(key, meta["min"]))
-                                        if meta["int"]
-                                        else round(float(initial_config.get(key, meta["min"])), 2)
-                                    ),
+                                    value=value,
                                     min=meta["min"],
                                     max=meta["max"],
                                     step=meta["step"],
                                 ).props("dense outlined").classes("w-full sm:w-32 sm:shrink-0")
+                                op_baseline[key] = float(value)
 
                         async def apply_operational() -> None:
                             updates: Dict[str, float] = {}
@@ -2307,16 +2402,24 @@ def dashboard() -> None:
                                 if meta["int"]:
                                     value = float(int(value))
                                 updates[key] = value
-                            await run.io_bound(cur_db().set_config, updates)
+                            changed = diff_against_baseline(updates, op_baseline)
+                            if not changed:
+                                ui.notify(
+                                    "No changes to apply — nothing written",
+                                    type="info",
+                                )
+                                return
                             await run.io_bound(
-                                cur_db().add_log,
-                                "WARNING",
-                                "Operational environment changed from dashboard: "
-                                + ", ".join(f"{k}={v:g}" for k, v in updates.items()),
+                                write_config_changes,
+                                cur_db(),
+                                changed,
+                                "Operational environment changed from dashboard",
                             )
+                            op_baseline.update(changed)
                             ui.notify(
-                                "Operational settings applied — engine picks them "
-                                "up on its next cycle",
+                                f"{len(changed)} operational setting"
+                                f"{'s' if len(changed) != 1 else ''} applied — "
+                                "engine picks them up on its next cycle",
                                 type="positive",
                             )
 
@@ -2325,11 +2428,13 @@ def dashboard() -> None:
                             for key, meta in OPERATIONAL_PARAM_META.items():
                                 if is_crypto() and key in _CRYPTO_SKIP_OP:
                                     continue
-                                op_param_inputs[key].value = (
+                                value = (
                                     int(live.get(key, meta["min"]))
                                     if meta["int"]
                                     else round(float(live.get(key, meta["min"])), 2)
                                 )
+                                op_param_inputs[key].value = value
+                                op_baseline[key] = float(value)
                             ui.notify("Reloaded live values from the database")
 
                         with ui.row().classes("w-full gap-2 mt-2"):

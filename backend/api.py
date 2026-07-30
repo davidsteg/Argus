@@ -378,7 +378,7 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
         return {"trades": db.get_trades(limit)}
 
     @app.get("/vetoes")
-    async def vetoes(limit: int = Query(50, ge=1, le=500)) -> Dict[str, Any]:
+    async def vetoes(limit: int = Query(50, ge=1, le=5000)) -> Dict[str, Any]:
         """Shadow ledger of gate-blocked signals (sentiment, VWAP re-check,
         risk agent, portfolio manager) with each veto's resolved hypothetical
         P&L — the evidence for whether a gate saves money or costs it."""
@@ -411,12 +411,17 @@ def create_app(controller: "EngineController") -> FastAPI:  # noqa: F821
     @app.get("/shadow/trades")
     async def shadow_trades(
         strategy: Optional[str] = Query(None),
-        limit: int = Query(50, ge=1, le=500),
+        limit: int = Query(50, ge=1, le=5000),
     ) -> Dict[str, Any]:
         return {"trades": db.get_shadow_trades(strategy, limit)}
 
     @app.get("/logs")
-    async def logs(limit: int = Query(20, ge=1, le=500)) -> Dict[str, Any]:
+    async def logs(limit: int = Query(20, ge=1, le=5000)) -> Dict[str, Any]:
+        # 5000, not 500: during market hours 500 lines is ~80 minutes of
+        # history, which twice made a config-write audit line unreachable
+        # before anyone could attribute it (short_enabled 2026-07-14,
+        # entries_paused 2026-07-29). An audit trail that rolls away faster
+        # than a working day is not an audit trail.
         return {"logs": db.get_logs(limit)}
 
     @app.get("/screener")
