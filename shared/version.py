@@ -10,9 +10,41 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.31.1"
+__version__ = "2.32.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.32.0",
+        "date": "2026-08-12",
+        "title": "Shadow harness: max-hold exit stops the books silting up",
+        "notes": [
+            "Shadow candidates now close a paper position after "
+            "shadow_max_hold_hours (default 24) if neither stop nor target "
+            "has been touched. Until now a position could only exit through "
+            "its bracket, so anything drifting sideways held its slot "
+            "forever: by 2026-08-12 all five candidates were pinned at their "
+            "5-position limit holding entries from Jul 20 onward, and the "
+            "harness had quietly stopped sampling. Worse, it corrupted the "
+            "comparison it exists to make — momentum_breakout's low trade "
+            "count was slot starvation, not signal rarity. Max-hold closes "
+            "price at the last close (no stop slippage — nothing was "
+            "breached), pay the same round-trip cost as any other exit, and "
+            "carry a distinct exit_reason so analysis can separate or "
+            "exclude them. Per-candidate override via "
+            "ShadowStrategy.max_hold_hours; 0 disables the cap.",
+            "On first cycle after deploy the existing long-stale positions "
+            "close in one burst and their real mark-to-market lands in the "
+            "ledger — expect a step change in the candidate totals, all of "
+            "it tagged 'Max hold'. Treat pre-2.32.0 candidate totals and "
+            "post-flush totals as separate samples.",
+            "AGENTS.md caught up with three behaviours shipped in v2.31.x "
+            "but never documented: entries_paused is entries-only and must "
+            "stay ordered after exits/protection/shadow; every bot_config "
+            "writer must write only changed keys and leave an audit line "
+            "(with the ride-along incident that motivated it); the "
+            "optimizer must not apply parameters while entries are paused.",
+        ],
+    },
     {
         "version": "2.31.1",
         "date": "2026-07-30",

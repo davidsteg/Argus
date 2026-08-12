@@ -80,6 +80,13 @@ DEFAULT_CONFIG: Dict[str, float] = {
     "screener_enabled": 0.0,       # 0 = off, 1 = on — opportunity screener
     "screener_pool_size": 200.0,   # how many most-active symbols to scan
     "screener_max_candidates": 5.0,  # top N candidates to surface
+    # Shadow harness: close a candidate's paper position this many hours after
+    # entry if neither its stop nor its target has been touched. Without a cap
+    # a sideways position holds its slot forever — by 2026-08-12 every
+    # candidate sat at its 5-position limit with opens dating back to Jul 20,
+    # so the harness had silently stopped sampling (momentum_breakout's small
+    # trade count was slot starvation, not signal rarity). 0 disables the cap.
+    "shadow_max_hold_hours": 24.0,
     # Operational environment — tunable from the dashboard, not env vars
     "position_size_usd": 500.0,
     "risk_per_trade_usd": 20.0,

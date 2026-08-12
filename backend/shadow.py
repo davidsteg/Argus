@@ -9,12 +9,18 @@ live order-submission path. A candidate earns a real track record — trade
 count, win rate, expectancy — before anyone considers giving it money.
 
 Deliberately simpler than the live exit stack, matching the precedent set
-by bot.py's _resolve_one_veto: a shadow position closes ONLY via its stop
-or target (pessimistic stop-before-target on the same bar), no RSI early
-exit and no end-of-day flatten. That keeps "what would this strategy's
-bracket have done" an honest, comparable number across candidates and
-across the optimizer's own backtest — not a moving target every time a
-strategy's exit logic changes. A closed (strategy, symbol) is benched for
+by bot.py's _resolve_one_veto: a shadow position closes via its stop or
+target (pessimistic stop-before-target on the same bar) or, since v2.32.0,
+a max-hold cap — no RSI early exit and no end-of-day flatten. That keeps
+"what would this strategy's bracket have done" an honest, comparable number
+across candidates and across the optimizer's own backtest — not a moving
+target every time a strategy's exit logic changes. The max-hold cap is the
+one deliberate exception, and it exists because the purer rule failed in
+practice: with unbounded holds a sideways position keeps its slot forever,
+and by 2026-08-12 every candidate was pinned at its position limit holding
+opens from three weeks earlier, so the harness had stopped sampling
+entirely. Max-hold closes are tagged in exit_reason so any analysis can
+separate or exclude them. A closed (strategy, symbol) is benched for
 the live engine's own cooldown_minutes before the same strategy may
 re-enter it — otherwise a candidate whose technical conditions still
 qualify could reopen the identical symbol in the identical cycle it just
@@ -90,6 +96,21 @@ class ShadowRunner:
                 time.monotonic() + minutes * 60.0
             )
 
+    @staticmethod
+    def _held_hours(pos: Dict[str, Any], now: datetime) -> Optional[float]:
+        """Hours since entry, or None when the timestamp is unparseable (a
+        bad timestamp must never cause a spurious close)."""
+        raw = pos.get("entry_time")
+        if not raw:
+            return None
+        try:
+            entered = datetime.fromisoformat(str(raw))
+        except ValueError:
+            return None
+        if entered.tzinfo is None:
+            entered = entered.replace(tzinfo=timezone.utc)
+        return (now - entered).total_seconds() / 3600.0
+
     def _check_exits(
         self,
         db: Any,
@@ -99,12 +120,27 @@ class ShadowRunner:
         stop_slip: float,
         cost_pct: float,
         cooldown_minutes: float,
+        max_hold_hours: float = 0.0,
     ) -> set:
         """Close any held shadow position whose stop or target was touched
         by the latest bar (stop checked first — pessimistic same-bar
-        assumption, matching backtest()/veto resolution). Returns the set
-        of symbols closed this cycle."""
+        assumption, matching backtest()/veto resolution), or whose max hold
+        has elapsed. Returns the set of symbols closed this cycle.
+
+        The max-hold exit (v2.32.0) is a deliberate, documented departure
+        from "the bracket alone decides", which this runner otherwise
+        preserves so candidates stay comparable to each other and to
+        backtest(). Unbounded holds turned out to be worse than the impurity
+        they avoided: a position that drifts sideways forever holds its slot
+        forever, and by 2026-08-12 all five candidates sat at their position
+        limit with opens dating back to Jul 20 — the harness had quietly
+        stopped sampling, and cross-candidate trade counts reflected slot
+        starvation rather than how often each signal fires. Max-hold exits
+        carry their own exit_reason so analysis can separate or exclude
+        them; they price at the last close (no stop slippage — nothing was
+        breached) and pay the same round-trip cost as every other exit."""
         closed: set = set()
+        now = datetime.now(timezone.utc)
         for symbol, pos in held.items():
             bars = frames.get(symbol)
             if bars is None or bars.empty:
@@ -128,6 +164,15 @@ class ShadowRunner:
                     outcome, raw_exit = "stop", stop
                 elif low <= target:
                     outcome, raw_exit = "target", target
+
+            held_hours: Optional[float] = None
+            if outcome is None and max_hold_hours > 0:
+                held_hours = self._held_hours(pos, now)
+                if held_hours is not None and held_hours >= max_hold_hours:
+                    try:
+                        outcome, raw_exit = "max-hold", float(bar["close"])
+                    except (KeyError, TypeError, ValueError):
+                        outcome = None
             if outcome is None:
                 continue
 
@@ -147,10 +192,16 @@ class ShadowRunner:
                 else (entry_price - exit_price) * qty
             )
             realized_pnl = gross - cost_pct * entry_price * qty
+            if outcome == "max-hold":
+                reason = (
+                    f"Max hold {max_hold_hours:.0f}h reached "
+                    f"({held_hours:.0f}h held) — closed at ~{exit_price:.4f}"
+                )
+            else:
+                reason = f"{outcome.capitalize()} hit @ ~{exit_price:.4f}"
             try:
                 db.close_shadow_position(
-                    strategy_name, symbol, exit_price, realized_pnl,
-                    f"{outcome.capitalize()} hit @ ~{exit_price:.4f}",
+                    strategy_name, symbol, exit_price, realized_pnl, reason,
                 )
                 db.add_log(
                     "INFO",
@@ -201,11 +252,15 @@ class ShadowRunner:
             return
 
         cooldown_minutes = float(config.get("cooldown_minutes", 30.0))
+        default_max_hold = float(config.get("shadow_max_hold_hours", 24.0))
         for strategy in self.strategies:
             held = open_by_strategy.get(strategy.name, {})
+            # Per-candidate override wins; otherwise the shared config cap.
+            max_hold = strategy.max_hold_hours
+            max_hold = default_max_hold if max_hold is None else float(max_hold)
             closed = self._check_exits(
                 db, strategy.name, held, frames, stop_slip, cost_pct,
-                cooldown_minutes,
+                cooldown_minutes, max_hold,
             )
             held_symbols = set(held) - closed
             room = strategy.max_positions - len(held_symbols)

@@ -60,6 +60,40 @@ release pipeline, and mistakes already made and fixed once.
   risk before anyone considers it for real money; a strategy that could
   place live orders defeats that. Promotion to live trading is a
   deliberate, reviewed, separate change — never automatic.
+- **`entries_paused` (research mode, v2.31.0) pauses ENTRIES ONLY.** When
+  it is set, `_run_cycle_inner` returns at stage `entries-paused` *after*
+  stop enforcement, signal exits, the protection watchdog, EOD flatten and
+  the shadow harness have already run — never before them. A paused engine
+  must still protect and exit everything it holds; only new entries stop.
+  Don't "simplify" the pause by moving the check earlier in the cycle, and
+  don't let it skip `_schedule_background_research` (the shadow candidates
+  trade the curated watchlist, so pausing live entries must not starve the
+  research pipeline). Every would-be entry is shadow-recorded as an
+  `entries_paused` veto so the paused period keeps measuring the raw entry
+  rule for free.
+
+## Config writes: only what changed, always audited
+
+Every path that writes `bot_config` must write **only the keys it actually
+intends to change**, and must leave an audit line naming them.
+
+- The dashboard settings cards each keep a per-input baseline (value at
+  page load / last reload / last apply) and write the
+  `diff_against_baseline` subset through `write_config_changes`. Do not
+  reintroduce a "write the whole meta dict" apply: a page loaded before a
+  change made elsewhere will silently revert it. That is exactly how
+  `entries_paused=1` was flipped back off 99 seconds after being set
+  (2026-07-29) — the user's real edit was a different key entirely, and the
+  pause rode along from stale page state.
+- `POST /config` validates keys against `DEFAULT_CONFIG` and logs a
+  WARNING prefixed "via debug API".
+- The nightly optimizer **must not write config while `entries_paused` is
+  set** — it still searches, validates, reviews and records the run
+  (status `frozen_paused`), but leaves parameters alone so shadow track
+  records are not a moving target mid-experiment.
+- Audit lines are only useful if they can still be read later: `GET /logs`
+  caps at 5000 for this reason (500 was ~80 minutes during market hours,
+  and twice an unexplained config write had already rolled out of reach).
 
 ## Architecture map
 
@@ -88,7 +122,16 @@ backend/
                   and wrapped in try/except so a candidate bug can never
                   reach live trading. Add a strategy by subclassing
                   ShadowStrategy and adding it to STRATEGIES; nothing else
-                  needs to change for it to start earning a track record
+                  needs to change for it to start earning a track record.
+                  Exits are stop/target only PLUS a max-hold cap
+                  (shadow_max_hold_hours, per-strategy override via
+                  ShadowStrategy.max_hold_hours) — without the cap a
+                  sideways position holds its slot forever and the
+                  candidate silently stops sampling (all five candidates
+                  were pinned at their position limit by 2026-08-12).
+                  Retire a candidate with max_positions = 0: entries stop,
+                  open paper positions still drain, the scoreboard row and
+                  its history survive
   indicators.py   RSI / ATR / VWAP / bracket-distance math — SHARED by
                   bot.py and optimizer.py so live signals and backtests
                   can never drift apart. Any indicator change goes here,

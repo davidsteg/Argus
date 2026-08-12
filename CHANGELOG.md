@@ -9,6 +9,44 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.32.0] - 2026-08-12
+
+### Fixed
+- **Shadow books no longer silt up.** A candidate's paper position could
+  only ever exit through its stop or target, so anything that drifted
+  sideways held its slot indefinitely. By 2026-08-12 all five candidates
+  sat at their 5-position limit with open entries dating back to Jul 20 —
+  the harness had silently stopped sampling. This also corrupted the
+  comparison the harness exists to make: `momentum_breakout` showed 48
+  clean trades against `liquid_dip`'s 267 not because it signals rarely
+  but because its slots were occupied, and `liquid_momentum` stopped
+  trading entirely after Aug 7. `ShadowRunner._check_exits` now also closes
+  a position once `shadow_max_hold_hours` (new `DEFAULT_CONFIG` key,
+  default 24, 0 disables) have elapsed since entry. Max-hold exits price at
+  the last bar close — no stop slippage, since nothing was breached — pay
+  the same round-trip cost as every other exit, and carry a distinct
+  `exit_reason` ("Max hold Nh reached …") so analysis can separate or
+  exclude them. Individual candidates may override via
+  `ShadowStrategy.max_hold_hours` when their thesis genuinely needs a
+  longer horizon. An unparseable `entry_time` never triggers a close.
+  **Deploy note:** the first cycle flushes every stale position at once, so
+  candidate totals take a one-off step change (all tagged `Max hold`);
+  pre- and post-flush totals are separate samples.
+
+### Documentation
+- **AGENTS.md caught up with v2.31.x.** Three shipped behaviours had no
+  entry in the invariants doc: (1) `entries_paused` is **entries-only** and
+  its check must stay ordered *after* stop enforcement, signal exits, the
+  protection watchdog, EOD flatten and the shadow harness — a paused engine
+  still protects everything it holds — and must not skip
+  `_schedule_background_research`; (2) a new "Config writes: only what
+  changed, always audited" section covering the dashboard's diff-based
+  apply (with the 2026-07-29 ride-along incident that motivated it), the
+  `POST /config` audit prefix, the optimizer's `frozen_paused` behaviour
+  while paused, and why `GET /logs` caps at 5000; (3) the architecture map
+  now records the shadow max-hold cap and the `max_positions = 0`
+  retirement pattern.
+
 ## [v2.31.1] - 2026-07-30
 
 ### Fixed

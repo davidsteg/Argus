@@ -89,6 +89,12 @@ class ShadowStrategy(ABC):
 
     name: str
     max_positions: int = 5
+    #: Hours after entry at which an unresolved paper position is closed at
+    #: the market, freeing its slot. None = use the shared
+    #: `shadow_max_hold_hours` config value. Override only for a candidate
+    #: whose thesis genuinely needs a longer horizon than the harness default
+    #: — a slot held open indefinitely stops the candidate sampling at all.
+    max_hold_hours: Optional[float] = None
 
     @abstractmethod
     def evaluate(
