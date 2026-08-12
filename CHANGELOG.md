@@ -9,6 +9,28 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.32.1] - 2026-08-12
+
+### Fixed
+- **Shadow exits never reached positions whose symbol left the watchlist**
+  — the reason v2.32.0's max-hold cap flushed nothing on deploy.
+  `ShadowRunner.run_cycle` fetched bars for the watchlist only, and
+  `_check_exits` skips any position with no bars this cycle, so a held
+  symbol that rotated off the most-actives list stopped being checked for
+  its stop, its target, and (as of v2.32.0) its max hold. It held its slot
+  permanently. Measured on the live host: **all 20 stuck positions across
+  the five candidates were off-watchlist, none were on it** — so the
+  max-hold cap could not fire on any of them. `run_cycle` now loads
+  positions first and requests bars for the watchlist **plus every held
+  symbol**, exactly as `bot.py`'s exit phase already does for the live book
+  ("Held symbols may have fallen off the current watchlist"). This — not
+  the missing cap alone — was the real cause of the book saturation, and it
+  had been silently corrupting candidate trade counts since the harness
+  shipped in v2.29.0.
+- Entries remain restricted to the watchlist; the extra frames are
+  exit-only and must not widen the universe a candidate can open into.
+  A held book with an empty watchlist is now managed rather than skipped.
+
 ## [v2.32.0] - 2026-08-12
 
 ### Fixed

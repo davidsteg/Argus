@@ -10,9 +10,31 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.32.0"
+__version__ = "2.32.1"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.32.1",
+        "date": "2026-08-12",
+        "title": "Shadow exits now reach positions that left the watchlist",
+        "notes": [
+            "The v2.32.0 max-hold cap could not fire on a single one of the "
+            "stale positions it was written for. Root cause, found when the "
+            "deploy flushed nothing: the harness fetched bars for the "
+            "watchlist only, and _check_exits skips any position whose "
+            "symbol has no bars this cycle. Held symbols rotate off the "
+            "most-actives list within hours — all 20 stuck positions were "
+            "off-watchlist, none on it — so those positions were never "
+            "checked for their stop, their target, or their max hold. They "
+            "just sat there holding slots. run_cycle now fetches the "
+            "watchlist PLUS every held symbol, mirroring what bot.py's exit "
+            "phase has always done for the live book.",
+            "Entries stay restricted to the watchlist: the additional bars "
+            "exist to manage exits and must not silently widen the universe "
+            "a candidate may open new positions in. A held book with an "
+            "empty watchlist is now also managed rather than skipped.",
+        ],
+    },
     {
         "version": "2.32.0",
         "date": "2026-08-12",

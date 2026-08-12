@@ -27,8 +27,10 @@ qualify could reopen the identical symbol in the identical cycle it just
 stopped out of, the moment the position frees its slot.
 
 Decoupled from the live pipeline on purpose: run_cycle() takes the
-watchlist and does its own bar fetch, and is called from bot.py right
-after the session-open gate — before the live book's slot count, regime
+watchlist and does its own bar fetch (for the watchlist PLUS every held
+symbol — held symbols rotate off the most-actives list and a position with
+no bars this cycle is never checked for any exit at all), and is called
+from bot.py right after the session-open gate — before the live book's slot count, regime
 gate, or EOD-flatten state can short-circuit it. A full or paused live
 book must never silence candidate measurement. Every entry point below is
 called from bot.py wrapped in try/except; nothing here may ever raise
@@ -226,23 +228,11 @@ class ShadowRunner:
         db: Any,
         watchlist: List[str],
     ) -> None:
-        if not watchlist or not self.strategies:
-            return
-        start = datetime.now(timezone.utc) - timedelta(
-            minutes=config.get("bar_lookback_minutes", 180)
-        )
-        try:
-            frames = await asyncio.to_thread(
-                market.fetch_bars, list(watchlist), start
-            )
-        except Exception as exc:
-            logger.error("Shadow bar fetch failed: %s", exc)
-            return
-        if not frames:
+        if not self.strategies:
             return
 
-        stop_slip, cost_pct = self._friction(db)
-
+        # Positions load FIRST: their symbols are needed to build the bar
+        # request below.
         open_by_strategy: Dict[str, Dict[str, Dict[str, Any]]] = {}
         try:
             for pos in db.get_shadow_positions():
@@ -250,6 +240,43 @@ class ShadowRunner:
         except Exception as exc:
             logger.error("Shadow position load failed: %s", exc)
             return
+
+        # Fetch bars for the watchlist PLUS every held symbol (v2.32.1). A
+        # held symbol rotates off the most-actives watchlist within hours,
+        # and _check_exits skips any position whose symbol has no bars this
+        # cycle — so an off-watchlist position was never checked for its
+        # stop, its target, or (as of v2.32.0) its max hold. It simply sat
+        # there forever holding a slot. THIS was the real cause of the book
+        # saturation found on 2026-08-12: all 20 stuck positions across the
+        # five candidates were off-watchlist, none on it, so the v2.32.0
+        # max-hold cap could never fire on any of them. bot.py's exit phase
+        # already fetches held symbols explicitly for exactly this reason;
+        # the harness now mirrors it.
+        # Named distinctly from the per-strategy `held_symbols` inside the
+        # loop below — this one spans every candidate's book.
+        all_held = sorted(
+            {symbol for book in open_by_strategy.values() for symbol in book}
+        )
+        targets = list(dict.fromkeys(list(watchlist) + all_held))
+        if not targets:
+            return
+        start = datetime.now(timezone.utc) - timedelta(
+            minutes=config.get("bar_lookback_minutes", 180)
+        )
+        try:
+            frames = await asyncio.to_thread(market.fetch_bars, targets, start)
+        except Exception as exc:
+            logger.error("Shadow bar fetch failed: %s", exc)
+            return
+        if not frames:
+            return
+
+        # Entries stay restricted to the watchlist: the extra frames above
+        # exist to manage exits, and must not silently widen the universe a
+        # candidate is allowed to open new positions in.
+        watch_set = set(watchlist)
+
+        stop_slip, cost_pct = self._friction(db)
 
         cooldown_minutes = float(config.get("cooldown_minutes", 30.0))
         default_max_hold = float(config.get("shadow_max_hold_hours", 24.0))
@@ -271,7 +298,8 @@ class ShadowRunner:
                 if room <= 0:
                     break
                 if (
-                    symbol in held_symbols
+                    symbol not in watch_set  # exit-only frame, not a candidate
+                    or symbol in held_symbols
                     or bars is None
                     or bars.empty
                     or self._in_cooldown(strategy.name, symbol)
