@@ -9,6 +9,24 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.33.0] - 2026-08-12
+
+### Changed
+- **The nightly optimizer skips the whole search while entries are
+  paused**, rather than running it and discarding the result.
+  `run_optimization` now returns immediately after reading config if
+  `entries_paused` is set — before `universe.get_watchlist()`, before
+  `fetch_history()`, before the grid — saving roughly 35 minutes of nightly
+  compute plus a 60-day multi-symbol bar fetch. The v2.31.0 guard sat
+  immediately before `db.set_config`, which correctly stopped config drift
+  mid-experiment but still paid full price for a winner nothing could use.
+  The skipped run is still recorded (`status: skipped_paused`) so the
+  optimizer-runs list explains the quiet night instead of showing a gap.
+  The late guard is deliberately kept as a **race guard**: a run that
+  starts unpaused and is paused during its ~35-minute window must still
+  refuse to write, and it re-reads config rather than trusting the opening
+  snapshot.
+
 ## [v2.32.1] - 2026-08-12
 
 ### Fixed

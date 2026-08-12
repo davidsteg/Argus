@@ -596,6 +596,38 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
     db = get_db()
     started_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
     params_before = db.get_config()
+
+    # Research mode: skip the whole search, not just the write (v2.33.0).
+    # v2.31.0 added a guard immediately before db.set_config, which stopped
+    # the config drift but still paid for a full grid every night —
+    # ~35 minutes of compute plus a 60-day multi-symbol bar fetch, for a
+    # winner that was then thrown away. Nothing downstream can use the
+    # result while entries are paused, so the cheapest correct run is no
+    # run. The late guard stays: a run that starts unpaused and is paused
+    # mid-flight must still refuse to write.
+    if bool(params_before.get("entries_paused", 0.0)):
+        db.add_log(
+            "OPTIMIZER",
+            f"{'Nightly' if trigger == 'nightly' else 'Manual'} optimization "
+            f"skipped — entries_paused=1 (research mode). No grid searched: "
+            f"the winner could not be applied anyway, and the config stays "
+            f"frozen so shadow track records remain comparable.",
+        )
+        db.record_optimizer_run({
+            "started_at": started_at,
+            "trigger": trigger,
+            "status": "skipped_paused",
+            "detail": (
+                "entries_paused=1: grid skipped entirely (no data fetch, no "
+                "search) — parameters frozen during research mode"
+            ),
+            "params_before": params_before,
+            "params_after": params_before,
+            "changed_keys": [],
+            "n_symbols": 0,
+        })
+        return None
+
     symbols = universe.get_watchlist(limit=OPTIMIZER_MAX_SYMBOLS)
 
     run: Dict[str, Any] = {
@@ -929,13 +961,13 @@ def run_optimization(trigger: str = "manual") -> Optional[Dict[str, float]]:
             best_params["rsi_short_signal"] = current.get("rsi_short_signal", 80.0)
             best_params["rsi_short_exit"] = current.get("rsi_short_exit", 20.0)
 
-        # Research mode (v2.31.0): while live entries are paused, the winner
-        # is measured and recorded but NOT applied. Shadow candidates read
-        # rsi_period / bracket multiples from the live config, so a nightly
-        # rewrite mid-experiment would make their track records a moving
-        # target — and with no live entries there is nothing for new
-        # parameters to trade anyway. The full grid + validation + review
-        # still ran above, so the run's verdict stays on record.
+        # Research-mode race guard. run_optimization returns early when
+        # entries_paused is set at kickoff (see the top of this function),
+        # so reaching here means the run STARTED unpaused and the flag was
+        # flipped during it — a 35-minute window. Re-read rather than trust
+        # the opening snapshot: shadow candidates read rsi_period and the
+        # bracket multiples from live config, so a write landing after the
+        # pause would make their track records a moving target.
         if bool(current.get("entries_paused", 0.0)):
             total_return, drawdown, trades = train_stats
             db.add_log(

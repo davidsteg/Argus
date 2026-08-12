@@ -10,9 +10,26 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.32.1"
+__version__ = "2.33.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.33.0",
+        "date": "2026-08-12",
+        "title": "Idle cost: the optimizer stops searching for a winner it cannot use",
+        "notes": [
+            "While entries are paused the nightly optimizer now skips the "
+            "entire run — no watchlist call, no 60-day multi-symbol bar "
+            "fetch, no grid search — instead of computing a winner for ~35 "
+            "minutes and then discarding it at the write guard added in "
+            "v2.31.0. Nothing downstream can use the result while the book "
+            "opens no positions, so the cheapest correct run is no run. The "
+            "run is still recorded (status skipped_paused) so the dashboard "
+            "shows why the night was quiet. The v2.31.0 write guard stays "
+            "as a race guard: a run that starts unpaused and is paused "
+            "mid-flight must still refuse to write.",
+        ],
+    },
     {
         "version": "2.32.1",
         "date": "2026-08-12",
