@@ -1,7 +1,10 @@
-# Argus backend — asynchronous trading engine + nightly optimizer.
+# Argus — single-container image: equities engine, crypto engine, and the
+# NiceGUI dashboard, run as three supervisord-managed processes so a crash
+# in one doesn't take the others down (see deploy/supervisord.conf).
 FROM python:3.11-slim
 
-# All internal daily resets and trading windows conform to Swiss time.
+# All internal daily resets, trading windows and rendered timestamps
+# conform to Swiss time.
 ENV TZ=Europe/Zurich \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -9,7 +12,7 @@ ENV TZ=Europe/Zurich \
     DB_PATH=/app/shared/argus_state.db
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tzdata \
+    && apt-get install -y --no-install-recommends tzdata supervisor \
     && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
     && echo $TZ > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
@@ -23,11 +26,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # /app/shared mount point stays a pure data directory for the SQLite volume.
 COPY shared/ /app/lib/shared/
 COPY backend/ /app/backend/
+COPY frontend/ /app/frontend/
+COPY deploy/supervisord.conf /etc/supervisor/conf.d/argus.conf
 
 RUN mkdir -p /app/shared
 
-WORKDIR /app/backend
+EXPOSE 8000 8001 8080
 
-EXPOSE 8000
-
-CMD ["python", "bot.py"]
+CMD ["supervisord", "-n", "-c", "/etc/supervisor/supervisord.conf"]

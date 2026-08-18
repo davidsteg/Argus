@@ -19,9 +19,6 @@ permissions:
 jobs:
   docker:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        service: [backend, frontend]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,7 +27,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: davidsteg/argus-${{ matrix.service }}
+          images: davidsteg/argus
           tags: |
             type=semver,pattern={{version}}
             type=raw,value=latest
@@ -48,15 +45,15 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ${{ matrix.service }}/Dockerfile
+          file: Dockerfile
           push: true
           # amd64 only — no QEMU emulation needed. Re-add linux/arm64 (and the
           # Set up QEMU step) if this ever needs to run on ARM hardware.
           platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          cache-from: type=gha,scope=argus
+          cache-to: type=gha,mode=max,scope=argus
 
   release:
     runs-on: ubuntu-latest

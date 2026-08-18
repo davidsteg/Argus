@@ -1,13 +1,8 @@
-# Development override: build images from local source instead of pulling
+# Development override: build the image from local source instead of pulling
 # from Docker Hub.
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 services:
-  trading_backend:
+  argus:
     build:
       context: .
-      dockerfile: backend/Dockerfile
-
-  trading_frontend:
-    build:
-      context: .
-      dockerfile: frontend/Dockerfile
+      dockerfile: Dockerfile

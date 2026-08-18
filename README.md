@@ -11,26 +11,35 @@ code is consciously changed and reviewed.
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                        Docker Compose                            │
-│                                                                  │
-│  ┌────────────────────────┐          ┌───────────────────────┐   │
-│  │  argus_backend  :8000  │          │  argus_frontend :8080 │   │
-│  │                        │          │                       │   │
-│  │ • Trading engine       │  SQLite  │ • NiceGUI dashboard   │   │
-│  │ • Regime filter (SPY)  │◄────────►│ • Equity/PnL charts   │   │
-│  │ • Nightly optimizer    │  db_data │ • Strategy settings   │   │
-│  │ • Debug & ops API      │          │ • EMERGENCY HARD STOP │   │
-│  └────────────────────────┘          └───────────────────────┘   │
-└──────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────┐
+│                        One Docker container                       │
+│                     (supervisord-managed processes)                │
+│                                                                     │
+│  ┌───────────────┐  ┌───────────────┐  ┌────────────────────────┐ │
+│  │ equities :8000│  │  crypto :8001 │  │   dashboard :8080      │ │
+│  │               │  │               │  │                        │ │
+│  │ • Trading     │  │ • Trading     │  │ • NiceGUI dashboard    │ │
+│  │   engine      │  │   engine      │  │ • Equity/PnL charts    │ │
+│  │ • Regime      │  │ • 24/7 spot,  │  │ • Strategy settings    │ │
+│  │   filter (SPY)│  │   long-only   │  │ • EMERGENCY HARD STOP  │ │
+│  │ • Nightly     │  │ • Debug & ops │  │ • Equities ⇄ Crypto    │ │
+│  │   optimizer   │  │   API         │  │   switcher             │ │
+│  │ • Debug & ops │  │               │  │                        │ │
+│  │   API         │  │               │  │                        │ │
+│  └───────┬───────┘  └───────┬───────┘  └───────────┬────────────┘ │
+│          │                  │                       │              │
+│          └──────────────────┴──────► SQLite ◄───────┘              │
+│                          shared db_data volume                     │
+└───────────────────────────────────────────────────────────────────┘
 ```
 
-All dashboard *data* comes straight from the shared SQLite volume — the
-engine publishes its cycle trace, market regime and environment into the
-`runtime_state` table every cycle. Only *actions* that must reach the
+All dashboard *data* comes straight from the shared SQLite volume — each
+engine publishes its cycle trace, market regime and environment into its
+own `runtime_state` table every cycle. Only *actions* that must reach a
 running engine process (resume from KILLED, run the optimizer now) call
-the backend debug API (`BACKEND_API_URL`); the EMERGENCY HARD STOP uses
-its own Alpaca client and works even if the engine is dead.
+that engine's debug API over `127.0.0.1` (`BACKEND_API_URL` /
+`CRYPTO_BACKEND_API_URL`); the EMERGENCY HARD STOP uses its own Alpaca
+client and works even if both engines are dead.
 
 ## The strategy — layered decision pipeline
 
@@ -97,13 +106,14 @@ past are rejected, and the previous configuration is kept.
 
 ```bash
 cp .env.example .env      # fill in your Alpaca paper keys
-docker compose up -d      # pulls davidsteg/argus-* from Docker Hub
+docker compose up -d      # pulls davidsteg/argus from Docker Hub
 ```
 
 - Dashboard: http://localhost:8080
-- Debug API (interactive docs): http://localhost:8000/docs
+- Equities debug API (interactive docs): http://localhost:8000/docs
+- Crypto debug API (interactive docs): http://localhost:8001/docs
 
-Images are published by CI whenever a version tag is pushed; update with
+The image is published by CI whenever a version tag is pushed; update with
 `docker compose pull && docker compose up -d`. Pin a specific release with
 `ARGUS_VERSION=2.2.3` in `.env` (default `latest`). To develop against
 local source instead:
@@ -166,7 +176,12 @@ the backend API.
 | `SENTIMENT_MODEL` | `claude-opus-4-8` | sentiment model (`claude-haiku-4-5` = cheapest) |
 | `TRADING_SYMBOLS` | `ALL` | `ALL` = dynamic most-actives watchlist, or `AAPL,MSFT,…` |
 | `REGIME_MAX_ANN_VOL` | `35` | annualized SPY vol (%) above which the tape is stressed |
-| `BACKEND_API_URL` | `http://trading_backend:8000` | how the dashboard reaches the debug API for actions |
+
+`BACKEND_API_URL` / `CRYPTO_BACKEND_API_URL` (how the dashboard reaches each
+engine's debug API for actions like resume/optimize-now) are fixed to
+`http://127.0.0.1:8000` / `:8001` in `deploy/supervisord.conf` — all three
+processes now share one container's network namespace, so there's nothing
+to configure via `.env`.
 
 Operational environment (`position_size_usd`, `risk_per_trade_usd`,
 `max_positions`, `daily_stop_loss`, `min_price_usd`, `cooldown_minutes`,
@@ -185,11 +200,13 @@ Strategy parameters (`rsi_period`, `rsi_buy_signal`, `rsi_exit_signal`,
 
 ```
 backend/
-  bot.py          # async trading engine + engine controller
-  api.py          # debug & operations FastAPI app (port 8000)
+  bot.py          # async trading engine + engine controller (equities and,
+                   # with MARKET=crypto, the crypto engine — same code)
+  api.py          # debug & operations FastAPI app (port 8000 equities /
+                   # 8001 crypto)
   optimizer.py    # nightly grid search with out-of-sample validation
   indicators.py   # shared RSI / ATR / VWAP + bracket math (live == backtest)
-  regime.py       # SPY market-regime filter (RISK_ON / CAUTION / RISK_OFF)
+  regime.py       # SPY/BTC market-regime filter (RISK_ON / CAUTION / RISK_OFF)
   sentiment.py    # layered news sentiment (Claude → keywords → neutral)
   universe.py     # static list or dynamic most-actives watchlist
 frontend/
@@ -197,13 +214,16 @@ frontend/
 shared/
   database.py     # thread-safe SQLite layer (WAL) on a shared volume
   version.py      # version + release notes (rendered in the dashboard)
+deploy/
+  supervisord.conf  # runs the three processes above inside one container
+Dockerfile        # single image built from all of the above
 ```
 
 ## Security notes
 
 - `.env` is git-ignored — commit `.env.example` only, never credentials.
 - Paper trading only; keys should be Alpaca *paper* keys.
-- The debug API has no auth — do not expose port 8000 publicly.
+- Neither debug API has auth — do not expose port 8000 or 8001 publicly.
 
 ## Disclaimer
 

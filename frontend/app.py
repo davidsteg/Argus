@@ -59,13 +59,15 @@ logger = logging.getLogger("argus.frontend")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
 # Actions that must reach the running engine (resume, optimize) go through
-# the backend debug API on the compose network. Data never does.
-BACKEND_API_URL = os.getenv("BACKEND_API_URL", "http://trading_backend:8000")
+# the backend debug API. Since v2.34.0 all processes share one container's
+# network namespace, so this is 127.0.0.1, not a compose service name. Data
+# never goes through here.
+BACKEND_API_URL = os.getenv("BACKEND_API_URL", "http://127.0.0.1:8000")
 # Crypto engine (optional): its own DB file in the shared volume + its own debug
 # API. When CRYPTO_DB_PATH is set, the dashboard shows an Equities ⇄ Crypto
 # switcher; otherwise it's equities-only exactly as before.
 CRYPTO_DB_PATH = os.getenv("CRYPTO_DB_PATH", "")
-CRYPTO_BACKEND_API_URL = os.getenv("CRYPTO_BACKEND_API_URL", "")
+CRYPTO_BACKEND_API_URL = os.getenv("CRYPTO_BACKEND_API_URL", "http://127.0.0.1:8001")
 MARKETS = ["equity", "crypto"] if CRYPTO_DB_PATH else ["equity"]
 
 

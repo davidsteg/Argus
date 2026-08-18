@@ -9,6 +9,28 @@ Release notes are also maintained in code at `shared/version.py` — the
 dashboard shows them via the version chip in the header, and the backend
 serves them at `GET /version`. Keep both in sync.
 
+## [v2.34.0] - 2026-08-18
+
+### Changed
+- **Single-container deploy.** Argus now ships as one Docker image
+  (`davidsteg/argus`) instead of separate `argus-backend` /
+  `argus-frontend` images. The equities engine, the crypto engine
+  (`MARKET=crypto`) and the dashboard run as three supervisord-managed
+  processes inside one container (`deploy/supervisord.conf`), sharing the
+  same SQLite volume as before but reaching each other over `127.0.0.1`
+  instead of compose DNS. Each process keeps its own autorestart policy,
+  so a crash in one engine still doesn't take the dashboard or the other
+  engine down.
+- `docker-compose.yml` collapses to a single `argus` service publishing
+  all three ports (8000 equities API, 8001 crypto API, 8080 dashboard);
+  `docker-compose.dev.yml` now builds the single root `Dockerfile`; CI
+  (`.github/workflows/docker-publish.yml`) builds and pushes one image
+  instead of a backend/frontend matrix.
+- Deploying this release requires pulling the new image and recreating
+  the stack (`docker compose down && docker compose pull && docker
+  compose up -d`) rather than the usual `pull && up -d`, since the
+  container topology itself changed.
+
 ## [v2.33.0] - 2026-08-12
 
 ### Changed

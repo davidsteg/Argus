@@ -10,9 +10,37 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-__version__ = "2.33.0"
+__version__ = "2.34.0"
 
 RELEASES: List[Dict[str, object]] = [
+    {
+        "version": "2.34.0",
+        "date": "2026-08-18",
+        "title": "Single-container deploy: one image, one supervisord, three processes",
+        "notes": [
+            "Argus now ships as ONE Docker image instead of three. The "
+            "equities engine, the crypto engine (MARKET=crypto) and the "
+            "dashboard run as supervisord-managed processes inside one "
+            "container (deploy/supervisord.conf), sharing the same SQLite "
+            "volume as before but talking to each other over 127.0.0.1 "
+            "instead of compose DNS. Each process keeps its own "
+            "autorestart, so one crashing engine still doesn't take the "
+            "others down — the closest single-container equivalent of the "
+            "old per-service restart: unless-stopped.",
+            "docker-compose.yml collapses to a single 'argus' service "
+            "pulling davidsteg/argus (was davidsteg/argus-backend + "
+            "davidsteg/argus-frontend), publishing all three ports (8000 "
+            "equities API, 8001 crypto API, 8080 dashboard). "
+            "docker-compose.dev.yml now builds the one root Dockerfile. "
+            "CI (.github/workflows/docker-publish.yml) builds and pushes "
+            "the single image instead of a backend/frontend matrix.",
+            "Deploying this release means pulling the new image and "
+            "recreating the stack (docker compose down && docker compose "
+            "pull && docker compose up -d) — the old three-container "
+            "compose file and images stay usable on already-running hosts "
+            "but won't receive further updates.",
+        ],
+    },
     {
         "version": "2.33.0",
         "date": "2026-08-12",

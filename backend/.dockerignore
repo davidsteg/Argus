@@ -1,7 +1,0 @@
-frontend/
-docker-compose.yml
-.env
-*.md
-.git/
-__pycache__/
-*.pyc

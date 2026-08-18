@@ -1,8 +1,11 @@
 # AGENTS.md — Rules for AI Agents Working on Argus
 
 Argus is an async paper-trading bot on Alpaca (`alpaca-py`) with a NiceGUI
-dashboard, running as two Docker containers sharing a SQLite volume. Read
-this before touching anything — it encodes hard invariants, the actual
+dashboard. Since v2.34.0 it ships as ONE Docker container: the equities
+engine, the crypto engine (`MARKET=crypto`) and the dashboard run as three
+supervisord-managed processes (`deploy/supervisord.conf`) sharing a SQLite
+volume and talking to each other over `127.0.0.1` instead of compose DNS.
+Read this before touching anything — it encodes hard invariants, the actual
 release pipeline, and mistakes already made and fixed once.
 
 ## Hard safety invariants — never weaken these
@@ -228,12 +231,12 @@ Before assuming code is broken, hit the running instance:
 2. Commit, then `git tag -a vX.Y.Z -m "..."`, then
    `git push origin master --follow-tags`.
 3. Pushing a `vX.Y.Z` tag triggers
-   `.github/workflows/docker-publish.yml`: builds and pushes
-   `davidsteg/argus-backend` and `davidsteg/argus-frontend` to Docker Hub
-   (tagged `X.Y.Z` + `latest`), then auto-creates a GitHub Release whose
-   body is the CHANGELOG section extracted in step 1. This only fires on
-   real version tags — never push an ad-hoc tag to test it, it will
-   publish to Docker Hub for real.
+   `.github/workflows/docker-publish.yml`: builds and pushes the single
+   `davidsteg/argus` image (tagged `X.Y.Z` + `latest`) from the root
+   `Dockerfile`, then auto-creates a GitHub Release whose body is the
+   CHANGELOG section extracted in step 1. This only fires on real version
+   tags — never push an ad-hoc tag to test it, it will publish to Docker
+   Hub for real.
 4. Tag format is `vMAJOR.MINOR.PATCH` (the "v" prefix is mandatory — the
    workflow's tag filter and the changelog-extraction step both depend on
    it matching `v[0-9]+.[0-9]+.[0-9]+`).
